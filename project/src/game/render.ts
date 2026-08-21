@@ -4,7 +4,7 @@ import {
   TERRAIN_DEFS, TURRET_DEFS, PROJECTILE_KIND_COLOR, MODULE_DEFS, BASE_CELL,
 } from './config'
 import { isInnerCell, LEVEL } from './level'
-import { artMounts, beamLength, defOf, trackPlacements, turretRenderKey, dirX, dirY, fortressDef, fortressRect, fortressShapeSet, fortressInteriorSet, hardpointOf, MISSILE_FADE, missileVisHeading, moduleCells, moduleFoot, muzzlePos, RACK_RELOAD_ANIM, rackCounts, rackMissilePos, turretCenter, DEATH_MAIN_T, DEATH_END_T, type MuzzleEvent } from './engine'
+import { artMounts, beamLength, defOf, eventRandom, trackPlacements, turretRenderKey, dirX, dirY, fortressDef, fortressRect, fortressShapeSet, fortressInteriorSet, hardpointOf, MISSILE_FADE, missileVisHeading, moduleCells, moduleFoot, muzzlePos, RACK_RELOAD_ANIM, rackCounts, rackMissilePos, turretCenter, DEATH_MAIN_T, DEATH_END_T, type MuzzleEvent } from './engine'
 import { SPECIAL_BOOST_NAME } from './config'
 
 // ---- 堡垒贴图缓存（dataURL；render 每帧轮询，加载完成自动生效；贴图仅视觉不参与碰撞） ----
@@ -39,6 +39,7 @@ import { assetImage, getAsset } from './assetlib'
 import { createPool, glowFlicker, spawnBurst, spawnTrail, stepParticles, type ParticlePool } from './particles'
 import { drawExplosionLayers, drawImpactFlash, drawParticlePool, hexA, tintedFx } from './fxDraw' // v2.55：特效画法统一走共用层
 import { emitFortressEffects, updateTrackMarks, TRACK_MARK_LIFE, TRACK_MARK_FADE, TRACK_MARK_ALPHA, type TrackMark, type TrackMarkState } from './fortressFx' // v2.40 堡垒特效点粒子化；v2.41 履带印；v2.43 印透明度/渐隐参数
+import { craterOpacity, updateCraters, type Crater } from './craters'
 import { rmxpAutotileIndex, rmxpQuarterSrc, RMXP_SUBTILES } from './autotile'
 import type { ProjectileArtDef } from './config'
 
@@ -393,6 +394,45 @@ function drawRmxpGroundLayer(
   ctx.imageSmoothingEnabled = prevSmooth
 }
 
+// ---- v2.57 地面弹坑：启动时按 seed 烘焙少量纹理变体，世界坐标 decal 复用 ----
+const craterTextures = new Map<number, HTMLCanvasElement>()
+function craterTexture(seed: number): HTMLCanvasElement | null {
+  if (typeof document === 'undefined') return null
+  const key = seed & 15
+  const cached = craterTextures.get(key)
+  if (cached) return cached
+  const cv = document.createElement('canvas')
+  cv.width = 96
+  cv.height = 96
+  const c = cv.getContext('2d')
+  if (!c) return null
+  c.translate(48, 48)
+  c.rotate((eventRandom(key, 0) - 0.5) * 0.8)
+  c.scale(1, 0.82 + eventRandom(key, 1) * 0.12)
+  const burn = c.createRadialGradient(-5, -5, 3, 0, 0, 43)
+  burn.addColorStop(0, 'rgba(16,14,12,0.88)')
+  burn.addColorStop(0.48, 'rgba(35,29,23,0.78)')
+  burn.addColorStop(0.72, 'rgba(73,57,40,0.48)')
+  burn.addColorStop(1, 'rgba(40,31,24,0)')
+  c.fillStyle = burn
+  c.beginPath(); c.arc(0, 0, 44, 0, Math.PI * 2); c.fill()
+  c.strokeStyle = 'rgba(151,119,78,0.42)'
+  c.lineWidth = 4
+  c.beginPath(); c.ellipse(1, 2, 35, 29, 0, Math.PI * 0.08, Math.PI * 0.92); c.stroke()
+  c.strokeStyle = 'rgba(12,10,9,0.62)'
+  c.lineWidth = 3
+  c.beginPath(); c.ellipse(-1, 1, 30, 24, 0, Math.PI * 1.02, Math.PI * 1.9); c.stroke()
+  for (let i = 0; i < 9; i++) {
+    const a = eventRandom(key, 10 + i) * Math.PI * 2
+    const d = 24 + eventRandom(key, 30 + i) * 17
+    const rr = 1 + eventRandom(key, 50 + i) * 2.2
+    c.fillStyle = `rgba(42,32,23,${0.25 + eventRandom(key, 70 + i) * 0.35})`
+    c.beginPath(); c.arc(Math.cos(a) * d, Math.sin(a) * d, rr, 0, Math.PI * 2); c.fill()
+  }
+  craterTextures.set(key, cv)
+  return cv
+}
+
 // ---- 轻量粒子系统（渲染端纯视觉，wall-clock 驱动；引擎零侵入）----
 // v2.40 双通道：groundPool = 地面层（地形之上/堡垒底座之下：尘土等）；fxPool = 空中层（最上，现状口径）
 const fxPool: ParticlePool = createPool()
@@ -401,6 +441,9 @@ const fxEmitterAccs = new Map<string, number>() // v2.40 堡垒特效点 id → 
 const trackMarks: TrackMark[] = [] // v2.41 履带印（地面层）
 const trackMarkSt: TrackMarkState = { acc: [], prevPhase: [], moving: [] }
 let trackMarkTime = -1 // v2.41：游戏重开检测（s.time 回退 → 清印）
+const craters: Crater[] = []
+const craterSeen = new Set<number>()
+let craterTime = -1
 let fxLastStep = -1
 const trailAcc = new Map<number, number>() // 弹丸 id → 尾焰发射累积器
 const projPrev = new Map<number, { x: number; y: number }>() // 弹丸 id → 上帧插值位置（尾焰惯性继承的弹速估算）
@@ -424,6 +467,11 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
   stepParticles(groundPool, fxDt)
   // v2.40 堡垒特效点粒子发射（编辑模式不发射）：粒子离口即世界空间独立运动，不再跟船
   if (!ui.edit) emitFortressEffects(s, fortressDef(s), fxDt, groundPool, fxPool, fxEmitterAccs)
+  if (!ui.edit) {
+    if (craterTime >= 0 && s.time < craterTime) { craters.length = 0; craterSeen.clear() }
+    craterTime = s.time
+    updateCraters(craters, craterSeen, s.explosions, s.time)
+  }
   // v2.53 毁灭序列浓烟：内伤期缓释、主爆后加浓（累加器节率，与 emitFortressEffects 同模式）
   if (!ui.edit && s.fortress.dyingT >= 0 && fxDt > 0) {
     const dead53 = s.fortress.dyingT >= DEATH_MAIN_T
@@ -538,6 +586,26 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
       ctx.fill()
     }
   }
+
+  // ---- 地面弹坑（v2.57：地形之上、物体与履带印之下；纯装饰，不进引擎持久状态） ----
+  if (!ui.edit) for (const mk of craters) {
+    const age = Math.max(0, s.time - mk.born)
+    const alpha = 0.82 * craterOpacity(age)
+    if (alpha <= 0.01) continue
+    const tex = craterTexture(mk.seed)
+    const size = mk.r * 2 * cell
+    ctx.save()
+    ctx.translate(X(mk.x), Y(mk.y))
+    ctx.rotate((eventRandom(mk.seed, 90) - 0.5) * 0.6)
+    ctx.globalAlpha = alpha
+    if (tex) ctx.drawImage(tex, -size / 2, -size * 0.38, size, size * 0.76)
+    else {
+      ctx.fillStyle = '#2B241D'
+      ctx.beginPath(); ctx.ellipse(0, 0, size / 2, size * 0.32, 0, 0, Math.PI * 2); ctx.fill()
+    }
+    ctx.restore()
+  }
+  ctx.globalAlpha = 1
 
   // ---- 物体（油桶/废墟/岩石；编辑模式由 draft 层接管） ----
   if (!ui.edit) for (const o of s.objects) {
@@ -1407,6 +1475,7 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
 
   // ---- 爆炸（v2.54 统一程序化画法：火球+软边/描边冲击环+瞬时照明+拉丝火花/烟尘；门控不变：无 blastRadius 不产生带 ammoId 事件；v2.55 画法走 fxDraw 共用层）----
   for (const ex of s.explosions) {
+    if (ex.kind === 'groundImpact') continue // v2.57：仅用于地面小坑，不播放爆炸视觉
     if (ex.kind) { // v2.53 堡垒毁灭演出爆炸（v2.54 起与弹丸爆炸共用画法；固定橙金配色，不依赖弹丸美术库）
       const isMain = ex.kind === 'deathMain'
       const maxTtl = ex.max ?? 0.4

@@ -24,10 +24,11 @@ import { applyConfig, applyConfigSmart, encodeBase64, exportConfig, exportConfig
 import { addAsset, filterAssets, getAsset, importUploads, listAssets, removeAsset, uploadsForExport, ASSET_CATEGORY_NAME } from '../src/game/assetlib'
 import { createPool, glowFlicker, gradientColorKey, ringProgress, spawnBurst, spawnTrail, stepParticles } from '../src/game/particles'
 import { effectParams, effectWorldPos, emitFortressEffects, trackMarkStep, updateTrackMarks, TRACK_MARK_CAP, TRACK_MARK_LIFE, type TrackMark, type TrackMarkState } from '../src/game/fortressFx'
+import { craterOpacity, craterRadius, updateCraters, CRATER_CAP, CRATER_LIFE, type Crater } from '../src/game/craters'
 import { clampViewY , wallFaceInfo , wallVertexInfo , classifyWallTile } from '../src/game/render'
 import { canPlaceBaseCell, COLS_MIN, defaultLevel, invalidateWallInfo, isBaseCell, isInnerCell, isWallSegment, LEVEL, mergeBaseCells, reanchorCols, reanchorRows, resetLevel } from '../src/game/level'
 import { rmxpAutotileIndex, rmxpQuarterSrc, RMXP_SUBTILES } from '../src/game/autotile'
-import type { Enemy, GameState, Turret } from '../src/game/engine'
+import type { Enemy, ExplosionFx, GameState, Turret } from '../src/game/engine'
 
 // ---------- 确定性随机 ----------
 let seed = 42
@@ -6035,6 +6036,48 @@ console.log('== 用例 54：移动堡垒验收 ==')
   check('v2.42：静止→移动立即落启动印（0.05 格即印，余量保留）', startOk, `n=${marks.length} acc=${st.acc[0]?.toFixed(2)}`)
   check('v2.42：接地点=运动方向后端（前进印落 y2 端 / 倒退印落 y1 端）', rearOk && frontOk,
     `rear y=${marks2[0]?.y.toFixed(1)} exp=${(cy + 2.5 - fr.h / 2).toFixed(1)} front y=${marks3[0]?.y.toFixed(1)} exp=${(cy + 0.5 - fr.h / 2).toFixed(1)}`)
+}
+
+// --- v2.57 地面弹坑：爆炸/落地事件首见生成、45s 生命周期、120 FIFO、实弹射程终点小坑 ---
+{
+  const marks: Crater[] = []
+  const seen = new Set<number>()
+  const events: ExplosionFx[] = [
+    { id: 10, x: 2, y: 3, r: 1, ttl: 0.3 },
+    { id: 11, x: 4, y: 5, r: 3, ttl: 0.6, kind: 'deathMain' },
+    { id: 12, x: 6, y: 7, r: 0.2, ttl: 0.12, kind: 'groundImpact' },
+  ]
+  updateCraters(marks, seen, events, 10)
+  updateCraters(marks, seen, events, 10.1) // 同一事件多帧可见，不重复落坑
+  check('v2.57：爆炸首见仅生成一个坑，主爆最大、落地弹固定小坑',
+    marks.length === 3 && craterRadius(events[1]) > craterRadius(events[0]) && craterRadius(events[2]) === 0.2,
+    `n=${marks.length} r=${marks.map(m => m.r.toFixed(2))}`)
+
+  const many: ExplosionFx[] = Array.from({ length: CRATER_CAP + 10 }, (_, i) => ({ id: 100 + i, x: i, y: 0, r: 1, ttl: 0.3 }))
+  updateCraters(marks, seen, many, 11)
+  const fadeOk = craterOpacity(30) === 1 && Math.abs(craterOpacity(37.5) - 0.5) < 1e-9 && craterOpacity(CRATER_LIFE) === 0
+  const fifoOk = marks.length === CRATER_CAP && marks[0].seed === 110
+  updateCraters(marks, seen, [], 11 + CRATER_LIFE + 0.1)
+  check('v2.57：弹坑 120 FIFO、前30s常显/末15s渐隐、45s过期',
+    fadeOk && fifoOk && marks.length === 0,
+    `fade=${fadeOk} fifo=${fifoOk} left=${marks.length}`)
+
+  let s = arena()
+  s.objects = []
+  const pId = s.nextId++
+  s.projectiles.push({
+    id: pId, kind: 'bullet', defId: 'mg', level: 1,
+    x: 5, y: 5, px: 5, py: 5, heading: Math.PI / 2,
+    damage: 1, traveled: 99, maxTravel: 100, shooter: 0, hitIds: [],
+    t: 0, flightTime: 0, sx: 0, sy: 0, tx: 0, ty: 0,
+    speed: 0, turnRate: 0, guided: false, targetId: null,
+    lockX: 0, lockY: 0, lostLock: false, prevDist: -1, weavePhase: 0,
+  })
+  s = tick(s, 0.05)
+  const landing = s.explosions.find(ex => ex.kind === 'groundImpact')
+  check('v2.57：未命中实弹射程耗尽产生无伤害落地小坑事件',
+    s.projectiles.length === 0 && landing?.r === 0.2 && landing.ammoId === undefined,
+    `projectiles=${s.projectiles.length} landing=${JSON.stringify(landing)}`)
 }
 
 // --- v2.44 预览大力喷射补弹种门控：仅导弹吃 ×3 爆发，实弹/榴弹预览与实战一致（无爆发） ---

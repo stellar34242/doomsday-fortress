@@ -939,3 +939,6 @@ e2e：下拉 3 选项、切延迟制导出现延迟时间输入；tsc；版本�
 - 建立“末日堡垒”Git 迁移基线；依赖恢复改为 Windows/POSIX 双脚本，统一按 `package-lock.json` 重建当前平台依赖。
 - 新增 `npm run verify`，串行执行类型检查、611 项 sim 回归、生产构建和 public 素材同步。
 - 引擎精度散布、导弹摆动相位、出怪位置由 `eventRandom(eventId, stream)` 派生，`engine.ts` 不再调用 `Math.random`；设定依据见 `project/docs/炮塔编辑器设计.md` §4.8、§13.3。
+
+## v2.57：地面弹坑（2026-08-21）
+- 爆炸按事件半径留下程序化焦痕浅坑，未命中弹丸射程耗尽留下固定小坑；纯渲染层 decal，120 个 FIFO、45 秒寿命且末 15 秒渐隐，设定依据见 `project/docs/战场编辑器设计.md`「v2.57 地面弹坑」。

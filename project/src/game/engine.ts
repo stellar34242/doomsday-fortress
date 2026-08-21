@@ -151,7 +151,7 @@ export function missileVisHeading(p: Projectile, def: TurretDef): number {
 }
 
 export interface BurnZone { id: number; x: number; y: number; r: number; damage: number; interval: number; timer: number; left: number }
-export interface ExplosionFx { id: number; x: number; y: number; r: number; ttl: number; max?: number; ammoId?: string; hx?: number; hy?: number; hspeed?: number; kind?: 'deathSmall' | 'deathMain' } // ammoId = 弹丸美术库引用；hx/hy = 命中方向单位向量、hspeed = 命中弹丸速率(格/s)（方向偏置/速度继承用；非弹丸爆炸不带）；v2.53 max = 初始 ttl（渲染进度基准，缺省按 0.35）；kind = 堡垒毁灭演出爆炸（不依赖弹丸美术配置，渲染端固定配色）
+export interface ExplosionFx { id: number; x: number; y: number; r: number; ttl: number; max?: number; ammoId?: string; hx?: number; hy?: number; hspeed?: number; kind?: 'deathSmall' | 'deathMain' | 'groundImpact' } // ammoId = 弹丸美术库引用；hx/hy = 命中方向单位向量、hspeed = 命中弹丸速率(格/s)（方向偏置/速度继承用；非弹丸爆炸不带）；v2.53 max = 初始 ttl（渲染进度基准，缺省按 0.35）；kind = 堡垒毁灭演出爆炸，或 v2.57 无伤害的实弹落地事件
 
 // v2.53 堡垒毁灭序列（待开发 #15 落地）：hp 归零 → dying 计时（不立即判负）→ 内伤连锁小爆 → 主爆（AOE）→ 残骸余烟 → lost
 export const DEATH_SPARK_T = [0, 0.25, 0.55] // 内伤小爆时刻（s）
@@ -2322,7 +2322,11 @@ function updateBullet(s: GameState, p: Projectile, dt: number): boolean {
     }
     if (p.hitIds.length >= maxTargets) return false
   }
-  if (p.traveled >= p.maxTravel) return false
+  if (p.traveled >= p.maxTravel) {
+    // v2.57：未命中实弹射程耗尽落地，只发无伤害事件供渲染层留下小弹坑。
+    s.explosions.push({ id: s.nextId++, x: p.x, y: p.y, r: 0.2, ttl: 0.12, max: 0.12, kind: 'groundImpact' })
+    return false
+  }
   return true
 }
 
