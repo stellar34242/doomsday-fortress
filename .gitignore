@@ -19,4 +19,3 @@ Thumbs.db
 # 交接包中的平台依赖缓存可由锁文件重建
 handover_tools/node_modules_cache.tar.gz
 handover_tools/node_modules_cache.locksha
-

@@ -11,8 +11,10 @@ React 19、TypeScript、Vite、Tailwind CSS 与 Canvas 2D。
 ## 开发入口
 
 ```bash
+npm ci
 npm run dev
 npm run build
+npm run verify
 ```
 
-核心逻辑位于 `src/game/`，主界面位于 `src/components/GamePreview.tsx`。完整的架构、验证流程和文档索引见 `docs/开发交接.md`。
+`npm run verify` 会依次执行类型检查、无头模拟回归、生产构建和素材同步。核心逻辑位于 `src/game/`，主界面位于 `src/components/GamePreview.tsx`。完整的架构、验证流程和文档索引见 `docs/开发交接.md`。

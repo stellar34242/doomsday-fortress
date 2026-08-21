@@ -934,3 +934,8 @@ e2e：下拉 3 选项、切延迟制导出现延迟时间输入；tsc；版本�
 
 ## v2.55：特效画法共用层 fxDraw（2026-08-21，版本 b45d4df）
 - 新增 src/game/fxDraw.ts（粒子池/爆炸矢量层/命中闪光/染色缓存/hex 工具），render.ts 与弹丸预览（DebugPanel AmmoPreview）删除平行实现改调共用层；炮塔美术预览统一为 backlog #15 第二步。
+
+## v2.56：迁移加固与事件 ID 确定性随机（2026-08-21）
+- 建立“末日堡垒”Git 迁移基线；依赖恢复改为 Windows/POSIX 双脚本，统一按 `package-lock.json` 重建当前平台依赖。
+- 新增 `npm run verify`，串行执行类型检查、611 项 sim 回归、生产构建和 public 素材同步。
+- 引擎精度散布、导弹摆动相位、出怪位置由 `eventRandom(eventId, stream)` 派生，`engine.ts` 不再调用 `Math.random`；设定依据见 `project/docs/炮塔编辑器设计.md` §4.8、§13.3。

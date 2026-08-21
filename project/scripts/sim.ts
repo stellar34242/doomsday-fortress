@@ -7,7 +7,7 @@ import {
 import type { BattleObject, EnemyKind, FortressDef, TurretDef, TurretTag } from '../src/game/config'
 import { trackPlacements,
   allySpawnPoint, artMounts, blockerAt, turretRenderKey, buildModule, canMountTurret, canPlaceModule, computePathField, demolishAt, demolishModule, dirX, dirY, wrapAngle,
-  fortressCells, fortressRect, initialState,
+  eventRandom, fortressCells, fortressRect, initialState,
   fortressCooling, fortressDef, fortressMaxHp, fortressSpeed, fortressTurnSpeed, hardpointArcContains, hardpointWorldPos, moduleBonuses, moduleCells, moduleDefOf, moduleFoot, moduleSpecialMult, mountTurret, muzzlePos, placeBaseCellAt, placeTurret, resourceCaps,
   syncDerivedWalls, tick,
   turretRangeBonus, unmountTurret,
@@ -555,7 +555,9 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   Math.random = zeroRandom
   const mgP = TURRET_DEFS.find(d => d.id === 'mg')!
   const pierce0 = mgP.pierce
+  const accuracy0 = mgP.accuracy
   mgP.pierce = { count: 2, decay: 0.3 } // v1.72：口令出厂已改无穿透；本用例显式注入穿透参数测机制
+  mgP.accuracy = 0 // 隔离穿透机制，不依赖全局随机数关闭散布
   let s = arena()
   mkTurret(s, 'mg', 6, 20) // 伤害 12，穿透 2，衰减 30%
   const es = [17, 16, 15, 14].map(y => mkEnemy(s, 'walker', 6.5, y))
@@ -567,6 +569,7 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   check('第 2 个伤害 70%', Math.abs(h2 / h1 - 0.7) < 0.02, `${h2}/${h1}`)
   check('第 3 个伤害 49%', Math.abs(h3 / h1 - 0.49) < 0.02, `${h3}/${h1}`)
   mgP.pierce = pierce0
+  mgP.accuracy = accuracy0
 }
 
 // --- 用例 6：连发 3、弹药不足时射出可负担发数后停射 ---
@@ -672,6 +675,9 @@ console.log('== v1.74 口令素材沉淀验收 ==')
 // --- 用例 12：非制导导弹锁定原落点 ---
 {
   Math.random = zeroRandom
+  const cruise = TURRET_DEFS.find(d => d.id === 'cruise')!
+  const accuracy0 = cruise.accuracy
+  cruise.accuracy = 0 // 隔离锁定落点机制，不依赖全局随机数关闭散布
   let s = arena()
   const t = mkTurret(s, 'cruise', 6, 20) // 射程 100–300m = 4–12 格
   const e = mkEnemy(s, 'walker', 6.5, 10)
@@ -700,6 +706,7 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   check('非制导导弹锁定发射瞬间落点', launched && Math.hypot(lockX - 6.5, lockY - 10) < 0.01, `lock=(${lockX},${lockY})`)
   check('导弹仍飞向原坐标爆炸', fxX >= 0 && Math.hypot(fxX - lockX, fxY - lockY) < 0.3)
   check('移出落点的目标不受爆炸伤害', ee.hp === ee.maxHp, `hp=${ee.hp}`)
+  cruise.accuracy = accuracy0
 }
 
 // --- 用例 13a：制导导弹追踪命中 ---
@@ -2370,17 +2377,20 @@ const crossOf = (lx: number, ly: number, tx: number, ty: number, px: number, py:
 function weaveRun(curve: number | undefined): number[] {
   Math.random = zeroRandom
   const cruise = TURRET_DEFS.find(d => d.id === 'cruise')!
+  const accuracy0 = cruise.accuracy
+  cruise.accuracy = 0 // 隔离曲线机制，不依赖全局随机数关闭散布
   if (curve === undefined) delete cruise.missileCurve
   else cruise.missileCurve = curve
   let s = arena()
   mkTurret(s, 'cruise', 6, 20) // 中心 (7,21)
-  mkEnemy(s, 'walker', 6.5, 12) // 锁定落点（zeroRandom 无散布）
+  mkEnemy(s, 'walker', 6.5, 12) // 锁定落点（显式 accuracy=0，无散布）
   const crosses: number[] = []
   s = run(s, 3, 0.05, g => {
     const p = g.projectiles.find(pj => pj.defId === 'cruise')
     if (p) crosses.push(crossOf(7, 21, 6.5, 12, p.x, p.y))
   })
   delete cruise.missileCurve
+  cruise.accuracy = accuracy0
   return crosses
 }
 
@@ -6202,6 +6212,30 @@ console.log('== 用例 54：移动堡垒验收 ==')
   drop('t-def')
 
   ENEMY_DEFS.walker.speed = spdW; ENEMY_DEFS.brute.speed = spdB; ENEMY_DEFS.flyer.speed = spdF
+}
+
+console.log('== 迁移加固：引擎确定性随机验收 ==')
+{
+  const a = arena()
+  a.phase = 'combat'
+  a.spawnQueue = [{ kind: 'walker', delay: 0 }]
+  a.spawnTimer = 0
+  const b = structuredClone(a)
+  const savedRandom = Math.random
+  try {
+    Math.random = () => { throw new Error('引擎不应调用 Math.random') }
+    const nextA = tick(a, 0.05)
+    const nextB = tick(b, 0.05)
+    check('事件随机：相同状态与输入生成相同出怪位置',
+      nextA.enemies.length === 1 && nextA.enemies[0].x === nextB.enemies[0].x,
+      `a=${nextA.enemies[0]?.x} b=${nextB.enemies[0]?.x}`)
+    check('事件随机：不同事件/流得到不同样本',
+      eventRandom(42, 0) !== eventRandom(43, 0) && eventRandom(42, 0) !== eventRandom(42, 1))
+  } catch (error) {
+    check('引擎逻辑不调用 Math.random', false, String(error))
+  } finally {
+    Math.random = savedRandom
+  }
 }
 
 // v1.72：总结移至真正末尾（此前在 case66 之前，尾部用例失败不会被门禁捕获）

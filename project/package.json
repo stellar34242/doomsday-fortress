@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.app.json",
+    "sim": "node scripts/run-sim.mjs",
+    "build": "tsc -b && vite build && node scripts/copy-public.mjs",
+    "verify": "node scripts/verify.mjs",
     "lint": "eslint .",
     "preview": "vite preview"
   },

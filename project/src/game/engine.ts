@@ -269,6 +269,17 @@ export function bearing(dx: number, dy: number): number {
 export function dirX(a: number): number { return Math.sin(a) }
 export function dirY(a: number): number { return -Math.cos(a) }
 
+/** 事件 id 派生的确定性随机数。同一状态与输入必得同一结果，不依赖进程级 Math.random。 */
+export function eventRandom(eventId: number, stream = 0): number {
+  let x = (eventId ^ Math.imul(stream + 1, 0x9e3779b9)) >>> 0
+  x ^= x >>> 16
+  x = Math.imul(x, 0x7feb352d)
+  x ^= x >>> 15
+  x = Math.imul(x, 0x846ca68b)
+  x ^= x >>> 16
+  return (x >>> 0) / 4294967296
+}
+
 export function defOf(defId: string): TurretDef {
   const d = TURRET_DEFS.find(d => d.id === defId)
   if (!d) throw new Error(`unknown turret def ${defId}`)
@@ -1729,10 +1740,11 @@ function aim(s: GameState, t: Turret, def: TurretDef, factor: number): AimResult
 // lastDt：aim/旋转步长使用的本帧 dt（updateTurrets 入口设置）
 let lastDt = 0.1
 
-function accuracyOffset(radiusM: number): { dx: number; dy: number } {
+function accuracyOffset(eventId: number, radiusM: number): { dx: number; dy: number } {
   // §6.3：以瞄准点为圆心、精度值为半径随机取命中点
-  const a = Math.random() * TAU
-  const r = Math.sqrt(Math.random()) * m2c(radiusM)
+  if (radiusM <= 0) return { dx: 0, dy: 0 }
+  const a = eventRandom(eventId, 0) * TAU
+  const r = Math.sqrt(eventRandom(eventId, 1)) * m2c(radiusM)
   return { dx: Math.cos(a) * r, dy: Math.sin(a) * r }
 }
 
@@ -1843,7 +1855,7 @@ function fireGunShot(s: GameState, t: Turret, def: TurretDef, target: Enemy, dt:
       s.impacts.push({ id: s.nextId++, x: hx, y: hy, ttl: 0.15, max: 0.15, ammoId: def.art.projectile })
     }
   } else if (def.type === 'direct') {
-    const off = accuracyOffset(def.accuracy ?? 0)
+    const off = accuracyOffset(s.nextId, def.accuracy ?? 0)
     const ax = target.x + off.dx
     const ay = target.y + off.dy
     const h = bearing(ax - c.x, ay - c.y)
@@ -1865,7 +1877,7 @@ function fireGunShot(s: GameState, t: Turret, def: TurretDef, target: Enemy, dt:
     // 直射弹丸不推发射曳光线：弹丸尾迹由 render 按弹丸美术配置绘制（v2.46：无尾焰配置=无尾迹），
     // 发射瞬间到目标点的整条直线会造成"先拉一条直线再出子弹"的视觉 bug
   } else if (def.type === 'lob') {
-    const off = accuracyOffset(def.accuracy ?? 0)
+    const off = accuracyOffset(s.nextId, def.accuracy ?? 0)
     const tx = target.x + off.dx
     const ty = target.y + off.dy
     const distM = Math.hypot(tx - c.x, ty - c.y) * M_PER_CELL
@@ -1881,7 +1893,7 @@ function fireGunShot(s: GameState, t: Turret, def: TurretDef, target: Enemy, dt:
     })
   } else if (def.type === 'missile') {
     let guided = !!def.guided
-    const off = guided ? { dx: 0, dy: 0 } : accuracyOffset(def.accuracy ?? 0)
+    const off = guided ? { dx: 0, dy: 0 } : accuracyOffset(s.nextId, def.accuracy ?? 0)
     // §6.4：非制导发射瞬间锁定落点坐标，之后不再修正
     let lockX = target.x + off.dx
     let lockY = target.y + off.dy
@@ -1910,8 +1922,9 @@ function fireGunShot(s: GameState, t: Turret, def: TurretDef, target: Enemy, dt:
         if (v0 > 1e-6) { speed0 = v0; h = bearing(vx, vy) } // 抵消归零时保持原航向
       }
     }
+    const missileId = s.nextId++
     s.projectiles.push({
-      id: s.nextId++, kind: 'missile', defId: t.defId, level: lvl,
+      id: missileId, kind: 'missile', defId: t.defId, level: lvl,
       x: c.x, y: c.y, px: c.x, py: c.y, heading: h,
       damage: def.damage * scale, traveled: 0, maxTravel: def.rangeMax * 1.3,
       shooter: t.id, hitIds: [],
@@ -1919,7 +1932,7 @@ function fireGunShot(s: GameState, t: Turret, def: TurretDef, target: Enemy, dt:
       speed: speed0, turnRate: 0, guided: delay94 > 0 ? false : guided, targetId: guided ? target.id : null, // v1.96：出生初速度（缺省 0）；v2.33：挂载弹含载体速度合成
       lockX, lockY, lostLock: false, prevDist: -1,
       flightLeft: def.missileFlightTime, // 未配置则为 undefined（不限飞行时间）
-      weavePhase: Math.random() * TAU, // 曲线摆动相位（每发随机）
+      weavePhase: eventRandom(missileId, 2) * TAU, // 曲线摆动相位（按事件 id 确定性派生）
       guideDelayLeft: delay94 > 0 ? delay94 : undefined, // v1.94：仅延迟制导弹携带
       tgtPX: guided ? target.x : undefined, tgtPY: guided ? target.y : undefined, // v2.20 前置量追踪：速度采样基线
       igniteAtT: delay94, // v2.23：点火时刻弹龄（无延迟=0=出生即点火）
@@ -2808,10 +2821,11 @@ export function tick(prev: GameState, dt: number): GameState {
     if (s.spawnTimer <= 0) {
       const item = s.spawnQueue.shift()!
       const def = ENEMY_DEFS[item.kind]
-      const col = 1 + Math.random() * (LEVEL.cols - 2)
+      const enemyId = s.nextId++
+      const col = 1 + eventRandom(enemyId, 0) * (LEVEL.cols - 2)
       const hp = Math.round(def.hp * waveHpScale(s.wave))
       s.enemies.push({
-        id: s.nextId++, kind: item.kind, x: col, y: -0.5,
+        id: enemyId, kind: item.kind, x: col, y: -0.5,
         hp, maxHp: hp, mode: 'move', targetKind: null, targetId: null,
         goalX: col, goalY: 0, hasGoal: false, pathVersion: -1,
         attackedBy: [], dots: [], hitFlash: 0,
