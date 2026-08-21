@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<body>
+<script>
+// e2e 驱动模板：iframe 加载游戏，等待后采样画布像素，非全空 → CANVAS_OK
+const fr = document.createElement('iframe')
+fr.src = '/'
+fr.style.cssText = 'width:1280px;height:800px;border:0'
+document.body.appendChild(fr)
+fr.onload = () => {
+  setTimeout(() => {
+    let res = 'CANVAS_MISSING'
+    try {
+      const cv = fr.contentDocument && fr.contentDocument.querySelector('canvas')
+      if (cv) {
+        const ctx = cv.getContext('2d')
+        const d = ctx.getImageData(0, 0, cv.width, cv.height).data
+        let sum = 0
+        for (let i = 0; i < d.length; i += 997) sum += d[i] + d[i + 1] + d[i + 2]
+        res = sum > 0 ? 'CANVAS_OK' : 'CANVAS_BLANK'
+      }
+    } catch (e) { res = 'ERR ' + e.message }
+    document.body.setAttribute('data-result', res)
+    document.title = res
+  }, 8000)
+}
+</script>
+</body>
