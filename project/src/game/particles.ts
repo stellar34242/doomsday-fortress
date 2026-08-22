@@ -18,6 +18,9 @@ export interface Particle {
   turb?: number // 湍流强度（烟尘漂移抖动；step 叠加正交噪声速度）
   phase?: number // 噪声相位（seeded，逐粒不同）
   streak?: boolean // v2.15 电焊式拖尾：绘制时沿速度反向拉 0.05s 亮线（散发飞溅粒子）
+  shape?: 'shieldShard' // v2.71 护盾破裂：程序绘制的六边形碎片（不依赖额外贴图）
+  rotation?: number // 碎片当前旋角（rad）
+  spin?: number // 碎片自转速度（rad/s）
 }
 
 export const PARTICLE_CAP = 400 // 固定上限：超出回收最老粒子
@@ -69,18 +72,21 @@ export interface BurstOpts {
   streak?: boolean // v2.54：爆发粒子拉丝（沿速度反向拉 0.05s 亮线，复用 v2.15 电焊拖尾画法）
   speedJitter?: number // 初速随机幅度 0–1（每粒 ×(1±jitter)，默认 0.5）
   lifeJitter?: number // 寿命随机幅度 0–1（默认 0.4）
+  sizeJitter?: number // 尺寸随机幅度 0–1（每粒 ×(1±jitter)，默认 0）
   turb?: number // 湍流强度（烟尘用，默认 0）
   dirX?: number // 命中方向单位向量（bias>0 时角度向其收束）
   dirY?: number
   bias?: number // 方向偏置 0–1：0=全周均匀，1=完全沿命中方向锥形爆发
   inheritVx?: number // 速度继承分量（调用方算好：弹速×inherit）
   inheritVy?: number
+  shape?: 'shieldShard'
 }
 
 /** 爆发发射（爆炸火花/烟尘、命中碎屑）：方向向外全周随机；速度/寿命 jitter 均 seeded 确定性 */
 export function spawnBurst(pool: ParticlePool, o: BurstOpts) {
   const sj = o.speedJitter ?? 0.5
   const lj = o.lifeJitter ?? 0.4
+  const zj = Math.min(1, Math.max(0, o.sizeJitter ?? 0))
   const bias = Math.min(1, Math.max(0, o.bias ?? 0))
   const hasDir = bias > 0 && o.dirX !== undefined && o.dirY !== undefined
   const dirAng = hasDir ? Math.atan2(o.dirY!, o.dirX!) : 0
@@ -89,13 +95,17 @@ export function spawnBurst(pool: ParticlePool, o: BurstOpts) {
     const ang = hasDir ? dirAng + (randAng - dirAng) * (1 - bias) : randAng // bias 越大越向命中方向收束
     const spd = o.speed * (1 + (hash01(o.seed * 13 + i) * 2 - 1) * sj)
     const life = o.life * (1 + (hash01(o.seed * 7 + i * 3) * 2 - 1) * lj)
+    const size = o.size * (1 + (hash01(o.seed * 41 + i * 17) * 2 - 1) * zj)
     push(pool, {
       x: o.x, y: o.y,
       vx: Math.cos(ang) * spd + (o.inheritVx ?? 0), // 速度继承：沿弹道方向甩出
       vy: Math.sin(ang) * spd + (o.inheritVy ?? 0),
       life, maxLife: life,
-      size: o.size, color: o.color, drag: o.drag, grow: o.grow ?? 0,
+      size, color: o.color, drag: o.drag, grow: o.grow ?? 0,
       streak: o.streak, // v2.54 透传
+      shape: o.shape,
+      rotation: o.shape ? hash01(o.seed * 17 + i * 19) * Math.PI * 2 : undefined,
+      spin: o.shape ? (hash01(o.seed * 23 + i * 29) * 2 - 1) * 11 : undefined,
       turb: o.turb ?? 0, phase: hash01(o.seed * 5 + i * 11) * Math.PI * 2,
     })
   }
@@ -136,6 +146,7 @@ export function stepParticles(pool: ParticlePool, dt: number) {
     const p = parts[i]
     p.x += p.vx * dt
     p.y += p.vy * dt
+    if (p.spin) p.rotation = (p.rotation ?? 0) + p.spin * dt
     const f = Math.max(0, 1 - p.drag * dt)
     p.vx *= f
     p.vy *= f

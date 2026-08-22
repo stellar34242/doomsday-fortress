@@ -1,24 +1,24 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Bomb, Bug, Coins, Crosshair, Flame, Gauge, Hammer, Play, Rocket,
+  Bomb, Bug, Coins, Crosshair, Flame, Gauge, Hammer, Rocket,
   Trash2, Zap,
 } from 'lucide-react'
 import DebugPanel from '@/components/DebugPanel'
 import {
   CORE, ENEMY_DEFS, MODULE_DEFS, SPAWN_ROWS,
-  BASE_CELL, TOTAL_WAVES, TURRET_DEFS, VIEW_COLS, VIEW_ROWS, upgradeCost,
+  BASE_CELL, TURRET_DEFS, VIEW_COLS, VIEW_ROWS, upgradeCost,
 } from '@/game/config'
-import type { ModuleDef, TurretDef } from '@/game/config'
+import type { EnemyKind, ModuleDef, TurretDef } from '@/game/config'
 import { getAsset } from '@/game/assetlib'
 import {
   buildModule, canPlaceModule, defOf, demolishAt, demolishModule, dirX, dirY,
   fortressDef, fortressRect, hardpointWorldPos, initialState, moduleCells, moduleDefOf, moduleFoot, mountTurret,
-  resourceCaps, startWave, tick, upgradeTurret, fortressInteriorSet, worldToFortressLocal,
+  resourceCaps, tick, upgradeTurret, fortressInteriorSet, worldToFortressLocal,
 } from '@/game/engine'
 import type { GameState } from '@/game/engine'
-import { BRUSH_DEFAULTS, LEVEL, saveLevel } from '@/game/level'
-import type { LevelBuilding, LevelConfig, LevelObject, LevelTerrain, LevelTurret } from '@/game/level'
-import { clampViewX, clampViewY, draw } from '@/game/render'
+import { activateLibraryLevel, BRUSH_DEFAULTS, completeActiveLevel, DEFEND_OVERLAP_TIME_DEFAULT, DEFEND_REST_TIME_DEFAULT, DEFEND_TIME_MAX, defaultLevel, emptyTriggerEnemies, invalidateWallInfo, LEVEL, LEVEL_LIBRARY, levelLibraryForExport, reanchorCols, reanchorRows, saveLevelLibrary, TRIGGER_ENEMY_KINDS } from '@/game/level'
+import type { LevelBuilding, LevelConfig, LevelEventAction, LevelInteractable, LevelLibrary, LevelObject, LevelTerrain, LevelTurret } from '@/game/level'
+import { clampViewX, clampViewY, draw, edgeBandView } from '@/game/render'
 import type { UiHints } from '@/game/render'
 
 const TICK = 0.1
@@ -48,9 +48,22 @@ function cardIcon(def: TurretDef) {
   return TYPE_ICON[def.type] ?? Crosshair
 }
 
+function previewLevel(level: LevelConfig) {
+  for (const k of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[k]
+  Object.assign(LEVEL, structuredClone(level))
+  invalidateWallInfo()
+}
+
+function nextLibraryLevelId(library: LevelLibrary): string {
+  const used = new Set(library.levels.map(x => x.id))
+  let n = 1
+  while (used.has(`level-${n}`)) n++
+  return `level-${n}`
+}
+
 type Brush =
   | 'puddle' | 'barrel' | 'ruins' | 'rock' | 'buildzone' | 'ground'
-  | 'building' | 'core' | 'turret' | 'wall' | 'eraser' | 'move'
+  | 'building' | 'core' | 'turret' | 'wall' | 'start' | 'finish' | 'trigger' | 'interactable' | 'eraser' | 'move'
 
 /** 连续铺设型笔刷（按住拖动）；其余为单击放置 */
 const PAINT_BRUSHES = new Set<Brush>(['puddle', 'barrel', 'ruins', 'rock', 'buildzone', 'ground', 'eraser'])
@@ -63,6 +76,67 @@ type Picked =
   | { kind: 'building'; w: number; h: number; idx: number; data: LevelBuilding }
   | { kind: 'core'; w: number; h: number; idx: number; data: { x: number; y: number } }
   | { kind: 'turret'; w: number; h: number; idx: number; data: LevelTurret }
+
+interface LevelEditState {
+  draft: LevelConfig
+  levelId: string
+  library: LevelLibrary
+  playLevel: LevelConfig
+  brush: Brush
+  picked: Picked | null
+}
+
+type ActionKind = LevelEventAction['type']
+const ACTION_NAMES: Record<ActionKind, string> = {
+  wait: '等待', spawn: '刷出敌群', boss: 'Boss', message: '任务提示', reward: '废料奖励',
+  objective: '修改目标', toggle: '开关交互物', complete: '完成关卡',
+}
+
+function defaultAction(type: ActionKind): LevelEventAction {
+  if (type === 'wait') return { type, seconds: 1 }
+  if (type === 'spawn') { const enemies = emptyTriggerEnemies(); enemies.walker = 4; return { type, enemies, interval: 0.35 } }
+  if (type === 'boss') return { type, boss: { kind: 'brute', name: '荒原巨兽', hpScale: 8, sizeScale: 1.8, phases: [{ hpPercent: 50, actions: [{ type: 'message', text: 'Boss 进入狂暴阶段！', duration: 3 }] }], defeatActions: [] } }
+  if (type === 'message') return { type, text: '新的任务已更新', duration: 3 }
+  if (type === 'reward') return { type, gold: 100 }
+  if (type === 'objective') return { type, objective: { type: 'reach' } }
+  if (type === 'toggle') return { type, interactableId: 1, enabled: true }
+  return { type: 'complete' }
+}
+
+function ActionEditor({ actions, interactables, onChange, depth = 0 }: { actions: LevelEventAction[]; interactables: LevelInteractable[]; onChange: (next: LevelEventAction[]) => void; depth?: number }) {
+  const patchAt = (index: number, action: LevelEventAction) => onChange(actions.map((a, i) => i === index ? action : a))
+  const move = (index: number, delta: -1 | 1) => {
+    const next = [...actions]
+    const to = index + delta
+    if (to < 0 || to >= next.length) return
+    ;[next[index], next[to]] = [next[to], next[index]]
+    onChange(next)
+  }
+  return <div className="space-y-1">
+    {actions.map((action, index) => <div key={`${action.type}-${index}`} className="border border-black/25 bg-black/[0.03] p-1">
+      <div className="flex items-center gap-1 mb-1">
+        <span className="text-[9px] font-black">{index + 1}. {ACTION_NAMES[action.type]}</span>
+        <button type="button" aria-label="动作上移" className="ml-auto comic-btn px-1 py-0 text-[8px]" onClick={() => move(index, -1)}>↑</button>
+        <button type="button" aria-label="动作下移" className="comic-btn px-1 py-0 text-[8px]" onClick={() => move(index, 1)}>↓</button>
+        <button type="button" className="comic-btn px-1 py-0 text-[8px]" onClick={() => onChange(actions.filter((_, i) => i !== index))}>删</button>
+      </div>
+      {action.type === 'wait' && <label className="flex items-center gap-1 text-[8px] font-bold">秒<input type="number" min={0} step={0.1} className="w-16 px-1 border border-black bg-[#EFEBD8]" value={action.seconds} onChange={e => patchAt(index, { ...action, seconds: Math.max(0, Number(e.target.value) || 0) })} /></label>}
+      {action.type === 'message' && <div className="grid grid-cols-[1fr_52px] gap-1"><input aria-label="提示文字" className="min-w-0 px-1 text-[9px] border border-black bg-[#EFEBD8]" value={action.text} onChange={e => patchAt(index, { ...action, text: e.target.value })} /><input aria-label="提示秒数" type="number" min={0.5} step={0.5} className="px-1 text-[9px] border border-black bg-[#EFEBD8]" value={action.duration} onChange={e => patchAt(index, { ...action, duration: Math.max(0.5, Number(e.target.value) || 0.5) })} /></div>}
+      {action.type === 'reward' && <label className="flex items-center gap-1 text-[8px] font-bold">废料<input type="number" min={0} className="w-20 px-1 border border-black bg-[#EFEBD8]" value={action.gold} onChange={e => patchAt(index, { ...action, gold: Math.max(0, Math.round(Number(e.target.value) || 0)) })} /></label>}
+      {action.type === 'spawn' && <div><div className="grid grid-cols-3 gap-1">{TRIGGER_ENEMY_KINDS.map(kind => <label key={kind} className="text-[8px] font-bold">{ENEMY_DEFS[kind].name}<input type="number" min={0} className="w-full px-1 border border-black bg-[#EFEBD8]" value={action.enemies[kind]} onChange={e => patchAt(index, { ...action, enemies: { ...action.enemies, [kind]: Math.max(0, Math.round(Number(e.target.value) || 0)) } })} /></label>)}</div><label className="text-[8px] font-bold">间隔<input type="number" min={0} step={0.05} className="ml-1 w-14 px-1 border border-black bg-[#EFEBD8]" value={action.interval} onChange={e => patchAt(index, { ...action, interval: Math.max(0, Number(e.target.value) || 0) })} /></label></div>}
+      {action.type === 'objective' && <div className="flex gap-1"><select className="px-1 text-[9px] border border-black bg-[#EFEBD8]" value={action.objective.type} onChange={e => patchAt(index, { type: 'objective', objective: e.target.value === 'survive' ? { type: 'survive', duration: 60 } : e.target.value === 'defend' ? { type: 'defend', waves: 1, waveWait: true, restTime: DEFEND_REST_TIME_DEFAULT, overlapTime: DEFEND_OVERLAP_TIME_DEFAULT } : { type: 'reach' } })}><option value="reach">抵达终点</option><option value="defend">保卫波次</option><option value="survive">生存计时</option></select>{action.objective.type === 'defend' && <input aria-label="目标波数" type="number" min={1} className="w-14 px-1 text-[9px] border border-black bg-[#EFEBD8]" value={action.objective.waves} onChange={e => patchAt(index, { ...action, objective: { type: 'defend', waves: Math.max(1, Math.round(Number(e.target.value) || 1)), waveWait: action.objective.type === 'defend' ? action.objective.waveWait : true, restTime: action.objective.type === 'defend' ? action.objective.restTime : DEFEND_REST_TIME_DEFAULT, overlapTime: action.objective.type === 'defend' ? action.objective.overlapTime : DEFEND_OVERLAP_TIME_DEFAULT } })} />}{action.objective.type === 'survive' && <input aria-label="生存秒数" type="number" min={10} className="w-16 px-1 text-[9px] border border-black bg-[#EFEBD8]" value={action.objective.duration} onChange={e => patchAt(index, { ...action, objective: { type: 'survive', duration: Math.max(10, Math.round(Number(e.target.value) || 10)) } })} />}</div>}
+      {action.type === 'toggle' && <div className="flex gap-1"><select className="flex-1 min-w-0 px-1 text-[9px] border border-black bg-[#EFEBD8]" value={action.interactableId} onChange={e => patchAt(index, { ...action, interactableId: Number(e.target.value) })}>{interactables.map(x => <option key={x.id} value={x.id}>{x.name}</option>)}</select><select className="px-1 text-[9px] border border-black bg-[#EFEBD8]" value={action.enabled ? 'on' : 'off'} onChange={e => patchAt(index, { ...action, enabled: e.target.value === 'on' })}><option value="on">启用</option><option value="off">关闭</option></select></div>}
+      {action.type === 'boss' && <div className="space-y-1">
+        <div className="grid grid-cols-2 gap-1"><input aria-label="Boss名称" className="px-1 text-[9px] border border-black bg-[#EFEBD8]" value={action.boss.name} onChange={e => patchAt(index, { ...action, boss: { ...action.boss, name: e.target.value } })} /><select className="px-1 text-[9px] border border-black bg-[#EFEBD8]" value={action.boss.kind} onChange={e => patchAt(index, { ...action, boss: { ...action.boss, kind: e.target.value as EnemyKind } })}>{TRIGGER_ENEMY_KINDS.map(k => <option key={k} value={k}>{ENEMY_DEFS[k].name}</option>)}</select></div>
+        <div className="grid grid-cols-2 gap-1"><label className="text-[8px] font-bold">生命倍率<input type="number" min={1} step={0.5} className="w-full px-1 border border-black bg-[#EFEBD8]" value={action.boss.hpScale} onChange={e => patchAt(index, { ...action, boss: { ...action.boss, hpScale: Math.max(1, Number(e.target.value) || 1) } })} /></label><label className="text-[8px] font-bold">体型倍率<input type="number" min={1} step={0.1} className="w-full px-1 border border-black bg-[#EFEBD8]" value={action.boss.sizeScale} onChange={e => patchAt(index, { ...action, boss: { ...action.boss, sizeScale: Math.max(1, Number(e.target.value) || 1) } })} /></label></div>
+        {depth < 2 && action.boss.phases.map((phase, pi) => <div key={pi} className="border-l-2 border-[#B3392E] pl-1"><div className="flex items-center gap-1 text-[8px] font-black">生命降至<input type="number" min={1} max={99} className="w-12 px-1 border border-black bg-[#EFEBD8]" value={phase.hpPercent} onChange={e => { const phases = action.boss.phases.map((p, i) => i === pi ? { ...p, hpPercent: Math.max(1, Math.min(99, Number(e.target.value) || 50)) } : p); patchAt(index, { ...action, boss: { ...action.boss, phases } }) }} />%<button type="button" className="ml-auto comic-btn px-1 py-0" onClick={() => patchAt(index, { ...action, boss: { ...action.boss, phases: action.boss.phases.filter((_, i) => i !== pi) } })}>删阶段</button></div><ActionEditor depth={depth + 1} actions={phase.actions} interactables={interactables} onChange={next => { const phases = action.boss.phases.map((p, i) => i === pi ? { ...p, actions: next } : p); patchAt(index, { ...action, boss: { ...action.boss, phases } }) }} /></div>)}
+        <button type="button" className="comic-btn px-1 py-0 text-[8px]" onClick={() => patchAt(index, { ...action, boss: { ...action.boss, phases: [...action.boss.phases, { hpPercent: 50, actions: [] }] } })}>＋阶段</button>
+        {depth < 2 && <div className="border-l-2 border-black/40 pl-1"><div className="text-[8px] font-black">击败后</div><ActionEditor depth={depth + 1} actions={action.boss.defeatActions} interactables={interactables} onChange={next => patchAt(index, { ...action, boss: { ...action.boss, defeatActions: next } })} /></div>}
+      </div>}
+    </div>)}
+    <select aria-label="新增动作" className="w-full px-1 py-0.5 text-[9px] font-comic border border-black bg-[#EFEBD8]" value="" onChange={e => { if (e.target.value) onChange([...actions, defaultAction(e.target.value as ActionKind)]) }}><option value="">＋ 添加动作…</option>{(Object.keys(ACTION_NAMES) as ActionKind[]).map(k => <option key={k} value={k}>{ACTION_NAMES[k]}</option>)}</select>
+  </div>
+}
 
 /** 角度最短路径插值（环绕 ±π） */
 function lerpAngle(a: number, b: number, t: number): number {
@@ -150,7 +224,7 @@ export default function GamePreview() {
   const pinchRef = useRef<{ d0: number; z0: number } | null>(null) // 双指捏合
   const ptrsRef = useRef<Map<number, { x: number; y: number }>>(new Map())
   // 场景编辑模式：draft 草稿 + 当前笔刷 + 移动笔刷取出的元素；编辑期间本局暂停
-  const [edit, setEdit] = useState<{ draft: LevelConfig; brush: Brush; picked: Picked | null } | null>(null)
+  const [edit, setEdit] = useState<LevelEditState | null>(null)
   // 要塞内部建造模式（原地建造：隐藏主体只露底座，直接在堡垒上摆放模块；建造/拆除仅备战期）
   const [interior, setInterior] = useState(false)
   const [interiorSel, setInteriorSel] = useState<string | null>(null) // 选中待摆放模块
@@ -173,9 +247,16 @@ export default function GamePreview() {
 
   // 插值数据源：上一个逻辑 state + 最近一次 tick 的时间戳（interval 回调内同步更新，不等渲染）
   const gameRef = useRef(game)
+  const completedRunRef = useRef(false)
   useEffect(() => {
     gameRef.current = game
   }, [game])
+  useEffect(() => {
+    if (game.phase !== 'won') { completedRunRef.current = false; return }
+    if (completedRunRef.current) return
+    completedRunRef.current = true
+    completeActiveLevel()
+  }, [game.phase])
   const prevStateRef = useRef<GameState | null>(null)
   const lastTickTimeRef = useRef(0)
 
@@ -354,6 +435,16 @@ export default function GamePreview() {
       const d = TURRET_DEFS.find(x => x.id === BRUSH_DEFAULTS.turretDefId)
       return d ? { w: d.w, h: d.h } : { w: 1, h: 1 }
     }
+    if (brush === 'start') return { w: draft.startZone.w, h: draft.startZone.h }
+    if (brush === 'finish') return { w: draft.finishZone.w, h: draft.finishZone.h }
+    if (brush === 'trigger') {
+      const t = draft.triggers.find(x => x.id === BRUSH_DEFAULTS.selectedTriggerId)
+      return t ? { w: t.w, h: t.h } : { w: 1, h: 1 }
+    }
+    if (brush === 'interactable') {
+      const t = draft.interactables.find(x => x.id === BRUSH_DEFAULTS.selectedInteractableId)
+      return t ? { w: t.w, h: t.h } : { w: 1, h: 1 }
+    }
     return { w: 1, h: 1 }
   }
 
@@ -377,6 +468,10 @@ export default function GamePreview() {
   }
 
   const brushValidAt = (draft: LevelConfig, brush: Brush, picked: Picked | null, gx: number, gy: number): boolean => {
+    if (brush === 'start' || brush === 'finish' || brush === 'trigger' || brush === 'interactable') {
+      const { w, h } = brushFoot(draft, brush, picked)
+      return gx >= 0 && gx + w <= LEVEL.cols && gy >= 0 && gy + h <= LEVEL.rows
+    }
     if (brush === 'eraser') return gx >= 0 && gx < LEVEL.cols && gy >= SPAWN_ROWS && gy < LEVEL.rows
     if (brush === 'ground') return gx >= 0 && gx < LEVEL.cols && gy >= SPAWN_ROWS && gy < LEVEL.rows // 纯视觉地面层：不与物体/建筑冲突
     if (brush === 'move' && !picked) return false // 未取件时不铺
@@ -471,21 +566,21 @@ export default function GamePreview() {
 
   /** 取消移动：放回原地 */
   const cancelMove = () => {
-    setEdit(cur => {
-      if (!cur || !cur.picked) return cur
-      const d = structuredClone(cur.draft)
-      dropPicked(d, cur.picked, cur.picked.data.x, cur.picked.data.y)
-      return { ...cur, draft: d, picked: null }
-    })
+    const cur = editRef.current
+    if (!cur?.picked) return
+    const d = structuredClone(cur.draft)
+    dropPicked(d, cur.picked, cur.picked.data.x, cur.picked.data.y)
+    previewLevel(d)
+    setEdit({ ...cur, draft: d, picked: null })
   }
 
   const updateDraft = (fn: (d: LevelConfig) => void) => {
-    setEdit(e => {
-      if (!e) return e
-      const d = structuredClone(e.draft)
-      fn(d)
-      return { ...e, draft: d }
-    })
+    const e = editRef.current
+    if (!e) return
+    const d = structuredClone(e.draft)
+    fn(d)
+    previewLevel(d)
+    setEdit({ ...e, draft: d })
   }
 
   const applyBrushAt = (draft: LevelConfig, brush: Brush, gx: number, gy: number) => {
@@ -537,6 +632,22 @@ export default function GamePreview() {
         draft.initialTurrets.push({ defId: def.id, x: gx, y: gy })
         break
       }
+      case 'start':
+        draft.startZone = { ...draft.startZone, x: gx, y: gy }
+        break
+      case 'finish':
+        draft.finishZone = { ...draft.finishZone, x: gx, y: gy }
+        break
+      case 'trigger': {
+        const t = draft.triggers.find(x => x.id === BRUSH_DEFAULTS.selectedTriggerId)
+        if (t) { t.x = gx; t.y = gy }
+        break
+      }
+      case 'interactable': {
+        const t = draft.interactables.find(x => x.id === BRUSH_DEFAULTS.selectedInteractableId)
+        if (t) { t.x = gx; t.y = gy }
+        break
+      }
       case 'eraser':
         // 删除该格上所有编辑层内容（含初始墙/原模板墙格与核心建筑）
         draft.terrain = draft.terrain.filter(t => !covers(t))
@@ -558,18 +669,130 @@ export default function GamePreview() {
     const e = editRef.current
     if (!e) return
     if (e.brush === 'move') { moveClick(gx, gy); return }
+    if (e.brush === 'trigger') {
+      const hit = [...e.draft.triggers].reverse().find(t => gx >= t.x && gx < t.x + t.w && gy >= t.y && gy < t.y + t.h)
+      if (hit) {
+        if (hit.id !== BRUSH_DEFAULTS.selectedTriggerId) {
+          BRUSH_DEFAULTS.selectedTriggerId = hit.id
+          setEdit(cur => cur ? { ...cur } : cur)
+        }
+        return
+      }
+    }
+    if (e.brush === 'interactable') {
+      const hit = [...e.draft.interactables].reverse().find(t => gx >= t.x && gx < t.x + t.w && gy >= t.y && gy < t.y + t.h)
+      if (hit) {
+        BRUSH_DEFAULTS.selectedInteractableId = hit.id
+        setEdit(cur => cur ? { ...cur } : cur)
+        return
+      }
+    }
     if (!brushValidAt(e.draft, e.brush, e.picked, gx, gy)) return
     updateDraft(d => applyBrushAt(d, e.brush, gx, gy))
+  }
+
+  const libraryWithCurrentDraft = (e: LevelEditState): LevelLibrary => {
+    const library = structuredClone(e.library)
+    const entry = library.levels.find(x => x.id === e.levelId)
+    if (entry) entry.level = structuredClone(e.draft)
+    return library
+  }
+
+  const focusEditorLevel = (level: LevelConfig) => {
+    previewLevel(level)
+    if (level.mode === 'advance') {
+      setViewX(clampViewX(level.startZone.x + level.startZone.w / 2 - (size.w / cell) / 2, cell, size.w))
+      setViewY(clampViewY(level.startZone.y + level.startZone.h / 2 - (size.h / cell) / 2, cell, size.h))
+    } else {
+      setViewX(0)
+      setViewY(level.rows - VIEW_ROWS)
+    }
+    BRUSH_DEFAULTS.selectedTriggerId = level.triggers[0]?.id ?? null
+    BRUSH_DEFAULTS.selectedInteractableId = level.interactables[0]?.id ?? null
+  }
+
+  const switchEditorLevel = (levelId: string) => {
+    const e = editRef.current
+    if (!e || e.levelId === levelId) return
+    const library = libraryWithCurrentDraft(e)
+    const target = library.levels.find(x => x.id === levelId)
+    if (!target) return
+    const draft = structuredClone(target.level)
+    focusEditorLevel(draft)
+    setEdit({ ...e, library, levelId, draft, brush: draft.mode === 'advance' ? 'start' : 'buildzone', picked: null })
+  }
+
+  const createEditorLevel = (duplicate: boolean) => {
+    const e = editRef.current
+    if (!e || e.library.levels.length >= 50) return
+    const library = libraryWithCurrentDraft(e)
+    const id = nextLibraryLevelId(library)
+    const current = library.levels.find(x => x.id === e.levelId)
+    const level = duplicate ? structuredClone(e.draft) : defaultLevel()
+    const name = duplicate ? `${current?.name ?? '关卡'} 副本` : `关卡 ${String(library.levels.length + 1).padStart(2, '0')}`
+    library.levels.push({ id, name: name.slice(0, 40), level })
+    focusEditorLevel(level)
+    setEdit({ ...e, library, levelId: id, draft: structuredClone(level), brush: level.mode === 'advance' ? 'start' : 'buildzone', picked: null })
+  }
+
+  const renameEditorLevel = (name: string) => {
+    const e = editRef.current
+    if (!e) return
+    const library = structuredClone(e.library)
+    const entry = library.levels.find(x => x.id === e.levelId)
+    if (entry) entry.name = name.slice(0, 40)
+    setEdit({ ...e, library })
+  }
+
+  const updateEditorEntry = (fn: (entry: LevelLibrary['levels'][number]) => void) => {
+    const e = editRef.current
+    if (!e) return
+    const library = structuredClone(e.library)
+    const entry = library.levels.find(x => x.id === e.levelId)
+    if (entry) fn(entry)
+    setEdit({ ...e, library })
+  }
+
+  const moveEditorLevel = (dir: -1 | 1) => {
+    const e = editRef.current
+    if (!e) return
+    const library = libraryWithCurrentDraft(e)
+    const i = library.levels.findIndex(x => x.id === e.levelId)
+    const j = i + dir
+    if (i < 0 || j < 0 || j >= library.levels.length) return
+    ;[library.levels[i], library.levels[j]] = [library.levels[j], library.levels[i]]
+    setEdit({ ...e, library })
+  }
+
+  const deleteEditorLevel = () => {
+    const e = editRef.current
+    if (!e || e.library.levels.length <= 1) return
+    const library = libraryWithCurrentDraft(e)
+    const i = library.levels.findIndex(x => x.id === e.levelId)
+    library.levels.splice(i, 1)
+    const next = library.levels[Math.min(i, library.levels.length - 1)]
+    if (library.activeId === e.levelId) library.activeId = next.id
+    const draft = structuredClone(next.level)
+    focusEditorLevel(draft)
+    setEdit({ ...e, library, levelId: next.id, draft, brush: draft.mode === 'advance' ? 'start' : 'buildzone', picked: null })
+  }
+
+  const cancelEdit = () => {
+    const e = editRef.current
+    if (!e) return
+    previewLevel(e.playLevel)
+    setEdit(null)
   }
 
   const applyEdit = () => {
     const e = editRef.current
     if (!e) return
-    // draft → LEVEL + 持久化 + 重开
-    for (const k of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[k]
-    Object.assign(LEVEL, structuredClone(e.draft))
-    saveLevel()
+    // 当前草稿写回库；选中的关卡成为试玩关卡，原子持久化后重开。
+    const library = libraryWithCurrentDraft(e)
+    library.activeId = e.levelId
+    saveLevelLibrary(library)
     setEdit(null)
+    setShowDebug(false)
     setGame(initialState())
     setMode({ kind: 'none' })
     setSelTurret(null)
@@ -607,13 +830,19 @@ export default function GamePreview() {
       if (ed) {
         camX = clampViewX(vx, cl, sz.w)
         camY = clampViewY(vy, cl, sz.h)
+      } else if (LEVEL.mode === 'advance') {
+        const fr = fortressRect(view)
+        const fx = fr.x + fr.w / 2
+        const fy = fr.y + fr.h / 2
+        camX = edgeBandView(camRef.current.x, fx, sz.w / cl, LEVEL.cols)
+        camY = edgeBandView(camRef.current.y, fy, sz.h / cl, LEVEL.rows)
       } else {
         const fr = fortressRect(view)
         camX = clampViewX(fr.x + fr.w / 2 - (sz.w / cl) / 2, cl, sz.w)
         camY = clampViewY(fr.y + fr.h / 2 - (sz.h / cl) / 2, cl, sz.h)
       }
       camRef.current = { x: camX, y: camY }
-      let ghost: UiHints['ghost'] = null
+      const ghost: UiHints['ghost'] = null
       let wallGhost: UiHints['wallGhost'] = null
       let editOverlay: UiHints['edit']
       if (ed) {
@@ -628,6 +857,10 @@ export default function GamePreview() {
           buildings: ed.draft.buildings,
           core: ed.draft.core ? { x: ed.draft.core.x, y: ed.draft.core.y, w: CORE.w, h: CORE.h } : null,
           turrets: ed.draft.initialTurrets,
+          startZone: ed.draft.startZone,
+          finishZone: ed.draft.finishZone,
+          triggers: ed.draft.triggers.map(t => ({ ...t, selected: t.id === BRUSH_DEFAULTS.selectedTriggerId })),
+          interactables: ed.draft.interactables.map(t => ({ ...t, selected: t.id === BRUSH_DEFAULTS.selectedInteractableId })),
           hover: hov ? { ...hov, w: foot.w, h: foot.h, ok: a.brushValidAt(ed.draft, ed.brush, ed.picked, hov.x, hov.y) } : null,
         }
       } else if (pp && hov0 && md.kind === 'demolish') {
@@ -920,7 +1153,11 @@ export default function GamePreview() {
     setViewY(LEVEL.rows - VIEW_ROWS)
   }
 
-  const earlyBonus = Math.ceil(game.prepLeft) * 2
+  const reachDistanceM = (() => {
+    const r = fortressRect(game)
+    const z = LEVEL.finishZone
+    return Math.ceil(Math.hypot(r.x + r.w / 2 - (z.x + z.w / 2), r.y + r.h / 2 - (z.y + z.h / 2)) * 25)
+  })()
   // 交战敌人构成：场上存活 + 待出场，按类型计数
   const enemyComp = (() => {
     const counts = new Map<string, number>()
@@ -955,26 +1192,26 @@ export default function GamePreview() {
         </div>
       )}
 
-      {/* 顶部信息带：波次 | 开波（原基地生命位）| debug */}
+      {/* 顶部信息带：任务进度 | 自动波次状态 | debug；关卡编辑时由固定 DEBUG 顶栏替代。 */}
+      {!edit && (
       <div className="relative z-10 flex items-stretch gap-1 px-2 pt-2">
         <div className="flex-1 comic-panel px-2 py-1 flex items-center justify-center gap-1">
           <Hammer className="w-3.5 h-3.5" />
-          <span className="font-comic text-sm leading-none">波次 {Math.min(game.wave, TOTAL_WAVES)}/{TOTAL_WAVES}</span>
+          <span className="font-comic text-sm leading-none">
+            {game.objective.type === 'defend'
+              ? `波次 ${Math.min(game.wave, game.objective.waves)}/${game.objective.waves}`
+              : game.objective.type === 'survive'
+                ? `生存 ${Math.ceil(Math.max(0, game.objective.duration - game.objectiveElapsed))}s`
+                : `终点 ${reachDistanceM}m`}
+          </span>
         </div>
-        {prep ? (
-          <button
-            type="button"
-            onClick={() => setGame(g => startWave(g, earlyBonus))}
-            className="flex-1 comic-panel comic-btn px-2 py-1 flex items-center justify-center gap-1"
-          >
-            <Play className="w-3.5 h-3.5" />
-            <span className="font-comic text-xs leading-none">
-              开波 {Math.ceil(game.prepLeft)}s{earlyBonus > 0 ? ` +${earlyBonus}` : ''}
-            </span>
-          </button>
-        ) : (
-          <div className="flex-1 comic-panel px-2 py-1 flex items-center justify-center gap-1 overflow-hidden">
-            {game.phase === 'combat' ? (
+        <div className="flex-1 comic-panel px-2 py-1 flex items-center justify-center gap-1 overflow-hidden">
+          {prep ? (
+            <span className="font-comic text-xs leading-none">{game.wave === 1 ? '部署' : '休整'} {Math.ceil(game.prepLeft)}s</span>
+          ) : game.phase === 'combat' ? (
+            <>
+              {game.nextWaveLeft !== null && <span className="font-comic text-[10px] font-black leading-none shrink-0">下波 {Math.ceil(game.nextWaveLeft)}s</span>}
+              {enemyComp.length > 0 ? (
               // 交战信息：敌人构成（类型标志 + 数量，含场上与待出场）
               enemyComp.map(([k, n]) => (
                 <span key={k} className="flex items-center gap-[2px] shrink-0">
@@ -984,12 +1221,12 @@ export default function GamePreview() {
                   />
                   <span className="font-comic text-[10px] font-black leading-none">×{n}</span>
                 </span>
-              ))
-            ) : (
+              ))) : <span className="font-comic text-xs leading-none text-black/60">—</span>}
+            </>
+          ) : (
               <span className="font-comic text-xs leading-none text-black/60">—</span>
-            )}
-          </div>
-        )}
+          )}
+        </div>
         <button
           type="button"
           title="DEBUG：编辑炮塔参数"
@@ -999,10 +1236,14 @@ export default function GamePreview() {
           <Bug className="w-3.5 h-3.5" />
         </button>
       </div>
+      )}
+
+      {!edit && game.notices.length > 0 && <div className="absolute z-30 top-12 left-1/2 -translate-x-1/2 w-[min(80%,420px)] space-y-1 pointer-events-none">{game.notices.slice(-2).map(n => <div key={n.id} className="comic-panel bg-[#1A1A18]/90 text-[#EFEBD8] px-3 py-1 text-center font-comic text-xs">{n.text}</div>)}</div>}
+      {!edit && game.enemies.find(e => e.bossName) ? (() => { const boss = game.enemies.find(e => e.bossName)!; return <div className="absolute z-20 top-12 left-1/2 -translate-x-1/2 w-[min(70%,360px)] comic-panel px-2 py-1"><div className="flex justify-between text-[9px] font-black"><span>{boss.bossName}</span><span>{Math.ceil(boss.hp)}/{boss.maxHp}</span></div><div className="h-2 border border-black bg-black/30"><div className="h-full bg-[#B3392E]" style={{ width: `${Math.max(0, boss.hp / boss.maxHp * 100)}%` }} /></div></div> })() : null}
 
       {/* 中部横版布局：画布列（左）+ 控制侧栏（右）；竖屏回退为上下 */}
-      <div className="relative z-10 flex-1 min-h-0 mx-2 mt-1 mb-1 flex flex-row portrait:flex-col gap-1">
-      <div className="flex-1 min-w-0 min-h-0 flex flex-col">
+      <div className={`relative z-10 flex-1 min-h-0 mx-2 mt-1 mb-1 flex flex-row portrait:flex-col gap-1 ${edit ? 'pt-[58px]' : ''}`}>
+      <div className={`flex-1 min-w-0 min-h-0 flex flex-col ${edit ? 'order-2' : ''}`}>
       {/* 战场画布（镜头跟随堡垒；滚轮/双指缩放） */}
       <div ref={containerRef} className="relative flex-1 min-h-0 flex items-center justify-center overflow-hidden">
         <div className="border-[3px] border-black" style={{ width: size.w, height: size.h }}>
@@ -1182,14 +1423,12 @@ export default function GamePreview() {
 
       </div>{/* /画布列 */}
 
-      {/* 控制侧栏：仅场景编辑笔刷栏（v1.53：游玩 UI 迁至置底栏 + 战场右缘悬浮面板） */}
+      {/* 关卡编辑器：左侧关卡/属性/工具，右侧为常驻场景画布。 */}
       {edit && (
-      <div className="w-[168px] portrait:w-full portrait:max-h-[46%] shrink-0 min-h-0 overflow-y-auto overflow-x-hidden">
+      <div className="order-1 w-[280px] portrait:w-full portrait:max-h-[52%] shrink-0 min-h-0 overflow-y-auto overflow-x-hidden">
         <div className="relative z-10 pb-1">
           <div className="comic-panel px-2 py-1 mb-1 flex items-center gap-1">
-            <span className="font-comic text-[11px] font-black">
-              {edit.picked ? '移动中：点目标格放下' : '场景编辑中（已暂停）'}
-            </span>
+            <span className="font-comic text-[12px] font-black">关卡编辑器</span>
             {edit.picked && (
               <button
                 type="button"
@@ -1204,21 +1443,199 @@ export default function GamePreview() {
               className="ml-auto comic-btn px-2 py-0.5 text-[10px] font-black"
               onClick={applyEdit}
             >
-              应用并重开
+              应用并试玩
             </button>
             <button
               type="button"
               className="comic-btn px-2 py-0.5 text-[10px]"
-              onClick={() => setEdit(null)}
+              onClick={() => { cancelEdit(); setShowDebug(false) }}
             >
               退出编辑
             </button>
           </div>
+
+          <div className="comic-panel px-2 py-1.5 mb-1">
+            <div className="flex items-center gap-1 mb-1">
+              <span className="text-[9px] font-black text-black/45">关卡列表</span>
+              <span className="text-[8px] font-bold text-black/35">{edit.library.levels.length}/50</span>
+              <button type="button" className="ml-auto comic-btn px-1 py-0 text-[8px]" onClick={() => createEditorLevel(false)}>＋新建</button>
+              <button type="button" className="comic-btn px-1 py-0 text-[8px]" onClick={() => createEditorLevel(true)}>复制</button>
+            </div>
+            <div className="max-h-28 overflow-y-auto space-y-0.5">
+              {edit.library.levels.map((entry, index) => {
+                const level = entry.id === edit.levelId ? edit.draft : entry.level
+                const selected = entry.id === edit.levelId
+                return (
+                  <button key={entry.id} type="button" className={`w-full px-1.5 py-1 text-left border-2 ${selected ? 'border-[#B3392E] bg-[#B3392E]/10' : 'border-black/25 hover:bg-black/5'}`} onClick={() => switchEditorLevel(entry.id)}>
+                    <span className="flex items-center gap-1">
+                      <span className="font-comic text-[10px] font-black truncate">{String(index + 1).padStart(2, '0')} · {entry.name}</span>
+                      {edit.library.activeId === entry.id && <span className="ml-auto text-[7px] font-black px-1 border border-black bg-[#D9A441]">试玩</span>}
+                    </span>
+                    <span className="block text-[8px] font-bold text-black/45">{level.mode === 'advance' ? '推进' : '防守'} · {level.cols}×{level.rows} · 伏击 {level.triggers.length}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <div className="flex items-center gap-1 mt-1">
+              <input aria-label="关卡名称" className="flex-1 min-w-0 px-1 py-0.5 text-[9px] font-comic border border-black bg-[#EFEBD8]" value={edit.library.levels.find(x => x.id === edit.levelId)?.name ?? ''} onChange={e => renameEditorLevel(e.target.value)} />
+              <button type="button" aria-label="关卡上移" className="comic-btn px-1 py-0 text-[9px]" onClick={() => moveEditorLevel(-1)}>↑</button>
+              <button type="button" aria-label="关卡下移" className="comic-btn px-1 py-0 text-[9px]" onClick={() => moveEditorLevel(1)}>↓</button>
+              <button type="button" className="comic-btn px-1 py-0 text-[8px]" disabled={edit.library.levels.length <= 1} onClick={deleteEditorLevel}>删</button>
+            </div>
+            <div className="text-[8px] font-bold text-black/40 mt-1">“应用并试玩”会保存全部关卡，并把当前选中项设为试玩关卡。</div>
+          </div>
+
+          <div className="comic-panel px-2 py-1.5 mb-1 space-y-1">
+            <div className="text-[9px] font-black text-black/45">关卡设置</div>
+            <div className="flex items-center gap-1">
+              <span className="w-10 text-[9px] font-bold text-black/60">模式</span>
+              <select className="flex-1 min-w-0 px-1 py-0.5 text-[10px] font-comic border-2 border-black bg-[#EFEBD8]" value={edit.draft.mode} onChange={e => updateDraft(d => {
+                d.mode = e.target.value === 'advance' ? 'advance' : 'defend'
+                d.objective = d.mode === 'advance' ? { type: 'reach' } : { type: 'defend', waves: 6, waveWait: true, restTime: DEFEND_REST_TIME_DEFAULT, overlapTime: DEFEND_OVERLAP_TIME_DEFAULT }
+              })}>
+                <option value="defend">防守模式</option>
+                <option value="advance">推进模式</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="w-10 text-[9px] font-bold text-black/60">尺寸</span>
+              <input aria-label="关卡宽度" type="number" min={20} className="w-14 px-1 py-0.5 text-[10px] font-comic border-2 border-black bg-[#EFEBD8]" value={edit.draft.cols} onChange={e => updateDraft(d => reanchorCols(d, Math.max(20, Number(e.target.value) || 20)))} />
+              <span className="text-[9px] font-bold text-black/40">×</span>
+              <input aria-label="关卡纵深" type="number" min={12} className="w-14 px-1 py-0.5 text-[10px] font-comic border-2 border-black bg-[#EFEBD8]" value={edit.draft.rows} onChange={e => updateDraft(d => reanchorRows(d, Math.max(12, Number(e.target.value) || 12)))} />
+            </div>
+            {edit.draft.objective.type === 'defend' && (
+              <>
+                <div className="flex items-center gap-1">
+                  <span className="w-10 text-[9px] font-bold text-black/60">目标</span>
+                  <span className="text-[9px] font-bold">守住</span>
+                  <input aria-label="总波数" type="number" min={1} max={99} className="w-14 px-1 py-0.5 text-[10px] font-comic border-2 border-black bg-[#EFEBD8]" value={edit.draft.objective.waves} onChange={e => updateDraft(d => { if (d.objective.type === 'defend') d.objective.waves = Math.max(1, Math.min(99, Math.round(Number(e.target.value) || 1))) })} />
+                  <span className="text-[9px] font-bold">波</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="w-14 text-[9px] font-bold text-black/60">波次等待</span>
+                  <select aria-label="波次等待" className="w-16 px-1 py-0.5 text-[10px] font-comic border-2 border-black bg-[#EFEBD8]" value={(edit.draft.objective.waveWait ?? true) ? 'yes' : 'no'} onChange={e => updateDraft(d => { if (d.objective.type === 'defend') d.objective.waveWait = e.target.value === 'yes' })}><option value="yes">是</option><option value="no">否</option></select>
+                </div>
+                <div className="grid grid-cols-2 gap-1">
+                  <label className="text-[8px] font-bold">休整时间（秒）<input aria-label="休整时间" type="number" min={0} max={DEFEND_TIME_MAX} disabled={edit.draft.objective.waveWait === false} className="w-full px-1 py-0.5 text-[9px] font-comic border border-black bg-[#EFEBD8] disabled:opacity-40" value={edit.draft.objective.restTime ?? DEFEND_REST_TIME_DEFAULT} onChange={e => updateDraft(d => { if (d.objective.type === 'defend') d.objective.restTime = Math.max(0, Math.min(DEFEND_TIME_MAX, Number(e.target.value) || 0)) })} /></label>
+                  <label className="text-[8px] font-bold">接踵时间（秒）<input aria-label="接踵时间" type="number" min={0} max={DEFEND_TIME_MAX} disabled={edit.draft.objective.waveWait !== false} className="w-full px-1 py-0.5 text-[9px] font-comic border border-black bg-[#EFEBD8] disabled:opacity-40" value={edit.draft.objective.overlapTime ?? DEFEND_OVERLAP_TIME_DEFAULT} onChange={e => updateDraft(d => { if (d.objective.type === 'defend') d.objective.overlapTime = Math.max(0, Math.min(DEFEND_TIME_MAX, Number(e.target.value) || 0)) })} /></label>
+                </div>
+              </>
+            )}
+            <div className="border-t border-black/20 pt-1 mt-1">
+              <div className="text-[8px] font-black text-black/45 mb-0.5">关卡链</div>
+              <div className="grid grid-cols-[1fr_64px] gap-1">
+                <select aria-label="下一关" className="min-w-0 px-1 py-0.5 text-[9px] font-comic border border-black bg-[#EFEBD8]" value={edit.library.levels.find(x => x.id === edit.levelId)?.nextId ?? ''} onChange={e => updateEditorEntry(entry => { entry.nextId = e.target.value || null })}>
+                  <option value="">无下一关</option>
+                  {edit.library.levels.filter(x => x.id !== edit.levelId).map(x => <option key={x.id} value={x.id}>{x.name}</option>)}
+                </select>
+                <input aria-label="通关奖励" title="通关奖励废料" type="number" min={0} className="px-1 py-0.5 text-[9px] font-comic border border-black bg-[#EFEBD8]" value={edit.library.levels.find(x => x.id === edit.levelId)?.reward ?? 0} onChange={e => updateEditorEntry(entry => { entry.reward = Math.max(0, Math.round(Number(e.target.value) || 0)) })} />
+              </div>
+            </div>
+          </div>
+
+          <div className="comic-panel px-2 py-1.5 mb-1">
+            <div className="flex items-center gap-1 mb-1">
+              <span className="text-[9px] font-black text-black/45">伏击区域</span>
+              <button type="button" className="ml-auto comic-btn px-1.5 py-0 text-[9px]" onClick={() => {
+                const id = Math.max(0, ...edit.draft.triggers.map(t => t.id)) + 1
+                updateDraft(d => {
+                  const enemies = emptyTriggerEnemies(); enemies.walker = 4; enemies.runner = 2
+                  const w = Math.min(8, d.cols), h = Math.min(6, d.rows)
+                  d.triggers.push({ id, name: `伏击 ${id}`, enabled: true, x: Math.max(0, Math.floor((d.cols - w) / 2)), y: Math.max(0, d.rows - h - 6), w, h, activationLimit: 1, cooldown: 10, delay: 0.5, interval: 0.35, enemies, actions: [{ type: 'wait', seconds: 0.5 }, { type: 'spawn', enemies: structuredClone(enemies), interval: 0.35 }] })
+                })
+                BRUSH_DEFAULTS.selectedTriggerId = id
+                setEdit(cur => cur ? { ...cur, brush: 'trigger' } : cur)
+              }}>＋ 新增区域</button>
+            </div>
+            <div className="space-y-0.5">
+              {edit.draft.triggers.length === 0 && <div className="text-[9px] font-bold text-black/40 py-1">暂无伏击区域</div>}
+              {edit.draft.triggers.map(t => (
+                <button key={t.id} type="button" className={`w-full px-1.5 py-1 border text-left flex items-center gap-1 ${BRUSH_DEFAULTS.selectedTriggerId === t.id ? 'border-[#B3392E] bg-[#B3392E]/10' : 'border-black/30 hover:bg-black/5'}`} onClick={() => {
+                  BRUSH_DEFAULTS.selectedTriggerId = t.id
+                  setEdit(cur => cur ? { ...cur, brush: 'trigger' } : cur)
+                }}>
+                  <span className={`w-2 h-2 border border-black ${t.enabled ? 'bg-[#B3392E]' : 'bg-[#777269]'}`} />
+                  <span className="font-comic text-[10px] font-black truncate">{t.name}</span>
+                  <span className="ml-auto text-[8px] font-bold text-black/45">{t.w}×{t.h}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {(() => {
+            const t = edit.draft.triggers.find(x => x.id === BRUSH_DEFAULTS.selectedTriggerId)
+            if (!t) return null
+            const num = (label: string, value: number, set: (n: number) => void, step = 1) => (
+              <label className="flex items-center gap-1 min-w-0">
+                <span className="text-[8px] font-bold text-black/55 shrink-0">{label}</span>
+                <input type="number" step={step} className="w-full min-w-0 px-1 py-0 text-[9px] font-comic border border-black bg-[#EFEBD8]" value={value} onChange={e => set(Number(e.target.value) || 0)} />
+              </label>
+            )
+            return (
+              <div className="comic-panel px-2 py-1.5 mb-1 space-y-1">
+                <div className="flex items-center gap-1">
+                  <input className="flex-1 min-w-0 px-1 py-0.5 text-[10px] font-comic border-2 border-black bg-[#EFEBD8]" value={t.name} onChange={e => updateDraft(d => { const x = d.triggers.find(v => v.id === t.id); if (x) x.name = e.target.value })} />
+                  <label className="flex items-center gap-0.5 text-[8px] font-bold"><input type="checkbox" checked={t.enabled} onChange={e => updateDraft(d => { const x = d.triggers.find(v => v.id === t.id); if (x) x.enabled = e.target.checked })} />启用</label>
+                  <button type="button" className="comic-btn px-1 py-0 text-[8px]" onClick={() => {
+                    updateDraft(d => { d.triggers = d.triggers.filter(v => v.id !== t.id) })
+                    BRUSH_DEFAULTS.selectedTriggerId = null
+                  }}>删除</button>
+                </div>
+                <div className="grid grid-cols-4 gap-1">
+                  {num('x', t.x, n => updateDraft(d => { const x = d.triggers.find(v => v.id === t.id); if (x) x.x = Math.max(0, Math.min(d.cols - x.w, Math.round(n))) }))}
+                  {num('y', t.y, n => updateDraft(d => { const x = d.triggers.find(v => v.id === t.id); if (x) x.y = Math.max(0, Math.min(d.rows - x.h, Math.round(n))) }))}
+                  {num('w', t.w, n => updateDraft(d => { const x = d.triggers.find(v => v.id === t.id); if (x) x.w = Math.max(1, Math.min(d.cols - x.x, Math.round(n))) }))}
+                  {num('h', t.h, n => updateDraft(d => { const x = d.triggers.find(v => v.id === t.id); if (x) x.h = Math.max(1, Math.min(d.rows - x.y, Math.round(n))) }))}
+                </div>
+                <div className="grid grid-cols-2 gap-1">
+                  {num('次数', t.activationLimit, n => updateDraft(d => { const x = d.triggers.find(v => v.id === t.id); if (x) x.activationLimit = Math.max(1, Math.round(n)) }))}
+                  {num('冷却', t.cooldown, n => updateDraft(d => { const x = d.triggers.find(v => v.id === t.id); if (x) x.cooldown = Math.max(0, n) }), 0.1)}
+                </div>
+                <div className="text-[8px] font-black text-black/45">动作序列</div>
+                <ActionEditor actions={t.actions} interactables={edit.draft.interactables} onChange={actions => updateDraft(d => { const x = d.triggers.find(v => v.id === t.id); if (x) x.actions = actions })} />
+                <div className="text-[8px] font-bold text-black/40">画布中点击区域可选中；点击空地可移动选中区域。</div>
+              </div>
+            )
+          })()}
+
+          <div className="comic-panel px-2 py-1.5 mb-1">
+            <div className="flex items-center gap-1 mb-1">
+              <span className="text-[9px] font-black text-black/45">场景交互物</span>
+              <button type="button" className="ml-auto comic-btn px-1.5 py-0 text-[9px]" onClick={() => {
+                const id = Math.max(0, ...edit.draft.interactables.map(t => t.id)) + 1
+                updateDraft(d => d.interactables.push({ id, name: `补给点 ${id}`, kind: 'supply', enabled: true, once: true, x: Math.max(0, Math.floor(d.cols / 2) - 1), y: Math.max(0, d.rows - 16), w: 2, h: 2, actions: [{ type: 'message', text: '发现战场补给', duration: 2.5 }, { type: 'reward', gold: 100 }] }))
+                BRUSH_DEFAULTS.selectedInteractableId = id
+                setEdit(cur => cur ? { ...cur, brush: 'interactable' } : cur)
+              }}>＋ 新增</button>
+            </div>
+            <div className="space-y-0.5">
+              {edit.draft.interactables.length === 0 && <div className="text-[9px] font-bold text-black/40">暂无交互物</div>}
+              {edit.draft.interactables.map(item => <button key={item.id} type="button" className={`w-full px-1.5 py-1 border text-left flex items-center gap-1 ${BRUSH_DEFAULTS.selectedInteractableId === item.id ? 'border-[#8A5C9E] bg-[#8A5C9E]/10' : 'border-black/30'}`} onClick={() => { BRUSH_DEFAULTS.selectedInteractableId = item.id; setEdit(cur => cur ? { ...cur, brush: 'interactable' } : cur) }}><span className="font-comic text-[10px] font-black truncate">{item.name}</span><span className="ml-auto text-[8px] text-black/45">{item.kind} · {item.actions.length} 动作</span></button>)}
+            </div>
+          </div>
+
+          {(() => {
+            const item = edit.draft.interactables.find(x => x.id === BRUSH_DEFAULTS.selectedInteractableId)
+            if (!item) return null
+            const patchItem = (fn: (next: LevelInteractable) => void) => updateDraft(d => { const next = d.interactables.find(x => x.id === item.id); if (next) fn(next) })
+            return <div className="comic-panel px-2 py-1.5 mb-1 space-y-1">
+              <div className="flex gap-1"><input aria-label="交互物名称" className="flex-1 min-w-0 px-1 text-[9px] border border-black bg-[#EFEBD8]" value={item.name} onChange={e => patchItem(x => { x.name = e.target.value })} /><select aria-label="交互物类型" className="px-1 text-[9px] border border-black bg-[#EFEBD8]" value={item.kind} onChange={e => patchItem(x => { x.kind = e.target.value as LevelInteractable['kind'] })}><option value="checkpoint">检查点</option><option value="supply">补给点</option><option value="gate">闸门</option><option value="target">任务目标</option></select><button type="button" className="comic-btn px-1 py-0 text-[8px]" onClick={() => { updateDraft(d => { d.interactables = d.interactables.filter(x => x.id !== item.id) }); BRUSH_DEFAULTS.selectedInteractableId = null }}>删除</button></div>
+              <div className="grid grid-cols-4 gap-1">{(['x', 'y', 'w', 'h'] as const).map(k => <label key={k} className="text-[8px] font-bold">{k}<input type="number" min={k === 'w' || k === 'h' ? 1 : 0} className="w-full px-1 border border-black bg-[#EFEBD8]" value={item[k]} onChange={e => patchItem(x => { x[k] = Math.max(k === 'w' || k === 'h' ? 1 : 0, Math.round(Number(e.target.value) || 0)) })} /></label>)}</div>
+              <div className="flex gap-2"><label className="text-[8px] font-bold"><input type="checkbox" checked={item.enabled} onChange={e => patchItem(x => { x.enabled = e.target.checked })} />启用</label><label className="text-[8px] font-bold"><input type="checkbox" checked={item.once} onChange={e => patchItem(x => { x.once = e.target.checked })} />仅一次</label></div>
+              <div className="text-[8px] font-black text-black/45">激活动作</div>
+              <ActionEditor actions={item.actions} interactables={edit.draft.interactables} onChange={actions => patchItem(x => { x.actions = actions })} />
+            </div>
+          })()}
+
+          <div className="text-[9px] font-black text-black/45 px-1 mb-1">场景工具</div>
           <div className="grid grid-cols-3 portrait:grid-cols-6 gap-1">
             {([
               ['puddle', '水坑', '#5E7078'], ['barrel', '油桶', '#A05C48'], ['ruins', '废墟', '#5A564E'],
               ['rock', '岩石', '#7A7264'], ['buildzone', '基地格', '#D9A441'], ['ground', '战场地面', '#6F7E6A'],
-              ['building', '固有建筑', '#8A8272'], ['core', '核心', '#C8B568'], ['turret', '初始炮塔', '#5C7E8C'],
+              ['core', '核心', '#C8B568'],
+              ['start', '玩家起点', '#3E7D46'], ['finish', '关卡终点', '#D9A441'],
+              ['trigger', '伏击区域', '#B3392E'],
+              ['interactable', '交互物', '#8A5C9E'],
               ['eraser', '橡皮擦', '#C9C29F'], ['move', '移动', '#EFEBD8'],
             ] as [Brush, string, string][]).map(([id, name, color]) => (
               <button
@@ -1244,12 +1661,16 @@ export default function GamePreview() {
             ))}
           </div>
           <div className="text-center text-[9px] text-black/50 font-bold mt-1">
-            {edit.brush === 'building'
-              ? '点地图放置/移动选中建筑（在 DEBUG 面板选择）'
-              : edit.brush === 'core'
+            {edit.brush === 'core'
                 ? '点地图移动核心建筑（锚定点击格）'
-                : edit.brush === 'turret'
-                  ? `点地图放置初始炮塔「${TURRET_DEFS.find(d => d.id === BRUSH_DEFAULTS.turretDefId)?.name ?? '?'}」`
+                : edit.brush === 'start'
+                    ? '点地图放置玩家起点区域'
+                    : edit.brush === 'finish'
+                      ? '点地图放置关卡终点区域（堡垒中心进入即过关）'
+                    : edit.brush === 'trigger'
+                      ? '点击区域选中；点击空地移动当前伏击区域'
+                    : edit.brush === 'interactable'
+                      ? '点击交互物选中；点击空地移动当前交互区域'
                   : edit.brush === 'eraser'
                     ? '点击/拖动擦除该格所有编辑层内容（含初始墙与核心）'
                     : edit.brush === 'move'
@@ -1278,12 +1699,18 @@ export default function GamePreview() {
           </div>
         </div>
         <div className="flex-1 min-w-0 grid grid-cols-2 gap-x-2 gap-y-[3px]">
-          <ResourceBar label="防御" value={Math.ceil(game.fortress.hp)} max={game.fortress.maxHp} color="#8C4A3C" />
+          <ResourceBar label="结构" value={Math.ceil(game.fortress.hp)} max={game.fortress.maxHp} color="#8C4A3C" />
+          {game.fortress.maxShield > 0 ? <ResourceBar label="护盾" value={Math.ceil(game.fortress.shield)} max={game.fortress.maxShield} color="#69B8C5" /> : null}
           <ResourceBar label="热量" value={Math.round(game.fortress.heat)} max={fortressDef(game).heatCap} color="#D9762E" />
           <ResourceBar label="弹药" value={game.ammo} max={resourceCaps(game).ammoCap} color="#A07840" />
           <ResourceBar label="电量" value={game.energy} max={resourceCaps(game).energyCap} color="#5C7E8C" />
         </div>
+        <div className="grid grid-cols-2 gap-x-1 text-[8px] font-black text-black/55 shrink-0" title="四向装甲：前/后/左/右" aria-label="四向装甲值">
+          <span>前 {Math.ceil(game.fortress.armor.front)}</span><span>后 {Math.ceil(game.fortress.armor.rear)}</span>
+          <span>左 {Math.ceil(game.fortress.armor.left)}</span><span>右 {Math.ceil(game.fortress.armor.right)}</span>
+        </div>
         {game.fortress.overheated && <span className="text-[10px] font-black text-[#B3392E] shrink-0">过热停火!</span>}
+        {game.fortress.shieldBroken && <span className="text-[9px] font-black text-[#397F8A] shrink-0">护盾离线</span>}
         <div className="flex flex-col gap-1 shrink-0">
           <button
             type="button"
@@ -1304,16 +1731,28 @@ export default function GamePreview() {
         <div className="absolute inset-0 z-40 bg-black/60 flex items-center justify-center p-6">
           <div className="comic-panel w-full max-w-[280px] px-4 py-6 flex flex-col items-center gap-3 rotate-[-1.5deg] animate-[slam_0.25s_ease-out]">
             <div className={`font-comic text-3xl ${game.phase === 'lost' ? 'text-[#B3392E]' : ''}`}>
-              {game.phase === 'lost' ? '堡垒被毁' : '废土守住了'}
+              {game.phase === 'lost' ? '堡垒被毁' : game.objective.type === 'reach' ? '已抵达终点' : '废土守住了'}
             </div>
             <div className="text-xs font-bold text-black/60">
               {game.phase === 'lost'
                 ? `移动堡垒在第 ${game.wave} 波被击穿`
-                : `你守住了全部 ${TOTAL_WAVES} 波进攻 · 击杀 ${game.kills}`}
+                : game.objective.type === 'defend'
+                  ? `你守住了全部 ${game.objective.waves} 波进攻 · 击杀 ${game.kills}`
+                  : game.objective.type === 'survive'
+                    ? `你生存了 ${game.objective.duration} 秒 · 击杀 ${game.kills}`
+                    : `移动堡垒成功穿越战场 · 击杀 ${game.kills}`}
             </div>
+            {game.phase === 'won' && (LEVEL_LIBRARY.levels.find(x => x.id === LEVEL_LIBRARY.activeId)?.reward ?? 0) > 0 && (
+              <div className="text-xs font-black text-[#8A5A16]">战役奖励 +{LEVEL_LIBRARY.levels.find(x => x.id === LEVEL_LIBRARY.activeId)?.reward} 废料</div>
+            )}
             <button type="button" onClick={reset} className="comic-btn px-4 py-2 font-comic text-sm">
               再来一局
             </button>
+            {game.phase === 'won' && (() => {
+              const current = LEVEL_LIBRARY.levels.find(x => x.id === LEVEL_LIBRARY.activeId)
+              const next = current?.nextId ? LEVEL_LIBRARY.levels.find(x => x.id === current.nextId) : null
+              return next ? <button type="button" onClick={() => { if (activateLibraryLevel(next.id)) reset() }} className="comic-btn px-4 py-2 font-comic text-sm bg-[#D9A441]">进入下一关：{next.name}</button> : null
+            })()}
           </div>
         </div>
       )}
@@ -1321,6 +1760,7 @@ export default function GamePreview() {
       {showDebug && (
         <DebugPanel
           onClose={() => setShowDebug(false)}
+          onExitSceneEdit={cancelEdit}
           onDeleteDef={(defId) => {
             // 删除自定义炮塔时，同步移除场上已放置实例并清理相关选择/建造状态
             setGame(g => ({ ...g, turrets: g.turrets.filter(t => t.defId !== defId) }))
@@ -1331,22 +1771,34 @@ export default function GamePreview() {
             setMode(m => (m.kind === 'turret' && m.defId === defId ? { kind: 'none' } : m))
           }}
           onRestart={() => {
-            // 战场编辑器应用/恢复默认：重置本局并清理选择/模式
+            // 关卡编辑器应用/恢复默认：重置本局并清理选择/模式
             setGame(initialState())
             setSelTurret(null)
             setMode({ kind: 'none' })
           }}
           onPatchGame={(fn) => setGame(g => { fn(g); return { ...g } })}
           onEnterSceneEdit={() => {
-            // 进入场景编辑：深拷贝 LEVEL 为草稿，切备战视角并暂停
-            const draft = structuredClone(LEVEL)
+            // 打开关卡编辑工作区：载入完整库；活动关卡作为初始草稿，画布临时预览所选关卡。
+            const library = levelLibraryForExport()
+            const active = library.levels.find(x => x.id === library.activeId) ?? library.levels[0]
+            const draft = structuredClone(active.level)
             draft.initialWalls = [] // 防御墙由基地格派生，编辑器不再管理墙体（旧数据弃置）
-            setEdit({ draft, brush: 'buildzone', picked: null })
-            setShowDebug(false)
+            if (!draft.triggers.some(t => t.id === BRUSH_DEFAULTS.selectedTriggerId)) {
+              BRUSH_DEFAULTS.selectedTriggerId = draft.triggers[0]?.id ?? null
+            }
+            if (!draft.interactables.some(t => t.id === BRUSH_DEFAULTS.selectedInteractableId)) {
+              BRUSH_DEFAULTS.selectedInteractableId = draft.interactables[0]?.id ?? null
+            }
+            setEdit({ draft, levelId: active.id, library, playLevel: structuredClone(LEVEL), brush: draft.mode === 'advance' ? 'start' : 'buildzone', picked: null })
             setMode({ kind: 'none' })
             setSelTurret(null)
-            setViewX(0)
-            setViewY(LEVEL.rows - VIEW_ROWS)
+            if (LEVEL.mode === 'advance') {
+              setViewX(clampViewX(LEVEL.startZone.x + LEVEL.startZone.w / 2 - (size.w / cell) / 2, cell, size.w))
+              setViewY(clampViewY(LEVEL.startZone.y + LEVEL.startZone.h / 2 - (size.h / cell) / 2, cell, size.h))
+            } else {
+              setViewX(0)
+              setViewY(LEVEL.rows - VIEW_ROWS)
+            }
           }}
         />
       )}

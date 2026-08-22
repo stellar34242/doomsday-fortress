@@ -5,7 +5,7 @@
 import type { FortressDef, FortressEffectKind, FortressEffectLayer, FortressEffectPoint } from './config'
 import { BASE_CELL } from './config'
 import { spawnTrail, type ParticlePool } from './particles'
-import { fortressMarkColumns, fortressRect, type GameState } from './engine'
+import { fortressMarkColumns, fortressRect, wheelVisualSteerAngle, type GameState } from './engine'
 
 /** 特效点解析后的发射参数（缺省按 kind） */
 export interface FortressEffectParams {
@@ -115,7 +115,7 @@ export function emitFortressEffects(
 // （弧线转向左右差速、倒退反滚天然正确——与船体履带瓦片滚动同一数据源，印与轮永不脱节）
 
 export interface TrackMark { x: number; y: number; angle: number; born: number; tile: string }
-export interface TrackMarkState { acc: number[]; prevPhase: number[]; moving: boolean[] } // 按侧索引 i*2+（0=定义侧 1=镜像侧）
+export interface TrackMarkState { acc: number[]; prevPhase: number[]; moving: boolean[] } // 与 fortressMarkColumns 展开后的列一一对应
 export const TRACK_MARK_LIFE = 12 // 印寿命（秒，游戏时间；暂停不老化）；v2.43：前 2s 全亮 + 后 10s 渐隐
 export const TRACK_MARK_FADE = 10 // 渐隐窗口（秒，v2.43）：寿命最后 10s 线性到 0
 export const TRACK_MARK_ALPHA = 0.25 // 印基础透明度（v2.43：0.38→0.25）
@@ -136,7 +136,7 @@ export function updateTrackMarks(
   tileH: (tile: string) => number | null,
 ): void {
   for (let i = marks.length - 1; i >= 0; i--) if (s.time - marks[i].born > TRACK_MARK_LIFE) marks.splice(i, 1)
-  // v2.51：统一列布局 = 履带（左定义列+右镜像列）+ 轮子（逐轮退化单列，落印点=轮心）
+  // 统一列布局 = 履带（左定义列+右镜像列）+ 轮胎（单个一列 / 成对左右两列，落印点=轮心）
   const cols = fortressMarkColumns(fd)
   const n = cols.length
   if (st.prevPhase.length !== n) { // 初始化/列数变化：锚定当前相位，不产生爆发
@@ -151,6 +151,7 @@ export function updateTrackMarks(
   const cy = fr.y + fr.h / 2
   const cos = Math.cos(s.fortress.heading)
   const sin = Math.sin(s.fortress.heading)
+  const visualSteer = wheelVisualSteerAngle(s, fd)
   // 世界速度 → 船体局部（局部 −y = 前进方向，与 dirX/dirY 约定一致）
   const lvx = s.fortress.vx * cos + s.fortress.vy * sin
   const lvy = -s.fortress.vx * sin + s.fortress.vy * cos
@@ -175,14 +176,15 @@ export function updateTrackMarks(
     const ly = gy - fr.h / 2
     const wx = cx + lx * cos - ly * sin
     const wy = cy + lx * sin + ly * cos
+    const markAngle = s.fortress.heading + (t.steered ? visualSteer : 0)
     if (Math.abs(d) > 1e-9 && !st.moving[k]) { // v2.42 启动印：静止→移动瞬间立即落一印（间距后续仍按 acc 步进，不密不疏）
-      marks.push({ x: wx, y: wy, angle: s.fortress.heading, born: s.time, tile: t.tile })
+      marks.push({ x: wx, y: wy, angle: markAngle, born: s.time, tile: t.tile })
     }
     st.moving[k] = Math.abs(d) > 1e-9
     if (Math.abs(acc) < step) { st.acc[k] = acc; continue }
     let rest = acc
     while (rest >= step || rest <= -step) { // 正倒向都落印
-      marks.push({ x: wx, y: wy, angle: s.fortress.heading, born: s.time, tile: t.tile })
+      marks.push({ x: wx, y: wy, angle: markAngle, born: s.time, tile: t.tile })
       rest += rest >= step ? -step : step
     }
     st.acc[k] = rest

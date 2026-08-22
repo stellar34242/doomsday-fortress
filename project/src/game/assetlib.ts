@@ -3,9 +3,11 @@
  *  上传条目 = 本地图片 dataURL，localStorage 'td-asset-lib' 持久化（体积敏感：>500KB 软警告仍允许）。 */
 const STORAGE_KEY = 'td-asset-lib'
 
-export type AssetCategory = 'base' | 'turret' | 'barrel' | 'flash' | 'projectile' | 'charge' | 'beam' | 'module' | 'other' // 底座/炮身/炮管/开火效果/弹丸/充能/光束/模块/未分类（v2.30 新增模块）
+export type AssetCategory = 'base' | 'turret' | 'barrel' | 'flash' | 'projectile' | 'charge' | 'beam' | 'module' | 'decal'
+  | 'fortressBase' | 'fortressBody' | 'wheel' | 'other'
 export const ASSET_CATEGORY_NAME: Record<AssetCategory, string> = {
-  base: '底座', turret: '炮身', barrel: '炮管', flash: '效果', projectile: '弹丸', charge: '充能', beam: '光束', module: '模块', other: '未分类', // v2.15：开火效果→效果；v2.30：新增模块分类
+  base: '炮塔底座', turret: '炮身', barrel: '炮管', flash: '效果', projectile: '弹丸', charge: '充能', beam: '光束', module: '模块', decal: '徽记',
+  fortressBase: '堡垒底座', fortressBody: '堡垒主体', wheel: '轮胎', other: '未分类',
 }
 const ASSET_CATEGORIES = Object.keys(ASSET_CATEGORY_NAME) as AssetCategory[]
 
@@ -53,8 +55,8 @@ const LIBRARY_ASSETS: [string, AssetCategory][] = [ // [文件名（原名）, �
   ['charge_laser_m', 'charge'],
   // 开火效果 ×1（v1.74 口令沉淀：fx_fire_S 设为内置开火效果；同口令 DualGun-_S1/S2 已直接替换 dualgun_s1/s2.png 贴图文件，分类与引用不变）
   ['fx_fire_s', 'flash'],
-  // 履带瓦片 ×1（v1.85 用户上传 Track01：履带板循环拼接瓦片，重叠 2px）
-  ['track01', 'base'],
+  // Track01 ×1（v1.85 用户上传：履带板循环拼接瓦片，重叠 2px；v2.72 按用户要求转入「轮胎」）
+  ['track01', 'wheel'],
 ]
 // 光束贴图 ×15（v2.11 用户上传：落位 /res/beam/，独立「光束」分类，亮芯层/光晕层选择指向；
 // 白图 alpha 遮罩走 tintedFx 着色；v2.7 旧 7 张 beam_glow_a-d/beam_core_a-c 已删除）
@@ -84,6 +86,15 @@ const FX_ASSETS: string[] = ['glow16', 'particlealpha32', 'smoke32']
 for (const file of FX_ASSETS) {
   lib.push({ id: `builtin:fx/${file}`, name: file, src: `/res/fx/${file}.png`, builtin: true, category: 'flash' })
 }
+// v2.72：堡垒编辑器不再内嵌上传；底座、主体、轮胎统一从素材库引用。
+const FORTRESS_ASSETS: AssetEntry[] = [
+  { id: 'builtin:fortress/standard/base', name: '测试堡垒·底座', src: '/res/fortresses/fort_1_02.png', builtin: true, category: 'fortressBase' },
+  { id: 'builtin:fortress/standard/body', name: '测试堡垒·主体', src: '/res/fortresses/fort_1_01.png', builtin: true, category: 'fortressBody' },
+  { id: 'builtin:vehicle/jeep-open-s/base', name: '二战吉普·机械底座', src: '/res/vehicles/jeep_open_s_base.png', builtin: true, category: 'fortressBase' },
+  { id: 'builtin:vehicle/jeep-open-s/body', name: '二战吉普·车身主体', src: '/res/vehicles/jeep_open_s_body.png', builtin: true, category: 'fortressBody' },
+  { id: 'builtin:vehicle/jeep-open-s/wheel', name: '二战吉普·轮胎', src: '/res/vehicles/jeep_open_s_wheel.png', builtin: true, category: 'wheel' },
+]
+lib.push(...FORTRESS_ASSETS)
 
 export interface UploadData { id: string; name: string; src: string; category?: AssetCategory }
 
@@ -144,6 +155,12 @@ export function listAssets(): AssetEntry[] { return lib }
 
 export function getAsset(id: string): AssetEntry | undefined {
   return lib.find(e => e.id === id)
+}
+
+/** 素材库 id / 遗留路径 / dataURL 统一解析；便于新引用与旧存档共存。 */
+export function resolveAssetSrc(ref: string | undefined): string | undefined {
+  if (!ref) return undefined
+  return getAsset(ref)?.src ?? ref
 }
 
 /** 上传条目（dataURL）；name 为空取 id；category 默认 'other'（未分类，所有选配下拉末尾仍可见） */

@@ -7,27 +7,29 @@ import {
 import type { BattleObject, EnemyKind, FortressDef, TurretDef, TurretTag } from '../src/game/config'
 import { trackPlacements,
   allySpawnPoint, artMounts, blockerAt, turretRenderKey, buildModule, canMountTurret, canPlaceModule, computePathField, demolishAt, demolishModule, dirX, dirY, wrapAngle,
-  eventRandom, fortressCells, fortressRect, initialState,
+  damageFortress, eventRandom, fortressArmorSideAt, fortressCells, fortressReachedFinish, fortressRect, initialState,
   fortressCooling, fortressDef, fortressMaxHp, fortressSpeed, fortressTurnSpeed, hardpointArcContains, hardpointWorldPos, moduleBonuses, moduleCells, moduleDefOf, moduleFoot, moduleSpecialMult, mountTurret, muzzlePos, placeBaseCellAt, placeTurret, resourceCaps,
   syncDerivedWalls, tick,
   turretRangeBonus, unmountTurret,
   RACK_RELOAD_ANIM, rackMissilePos, validateFortressDef, validateTemplateClosed,
-  beamMarch, beamLength, BEAM_ON_SPEED, BEAM_FADE, fortressMarkColumns,
+  beamMarch, beamLength, BEAM_ON_SPEED, BEAM_FADE, fortressMarkColumns, modulePlanningFits, simulateTurretHeat, wheelPlacements, wheelVisualSteerAngle,
+  shieldStats, enemyProjectileFortressHit, fortressDamageLocalPoint, fortressDistanceToPoint, fortressPenetrationChance, FORTRESS_DAMAGE_MARK_CAP,
 } from '../src/game/engine'
-import { LEVEL, parseLevel, templateWallCells } from '../src/game/level'
+import { LEVEL, normalizeObjective, parseLevel, templateWallCells } from '../src/game/level'
 import { simAmmoFx, simAmmoSeq, canPlay, fxTick, createFxState, FX_PREVIEW_SPEED, FX_SEQ_HIT_X, FX_RAY_SEQ_ON, fxRaySeqFade, fxRaySeqLen } from '../src/game/ammoFxPreview'
 import { createPool } from '../src/game/particles'
 import { chargeFrameRect, resCompatUrl, validateArt, projectileArtDef, projectileArtState, resolveSpriteFolder, resolveAmmoFolder, turretArtState, turretLayerSrcs, ammoProjectileSrc, resolveTrailFx, resolveExplosionFx, resolveImpactFx, beamArtConfig, beamArtConfigOf, smokeDuration } from '../src/game/art'
-import { parseProjectileArts, parseTurretDefs, serializeProjectileArts, serializeTurretDefs } from '../src/game/persist'
+import { migrateModuleDefs, parseProjectileArts, parseTurretDefs, serializeProjectileArts, serializeTurretDefs } from '../src/game/persist'
 import { deleteCustomFortress, fortressPersistFailed, getSelectedFortressId, isBuiltinFortressOverridden, resetPersistedToDefaults, saveCustomFortress, setSelectedFortressId } from '../src/game/persist'
 import { applyConfig, applyConfigSmart, encodeBase64, exportConfig, exportConfigJson, parseConfig, parseConfigSmart } from '../src/game/config_transfer'
-import { addAsset, filterAssets, getAsset, importUploads, listAssets, removeAsset, uploadsForExport, ASSET_CATEGORY_NAME } from '../src/game/assetlib'
+import { addAsset, filterAssets, getAsset, importUploads, listAssets, removeAsset, resolveAssetSrc, uploadsForExport, ASSET_CATEGORY_NAME } from '../src/game/assetlib'
 import { createPool, glowFlicker, gradientColorKey, ringProgress, spawnBurst, spawnTrail, stepParticles } from '../src/game/particles'
 import { effectParams, effectWorldPos, emitFortressEffects, trackMarkStep, updateTrackMarks, TRACK_MARK_CAP, TRACK_MARK_LIFE, type TrackMark, type TrackMarkState } from '../src/game/fortressFx'
 import { craterOpacity, craterRadius, updateCraters, CRATER_CAP, CRATER_LIFE, type Crater } from '../src/game/craters'
-import { clampViewY , wallFaceInfo , wallVertexInfo , classifyWallTile } from '../src/game/render'
-import { canPlaceBaseCell, COLS_MIN, defaultLevel, invalidateWallInfo, isBaseCell, isInnerCell, isWallSegment, LEVEL, mergeBaseCells, reanchorCols, reanchorRows, resetLevel } from '../src/game/level'
+import { clampViewY, edgeBandView, wallFaceInfo, wallVertexInfo, classifyWallTile, fortressDamageStage, shieldCornerRadius, shieldEdgePulse, shieldHexLayout, shieldHexRipple, shieldPerimeterSamples, shieldUnfoldProgress, shieldUnfoldScale, shieldBreakEnvelope, shieldFieldMotion, shieldShardSize } from '../src/game/render'
+import { canPlaceBaseCell, COLS_MIN, defaultLevel, defaultLevelLibrary, invalidateWallInfo, isBaseCell, isInnerCell, isWallSegment, LEVEL, LEVEL_LIBRARY, levelLibraryForExport, mergeBaseCells, parseLevelLibrary, reanchorCols, reanchorRows, resetLevel, saveLevelLibrary } from '../src/game/level'
 import { rmxpAutotileIndex, rmxpQuarterSrc, RMXP_SUBTILES } from '../src/game/autotile'
+import { clearFortressBodyAlpha, registerFortressBodyAlpha } from '../src/game/fortressBodyMask'
 import type { Enemy, ExplosionFx, GameState, Turret } from '../src/game/engine'
 
 // ---------- 确定性随机 ----------
@@ -186,9 +188,9 @@ console.log('== v1.72 口令覆盖出厂配置验收 ==')
     && fd0.hardpoints.some(h => h.id === 'hpL1' && h.size === 'L'),
     `hps=${fd0.hardpoints.length} cells=${fd0.interiorCells?.length}`)
   const up1 = getAsset('upload-1')
-  check('口令覆盖：出厂上传播种 upload-1（missile_s/弹丸/非内置；内置 36 件）',
+  check('口令覆盖：出厂上传播种 upload-1（missile_s/弹丸/非内置；内置 41 件）',
     !!up1 && up1.name === 'missile_s' && up1.category === 'projectile' && !up1.builtin
-    && listAssets().filter(a => a.builtin).length === 36, // v1.85：+track01；v2.11：15 光束；v2.15：+3 特效（效果分类）；v2.17：+2
+    && listAssets().filter(a => a.builtin).length === 41, // v1.85：+track01；v2.11：15 光束；v2.15：+3 特效；v2.17：+2；v2.71：+3 护盾；v2.72：+堡垒底座/主体
     JSON.stringify(up1 ? { id: up1.id, name: up1.name, cat: up1.category } : null))
 }
 console.log('== v1.76 炮塔型号（S/M/L）决定占格验收 ==')
@@ -934,7 +936,7 @@ console.log('== 战场验收 ==')
   const fr = fortressRect(s)
   const e = mkEnemy(s, 'brute', fr.x + fr.w / 2, fr.y - 0.5, 5000)
   e.mode = 'attack'; e.targetKind = 'core'; e.targetId = 0
-  s = tick(s, 0.1)
+  s = tick(s, 0.2) // 远程重甲弹出膛并跨越到车体
   check('船体 hp 归零进入毁灭序列（不立即判负）', s.fortress.hp === 0 && s.fortress.dyingT >= 0 && s.phase !== 'lost', `phase=${s.phase} dyingT=${s.fortress.dyingT}`)
   for (let i = 0; i < 23; i++) s = tick(s, 0.1) // 推进越过 DEATH_END_T（2.2s）
   check('毁灭演出毕判负', s.phase === 'lost', `phase=${s.phase} dyingT=${s.fortress.dyingT.toFixed(2)}`)
@@ -1375,10 +1377,12 @@ console.log('== 关卡配置（LEVEL）验收 ==')
     `originOk=${originOk} y=${ee.y} mode=${ee.mode}/${ee.targetKind}`)
   // 船体归零 → v2.53 毁灭序列（演出毕判负，取代旧同帧判负）
   s.fortress.hp = 1
+  s.fortress.armor.front = 0 // 本用例只验毁灭序列，隔离 v2.76 概率跳弹
   const fr1 = fortressRect(s)
   const b = mkEnemy(s, 'brute', fr1.x + fr1.w / 2, fr1.y - 0.5, 100000)
   b.mode = 'attack'; b.targetKind = 'core'; b.targetId = 0
-  s = tick(s, 0.1)
+  s = tick(s, 0.1) // 第一帧发射
+  s = tick(s, 0.1) // 第二帧推进独立敌方弹丸到主体
   check('船体归零进入毁灭序列（不立即判负）', s.fortress.dyingT >= 0 && s.phase !== 'lost', `phase=${s.phase} dyingT=${s.fortress.dyingT}`)
   for (let i = 0; i < 23; i++) s = tick(s, 0.1)
   check('毁灭演出毕判负', s.phase === 'lost', `phase=${s.phase}`)
@@ -1441,14 +1445,17 @@ console.log('== 关卡配置（LEVEL）验收 ==')
   restoreLevel()
 }
 
-// --- ⑧ version 迁移：旧配置（模板墙格 + buildCells）合并为基地格全集，version 升 6（18×36 空地） ---
+// --- ⑧ version 迁移：旧配置迁移至 v10（含通用事件动作与交互物） ---
 {
   const m1 = parseLevel(JSON.stringify({ buildTop: 20, buildBottom: 24 })) // 无 version 老存档
   const m2 = parseLevel(JSON.stringify({ version: 2, initialWalls: [] })) // v2 存档同样并入模板墙
-  check('version 迁移：模板墙格 + buildCells 合并为基地格全集，version 升 6 且 groundCells 默认空',
-    m1.version === 6 && m2.version === 6
+  check('version 迁移：模板墙格 + buildCells 合并为基地格全集，version 升 10 且补齐事件/交互物',
+    m1.version === 10 && m2.version === 10
     && Array.isArray(m1.groundCells) && m1.groundCells.length === 0
     && Array.isArray(m2.groundCells) && m2.groundCells.length === 0
+    && m1.mode === 'defend' && m1.objective.type === 'defend'
+    && m1.startZone.w > 0 && m1.finishZone.w > 0
+    && m1.triggers.length === 0 && m2.triggers.length === 0 && m1.interactables.length === 0
     && new Set(m1.buildCells).size === m1.buildCells.length
     && m1.rows === 28 && m1.cols === 42 // 旧配置无 rows/cols → 28/COLS（v1.41 上限不限：不再钳到 24）；v2.45 口令(5)：COLS 36→42
     && templateWallCells(m1.rows, m1.cols).every(c => m1.buildCells.includes(`${c.x},${c.y}`))
@@ -1469,7 +1476,7 @@ console.log('== 关卡配置（LEVEL）验收 ==')
   lv.version = 4
   const loaded = parseLevel(JSON.stringify(lv))
   check('v4 存档往返：buildCells/groundCells 原样保留，不回补模板墙格',
-    loaded.version === 6
+    loaded.version === 10
     && loaded.buildCells.length === lv.buildCells.length
     && removed.every(k => !loaded.buildCells.includes(k))
     && lv.buildCells.every(k => loaded.buildCells.includes(k))
@@ -3124,30 +3131,32 @@ console.log('== 配置导出/导入验收 ==')
   const ra = applyConfigSmart(json) // 恒等应用（同一份数据，注册表不应变化）
   const after = JSON.stringify({ t: TURRET_DEFS, a: PROJECTILE_ARTS, l: LEVEL })
   check('v2.18：Smart 解析 JSON/base64 双兼容 + JSON 往返恒等 + 坏 JSON 报错',
-    pj.ok && pj.bundle.app === 'td-config' && pj.bundle.version === 4 &&
+    pj.ok && pj.bundle.app === 'td-config' && pj.bundle.version === 6 && Array.isArray(pj.bundle.levelLibrary?.levels) &&
     pb.ok && pb.bundle.turretDefs.length === TURRET_DEFS.length &&
     !badJson.ok && ra.ok && snapshot === after,
     `pj=${pj.ok} pb=${pb.ok} bad=${badJson.ok ? 'unexpected-ok' : badJson.error} ra=${ra.ok} same=${snapshot === after}`)
 }
 
-// --- v2.30 模块库：口令 v4 携带 moduleDefs + 旧 v3 口令不动模块库 + 非法形状/版本拒收 ---
+// --- v2.30/v2.62/v2.69：口令 v6 携带模块库版本+关卡库；旧 v3 仍兼容 ---
 {
   const json = exportConfigJson()
   const o = JSON.parse(json) as { version: number; moduleDefs?: unknown }
   const mSnap = JSON.stringify(MODULE_DEFS)
-  const r4 = applyConfigSmart(json) // v4 恒等往返
+  const r6 = applyConfigSmart(json) // v6 恒等往返
   const legacy = JSON.parse(json) as Record<string, unknown>
   legacy.version = 3
   delete legacy.moduleDefs
+  delete legacy.levelLibrary
   const r3 = applyConfigSmart(JSON.stringify(legacy)) // v3 导入：moduleDefs undefined → 不动现有模块库
   const bad = parseConfigSmart(JSON.stringify({ ...JSON.parse(json), moduleDefs: 'xxx' }))
-  const badVer = parseConfigSmart(JSON.stringify({ ...JSON.parse(json), version: 5 }))
-  check('v2.30：口令 v4 携带模块库（往返恒等）+ v3 旧口令不动模块库 + 非法形状/版本拒收',
-    o.version === 4 && Array.isArray(o.moduleDefs) && (o.moduleDefs as unknown[]).length === MODULE_DEFS.length &&
-    r4.ok && JSON.stringify(MODULE_DEFS) === mSnap &&
+  const badVer = parseConfigSmart(JSON.stringify({ ...JSON.parse(json), version: 7 }))
+  check('v2.30/v2.62/v2.69：口令 v6 携带模块库版本+关卡库（往返恒等）+ v3 兼容 + 非法形状/版本拒收',
+    o.version === 6 && Array.isArray(o.moduleDefs) && (o.moduleDefs as unknown[]).length === MODULE_DEFS.length &&
+    Array.isArray((o as { levelLibrary?: { levels?: unknown[] } }).levelLibrary?.levels) &&
+    r6.ok && JSON.stringify(MODULE_DEFS) === mSnap &&
     r3.ok && JSON.stringify(MODULE_DEFS) === mSnap &&
     !bad.ok && !badVer.ok,
-    `v=${o.version} n=${Array.isArray(o.moduleDefs) ? (o.moduleDefs as unknown[]).length : '?'} r4=${r4.ok} r3=${r3.ok} bad=${bad.ok} badVer=${badVer.ok}`)
+    `v=${o.version} n=${Array.isArray(o.moduleDefs) ? (o.moduleDefs as unknown[]).length : '?'} r6=${r6.ok} r3=${r3.ok} bad=${bad.ok} badVer=${badVer.ok}`)
   check('v2.30：出厂模块均无 asset 字段（贴图为可选增强，色块回退兼容）',
     MODULE_DEFS.every(d => d.asset === undefined),
     `withAsset=${MODULE_DEFS.filter(d => d.asset !== undefined).length}`)
@@ -3303,9 +3312,22 @@ console.log('== 素材库/分层选配/flash 可选验收 ==')
     && getAsset('builtin:library/missilelauncher2_s')?.category === 'turret' // v2.17 炮身内置
     && getAsset('builtin:library/missilelauncher2_s')?.name === 'MissileLauncher2_S' // v2.17 展示名
   const notExported = !uploadsForExport().some(u => u.id.startsWith('builtin:'))
-  check('常用素材内置注册：36 件全在/不可删/类别正确（炮管+充能+效果+履带瓦片）/不随口令导出',
-    libBuiltin.length === 36 && libAllPresent && libProtected && libCategorized && notExported, // v1.85：+track01；v2.11：15 光束贴图（beam 分类，builtin:beam/ 前缀，不计入 libNames）；v2.17：+2（missile2_s/missilelauncher2_s）
+  check('常用素材内置注册：41 件全在/不可删/类别正确（炮管+充能+效果+护盾+Track01+堡垒底座主体）/不随口令导出',
+    libBuiltin.length === 41 && libAllPresent && libProtected && libCategorized && notExported, // v1.85：+track01；v2.11：15 光束；v2.17：+2；v2.71：+3 护盾；v2.72：+2 堡垒素材
     `count=${libBuiltin.length} present=${libAllPresent} protected=${libProtected} cat=${libCategorized} notExported=${notExported}`)
+  check('v2.72：堡垒底座、主体、轮胎独立分类；Track01 转入轮胎且移除吉普素材',
+    ASSET_CATEGORY_NAME.base === '炮塔底座'
+    && ASSET_CATEGORY_NAME.fortressBase === '堡垒底座'
+    && ASSET_CATEGORY_NAME.fortressBody === '堡垒主体'
+    && ASSET_CATEGORY_NAME.wheel === '轮胎'
+    && filterAssets('fortressBase').some(a => a.id === 'builtin:fortress/standard/base')
+    && filterAssets('fortressBody').some(a => a.id === 'builtin:fortress/standard/body')
+    && filterAssets('wheel').some(a => a.id === 'builtin:library/track01')
+    && getAsset('builtin:library/track01')?.category === 'wheel'
+    && getAsset('builtin:vehicle/jeep-wheel') === undefined
+    && getAsset('builtin:vehicle/jeep-wheel-master') === undefined
+    && resolveAssetSrc('builtin:fortress/standard/body') === '/res/fortresses/fort_1_01.png',
+    `base=${filterAssets('fortressBase').length} body=${filterAssets('fortressBody').length} wheel=${filterAssets('wheel').length}`)
 }
 
 // --- ④ 口令 v2 含素材库往返 + v1 兼容导入 ---
@@ -4556,21 +4578,22 @@ console.log('== 用例 54：移动堡垒验收 ==')
   restoreLevel()
 }
 
-// ⑤ 敌人脱战：堡垒驶离接触范围 → 攻击失效、重新追击
+// ⑤ 敌人脱战：堡垒驶离射程 → 远程攻击失效、重新追击
 {
   resetLevel()
   LEVEL.objects = []
   let s = arena()
   const fr = fortressRect(s)
   const hp0 = s.fortress.hp
+  s.fortress.armor.front = 0 // 本用例只验证远程攻击状态，不让概率跳弹干扰
   const e = mkEnemy(s, 'walker', fr.x + fr.w / 2, fr.y - 0.5)
   e.mode = 'attack'; e.targetKind = 'core'; e.targetId = 0
-  s = tick(s, 0.1)
-  check('贴脸敌人削减船体', s.fortress.hp < hp0, `hp=${s.fortress.hp}`)
-  s.fortress.x += 4 // 堡垒驶离（5 格宽堡垒需超出 0.7 接触容差）
+  s = tick(s, 0.2)
+  check('近距敌方直线实弹命中并削减船体', s.fortress.hp < hp0, `hp=${s.fortress.hp}`)
+  s.fortress.x += 12 // 驶出行尸 8 格射程
   s = tick(s, 0.1)
   const ee = byId(s.enemies, e.id)!
-  check('堡垒驶离后敌人脱战重追', ee.targetKind !== 'core' && ee.mode === 'move', `kind=${ee.targetKind} mode=${ee.mode}`)
+  check('堡垒驶出射程后敌人停止射击并重追', ee.targetKind !== 'core' && ee.mode === 'move', `kind=${ee.targetKind} mode=${ee.mode}`)
   restoreLevel()
 }
 
@@ -5185,7 +5208,7 @@ console.log('== 用例 54：移动堡垒验收 ==')
   check('v2.51 校验：前轮转角 0/81 被拒', validateFortressDef({ ...wheelDef, steerMax: 0 }).some(e => e.includes('最大前轮转角')) && validateFortressDef({ ...wheelDef, steerMax: 81 }).some(e => e.includes('最大前轮转角')))
   check('v2.51 校验：方向盘转速 0/721 被拒', validateFortressDef({ ...wheelDef, steerRate: 0 }).some(e => e.includes('方向盘转速')) && validateFortressDef({ ...wheelDef, steerRate: 721 }).some(e => e.includes('方向盘转速')))
   check('v2.51 校验：附着上限 0/101 被拒', validateFortressDef({ ...wheelDef, gripMax: 0 }).some(e => e.includes('横向附着上限')) && validateFortressDef({ ...wheelDef, gripMax: 101 }).some(e => e.includes('横向附着上限')))
-  check('v2.51 校验：轮子半径 0 被拒', validateFortressDef({ ...wheelDef, wheels: [{ id: 'wb', x: 1, y: 1, r: 0 }] }).some(e => e.includes('半径需在 0~3')))
+  check('v2.73 校验：轮胎单位非法值被拒', validateFortressDef({ ...wheelDef, wheels: [{ id: 'wb', x: 1, y: 1, unit: 'triple' as 'pair' }] }).some(e => e.includes('单位仅支持')))
   check('v2.51 校验：合法轮式配置零报错', validateFortressDef(wheelDef).length === 0)
 
   // ① 静止无转向能力（方向盘语义）：静止按 D 1s → 前轮打到 35° 但朝向不变
@@ -5286,6 +5309,21 @@ console.log('== 用例 54：移动堡垒验收 ==')
 
   // ⑦ 轮子落印列（fortressMarkColumns）：纯轮式 4 轮 = 4 列；半履带布局 1 履带×2 + 2 轮 = 4 列
   check('v2.51 落印列：纯轮式 4 轮 = 4 列', fortressMarkColumns(wheelDef).length === 4)
+  const pairWheel = { id: 'pair-front', x: 0.5, y: 0.8, unit: 'pair' as const, sprite: 'builtin:library/track01', steered: true }
+  const pairDef: FortressDef = { ...wheelDef, id: 'test-wheel-pair', wheels: [pairWheel] }
+  const pairPlaced = wheelPlacements(pairDef, pairWheel)
+  check('v2.73 轮胎单位“对”：定义侧 x=0.5 自动镜像到 x=2.5',
+    pairPlaced.length === 2 && pairPlaced[0].x === 0.5 && pairPlaced[1].x === 2.5 && pairPlaced.every(p => p.y === 0.8))
+  check('v2.73 成对轮胎落印：一条定义展开左右两列且使用原图零重叠步长',
+    fortressMarkColumns(pairDef).length === 2 && fortressMarkColumns(pairDef).every(c => c.overlapPx === 0))
+  const steerVisualState = arena()
+  steerVisualState.fortress.vy = -2
+  steerVisualState.fortress.turnW = 0.2
+  const steerVisualDef: FortressDef = { ...pairDef, wheelbase: 2, turnRadius: 4 }
+  check('v2.74 轮胎旋转“是”：偏角按 atan(轴距/配置转弯半径) 计算',
+    Math.abs(wheelVisualSteerAngle(steerVisualState, steerVisualDef) - Math.atan(0.5)) < 1e-9)
+  steerVisualState.fortress.turnW = 0
+  check('v2.74 非转弯状态：轮胎视觉偏角归零', wheelVisualSteerAngle(steerVisualState, steerVisualDef) === 0)
   const halfDef: FortressDef = { ...wheelDef, id: 'test-half', chassis: 'tracked', wheels: [wheelDef.wheels![0], wheelDef.wheels![2]],
     tracks: [{ id: 'tk0', x1: 0.4, y1: 0.6, x2: 0.4, y2: 2.4, radius: 0.4, tile: 'builtin:library/track01', overlapPx: 2 }] }
   check('v2.51 落印列：半履带布局 1 履带×2 + 2 轮 = 4 列', fortressMarkColumns(halfDef).length === 4)
@@ -6279,6 +6317,549 @@ console.log('== 迁移加固：引擎确定性随机验收 ==')
   } finally {
     Math.random = savedRandom
   }
+}
+
+console.log('== v2.58：关卡目标系统 ==')
+{
+  const savedObjective = structuredClone(LEVEL.objective)
+  try {
+    const legacy = defaultLevel() as Partial<ReturnType<typeof defaultLevel>>
+    delete legacy.objective
+    const migrated = parseLevel(JSON.stringify(legacy))
+    check('旧关卡缺少 objective 时迁移为 6 波保卫', migrated.objective.type === 'defend' && migrated.objective.waves === 6)
+
+    LEVEL.objective = { type: 'defend', waves: 1 }
+    let defend = arena()
+    defend.phase = 'combat'
+    defend.spawnQueue = []
+    defend.enemies = []
+    defend = tick(defend, 0.1)
+    check('保卫目标：清空配置的最后一波后判胜', defend.phase === 'won')
+
+    LEVEL.objective = { type: 'survive', duration: 10 }
+    let survive = arena()
+    survive.phase = 'combat'
+    survive.objectiveElapsed = 9.95
+    survive.spawnQueue = [{ kind: 'walker', delay: 10 }]
+    survive.spawnTimer = 10
+    survive = tick(survive, 0.1)
+    check('生存目标：交战累计达到时长时即判胜', survive.phase === 'won' && survive.objectiveElapsed >= 10)
+
+    let destroyed = arena()
+    destroyed.phase = 'combat'
+    destroyed.objectiveElapsed = 9.95
+    destroyed.fortress.hp = 0
+    destroyed = tick(destroyed, 0.1)
+    check('生存目标：同 tick 堡垒被毁时毁灭序列优先于胜利', destroyed.phase !== 'won' && destroyed.fortress.dyingT >= 0)
+  } finally {
+    LEVEL.objective = savedObjective
+  }
+}
+
+console.log('== v2.59：推进模式骨架 ==')
+{
+  const savedLevel = structuredClone(LEVEL)
+  try {
+    LEVEL.mode = 'advance'
+    LEVEL.objective = { type: 'reach' }
+    LEVEL.startZone = { x: 12, y: LEVEL.rows - 6, w: 8, h: 5 }
+    LEVEL.finishZone = { x: 4, y: 0, w: LEVEL.cols - 8, h: 6 }
+
+    const opened = initialState()
+    const openedCenter = fortressRect(opened)
+    const ocx = openedCenter.x + openedCenter.w / 2
+    const ocy = openedCenter.y + openedCenter.h / 2
+    check('推进模式：开局直接交战且首波已入队', opened.phase === 'combat' && opened.prepLeft === 0 && opened.spawnQueue.length > 0)
+    check('推进模式：堡垒中心出生在玩家起点区域',
+      ocx >= LEVEL.startZone.x && ocx <= LEVEL.startZone.x + LEVEL.startZone.w
+      && ocy >= LEVEL.startZone.y && ocy <= LEVEL.startZone.y + LEVEL.startZone.h,
+      `center=(${ocx.toFixed(2)},${ocy.toFixed(2)})`)
+
+    let reached = structuredClone(opened)
+    reached.spawnQueue = [{ kind: 'walker', delay: 10 }]
+    reached.spawnTimer = 10
+    reached.fortress.x = LEVEL.finishZone.x + LEVEL.finishZone.w / 2 - fortressRect(reached).w / 2
+    reached.fortress.y = 0
+    check('reach 目标：堡垒中心进入终点区域可被检测', fortressReachedFinish(reached))
+    reached = tick(reached, 0.1)
+    check('reach 目标：进入终点后判胜', reached.phase === 'won')
+
+    let destroyedAtFinish = structuredClone(opened)
+    destroyedAtFinish.spawnQueue = [{ kind: 'walker', delay: 10 }]
+    destroyedAtFinish.fortress.x = LEVEL.finishZone.x + LEVEL.finishZone.w / 2 - fortressRect(destroyedAtFinish).w / 2
+    destroyedAtFinish.fortress.y = 0
+    destroyedAtFinish.fortress.hp = 0
+    destroyedAtFinish = tick(destroyedAtFinish, 0.1)
+    check('reach 目标：同 tick 堡垒被毁时毁灭序列优先', destroyedAtFinish.phase !== 'won' && destroyedAtFinish.fortress.dyingT >= 0)
+
+    let nextWave = structuredClone(opened)
+    nextWave.fortress.x = LEVEL.startZone.x
+    nextWave.fortress.y = LEVEL.startZone.y
+    nextWave.spawnQueue = []
+    nextWave.enemies = []
+    const oldWave = nextWave.wave
+    nextWave = tick(nextWave, 0.1)
+    check('推进模式：清场后无整备停顿并自动接续下一波',
+      nextWave.phase === 'combat' && nextWave.wave === oldWave + 1 && nextWave.spawnQueue.length > 0)
+
+    check('边缘带相机：安全带内不动、越界才卷动并钳制世界边界',
+      edgeBandView(0, 10, 20, 100) === 0
+      && edgeBandView(0, 18, 20, 100) > 0
+      && edgeBandView(50, 60, 20, 100) === 50
+      && edgeBandView(70, 99, 20, 100) === 80)
+  } finally {
+    for (const k of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[k]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== v2.60：区域伏击触发器 ==')
+{
+  const savedLevel = structuredClone(LEVEL)
+  try {
+    LEVEL.mode = 'defend'
+    LEVEL.objective = { type: 'defend', waves: 99 }
+    LEVEL.triggers = [{
+      id: 77, name: '测试伏击', enabled: true,
+      x: 2, y: 2, w: 8, h: 6,
+      activationLimit: 2, cooldown: 1, delay: 0.2, interval: 0.3,
+      enemies: { walker: 2, runner: 0, rusher: 0, brute: 0, flyer: 0 },
+    }]
+
+    const setCenter = (s: GameState, x: number, y: number) => {
+      const r = fortressRect(s)
+      s.fortress.x = x - r.w / 2
+      s.fortress.y = y - r.h / 2
+    }
+    let entered = initialState()
+    entered.phase = 'combat'
+    entered.spawnQueue = [{ kind: 'walker', delay: 100 }]
+    entered.spawnTimer = 100
+    setCenter(entered, 20, 20)
+    entered = tick(entered, 0.1)
+    const preEntry = structuredClone(entered)
+    setCenter(entered, 5, 5)
+    const sameEntry = structuredClone(preEntry)
+    setCenter(sameEntry, 5, 5)
+    entered = tick(entered, 0.1)
+    const deterministic = tick(sameEntry, 0.1)
+    check('区域伏击：堡垒由外进入后按配置建立延迟队列',
+      entered.triggerStates.find(t => t.id === 77)?.activations === 1
+      && entered.ambushQueue.length === 2
+      && entered.enemies.length === 0,
+      `activations=${entered.triggerStates[0]?.activations} queue=${entered.ambushQueue.length}`)
+    check('区域伏击：同一状态的刷怪位置与时序可复现',
+      JSON.stringify(entered.ambushQueue) === JSON.stringify(deterministic.ambushQueue))
+
+    entered = tick(entered, 0.1)
+    check('区域伏击：首次延迟到期后刷出第一名敌人', entered.enemies.length === 1 && entered.ambushQueue.length === 1)
+    entered = tick(entered, 0.31)
+    check('区域伏击：按间隔刷完其余敌人', entered.enemies.length === 2 && entered.ambushQueue.length === 0)
+    entered = tick(entered, 0.2)
+    check('区域伏击：持续停留在区域内不会重复触发', entered.triggerStates[0]?.activations === 1 && entered.ambushQueue.length === 0)
+
+    entered.enemies = []
+    setCenter(entered, 20, 20)
+    entered = tick(entered, 1.1)
+    setCenter(entered, 5, 5)
+    entered = tick(entered, 0.1)
+    check('区域伏击：离开且冷却结束后可再次触发', entered.triggerStates[0]?.activations === 2 && entered.ambushQueue.length === 2)
+
+    entered.ambushQueue = []
+    setCenter(entered, 20, 20)
+    entered = tick(entered, 1.1)
+    setCenter(entered, 5, 5)
+    entered = tick(entered, 0.1)
+    check('区域伏击：达到次数上限后不再触发', entered.triggerStates[0]?.activations === 2 && entered.ambushQueue.length === 0)
+
+    LEVEL.triggers = []
+    LEVEL.objective = { type: 'defend', waves: 1 }
+    let pending = initialState()
+    pending.phase = 'combat'
+    pending.spawnQueue = []
+    pending.enemies = []
+    pending.ambushQueue = [{ triggerId: 77, kind: 'walker', left: 10, x: 5, y: 5 }]
+    pending = tick(pending, 0.1)
+    check('区域伏击：待刷伏击队列会阻止波次提前结束', pending.phase === 'combat' && pending.ambushQueue.length === 1)
+
+    const migrated = parseLevel(JSON.stringify({ version: 8 }))
+    check('区域伏击：v8 旧关卡迁移到 v10 并补空触发器/交互物', migrated.version === 10 && migrated.triggers.length === 0 && migrated.interactables.length === 0)
+  } finally {
+    for (const k of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[k]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== v2.62：多关卡库 ==')
+{
+  const savedLibrary = levelLibraryForExport()
+  try {
+    const legacy = defaultLevel(36, 24)
+    legacy.mode = 'advance'
+    legacy.objective = { type: 'reach' }
+    const migrated = parseLevelLibrary(null, JSON.stringify(legacy))
+    check('多关卡库：旧单关卡存档迁移为关卡 01 且内容保留',
+      migrated.version === 1 && migrated.activeId === 'level-1' && migrated.levels.length === 1
+      && migrated.levels[0].name === '关卡 01' && migrated.levels[0].level.mode === 'advance')
+
+    const a = defaultLevel(40, 30)
+    const b = defaultLevel(48, 32)
+    b.mode = 'advance'; b.objective = { type: 'reach' }
+    const library = defaultLevelLibrary(a)
+    library.levels.push({ id: 'level-2', name: '推进测试', level: b })
+    library.activeId = 'level-2'
+    const normalized = parseLevelLibrary(JSON.stringify(library))
+    check('多关卡库：多条目顺序、名称和活动 id 往返保留',
+      normalized.levels.length === 2 && normalized.levels[0].level.rows === 40
+      && normalized.levels[1].name === '推进测试' && normalized.activeId === 'level-2')
+
+    const duplicateIds = parseLevelLibrary(JSON.stringify({ version: 1, activeId: 'missing', levels: [
+      { id: 'same', name: '', level: a }, { id: 'same', name: '第二关', level: b },
+    ] }))
+    check('多关卡库：重复 id 自动消歧、空名称补默认、坏活动 id 回落首关',
+      duplicateIds.levels[0].id !== duplicateIds.levels[1].id
+      && duplicateIds.levels[0].name === '关卡 01' && duplicateIds.activeId === duplicateIds.levels[0].id)
+
+    saveLevelLibrary(library)
+    check('多关卡库：保存后 LEVEL 切换为活动试玩关卡',
+      LEVEL_LIBRARY.activeId === 'level-2' && LEVEL.mode === 'advance' && LEVEL.rows === 48 && LEVEL.cols === 32)
+
+    LEVEL.triggers.push({ id: 9, name: '同步测试', enabled: true, x: 1, y: 1, w: 2, h: 2, activationLimit: 1, cooldown: 0, delay: 0, interval: 0, enemies: { walker: 1, runner: 0, rusher: 0, brute: 0, flyer: 0 } })
+    const exported = levelLibraryForExport()
+    check('多关卡库：导出快照前会同步当前 LEVEL 到活动条目',
+      exported.levels.find(x => x.id === 'level-2')?.level.triggers.some(t => t.name === '同步测试') === true)
+
+    const capped = parseLevelLibrary(JSON.stringify({ version: 1, activeId: 'level-1', levels: Array.from({ length: 55 }, (_, i) => ({ id: `level-${i + 1}`, name: `关卡${i + 1}`, level: a })) }))
+    check('多关卡库：最多载入 50 个关卡', capped.levels.length === 50)
+  } finally {
+    saveLevelLibrary(savedLibrary)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== v2.64：通用事件 / 交互物 / Boss / 关卡链 ==')
+{
+  const savedLevel = structuredClone(LEVEL)
+  try {
+    LEVEL.mode = 'defend'
+    LEVEL.objective = { type: 'defend', waves: 99 }
+    LEVEL.interactables = []
+    LEVEL.triggers = [{
+      id: 91, name: '事件测试', enabled: true, x: 2, y: 2, w: 6, h: 6,
+      activationLimit: 1, cooldown: 0, delay: 0, interval: 0, enemies: { walker: 0, runner: 0, rusher: 0, brute: 0, flyer: 0 },
+      actions: [
+        { type: 'message', text: '事件开始', duration: 2 },
+        { type: 'reward', gold: 50 },
+        { type: 'boss', boss: { kind: 'brute', name: '测试巨兽', hpScale: 5, sizeScale: 2, phases: [{ hpPercent: 50, actions: [{ type: 'reward', gold: 25 }] }], defeatActions: [{ type: 'reward', gold: 75 }, { type: 'message', text: 'Boss 已击败', duration: 2 }] } },
+      ],
+    }]
+    const setCenter = (s: GameState, x: number, y: number) => {
+      const r = fortressRect(s); s.fortress.x = x - r.w / 2; s.fortress.y = y - r.h / 2
+    }
+    let s = initialState(); s.phase = 'combat'; s.spawnQueue = [{ kind: 'walker', delay: 100 }]; s.spawnTimer = 100
+    setCenter(s, 20, 20); s = tick(s, 0.1); setCenter(s, 5, 5); const beforeGold = s.gold; s = tick(s, 0.1)
+    const boss = s.enemies.find(e => e.bossName === '测试巨兽')
+    check('通用事件：区域按顺序执行提示、奖励与 Boss 动作', !!boss && s.gold === beforeGold + 50 && s.notices.some(n => n.text === '事件开始'))
+    check('Boss：生命/体型倍率与名称写入运行时', !!boss && boss.maxHp > ENEMY_DEFS.brute.hp && boss.bossSizeScale === 2)
+    if (boss) boss.hp = boss.maxHp * 0.4
+    s = tick(s, 0.1)
+    check('Boss：生命阈值阶段动作仅触发一次', s.gold === beforeGold + 75 && s.enemies.find(e => e.id === boss?.id)?.bossPhaseDone?.length === 1)
+    s = tick(s, 0.1)
+    check('Boss：持续低于阈值不重复触发阶段', s.gold === beforeGold + 75)
+    const liveBoss = s.enemies.find(e => e.id === boss?.id); if (liveBoss) liveBoss.hp = 0
+    s = tick(s, 0.1)
+    check('Boss：击败动作执行奖励与提示', s.gold >= beforeGold + 150 && s.notices.some(n => n.text === 'Boss 已击败'))
+
+    LEVEL.triggers = [{ id: 92, name: '等待测试', enabled: true, x: 10, y: 10, w: 4, h: 4, activationLimit: 1, cooldown: 0, delay: 0, interval: 0, enemies: { walker: 0, runner: 0, rusher: 0, brute: 0, flyer: 0 }, actions: [{ type: 'wait', seconds: 0.5 }, { type: 'reward', gold: 20 }] }]
+    s = initialState(); s.phase = 'combat'; s.spawnQueue = [{ kind: 'walker', delay: 100 }]; s.spawnTimer = 100; setCenter(s, 20, 20); s = tick(s, 0.1); setCenter(s, 11, 11); const waitGold = s.gold; s = tick(s, 0.1); s = tick(s, 0.3)
+    check('通用事件：等待动作阻塞后续动作', s.gold === waitGold && s.eventQueue.length === 1)
+    s = tick(s, 0.3)
+    check('通用事件：等待结束继续执行奖励', s.gold === waitGold + 20 && s.eventQueue.length === 0)
+
+    LEVEL.triggers = []
+    LEVEL.interactables = [
+      { id: 7, name: '测试补给', kind: 'supply', enabled: true, once: true, x: 3, y: 3, w: 3, h: 3, actions: [
+        { type: 'reward', gold: 30 },
+        { type: 'objective', objective: { type: 'survive', duration: 30 } },
+        { type: 'toggle', interactableId: 8, enabled: false },
+      ] },
+      { id: 8, name: '关闭目标', kind: 'target', enabled: true, once: false, x: 8, y: 8, w: 2, h: 2, actions: [] },
+    ]
+    s = initialState(); s.phase = 'combat'; s.spawnQueue = [{ kind: 'walker', delay: 100 }]; s.spawnTimer = 100; setCenter(s, 20, 20); s = tick(s, 0.1); setCenter(s, 4, 4); const itemGold = s.gold; s = tick(s, 0.1); s = tick(s, 0.1)
+    check('场景交互物：进入激活、仅一次并执行动作', s.gold === itemGold + 30 && s.interactableStates.find(x => x.id === 7)?.activations === 1)
+    check('通用事件：目标动作即时替换运行时任务', s.objective.type === 'survive' && s.objective.duration === 30)
+    check('通用事件：开关动作可禁用指定交互物', s.interactableStates.find(x => x.id === 8)?.enabled === false)
+
+    LEVEL.interactables = [{ id: 9, name: '撤离点', kind: 'checkpoint', enabled: true, once: true, x: 3, y: 3, w: 3, h: 3, actions: [{ type: 'complete' }] }]
+    s = initialState(); s.phase = 'combat'; s.spawnQueue = [{ kind: 'walker', delay: 100 }]; s.spawnTimer = 100; setCenter(s, 20, 20); s = tick(s, 0.1); setCenter(s, 4, 4); s = tick(s, 0.1)
+    check('通用事件：完成动作可立即结束当前关卡', s.phase === 'won')
+
+    const chain = defaultLevelLibrary(defaultLevel())
+    chain.levels[0].nextId = 'level-2'; chain.levels[0].reward = 120
+    chain.levels.push({ id: 'level-2', name: '下一关', level: defaultLevel(), nextId: null, reward: 50 })
+    const parsedChain = parseLevelLibrary(JSON.stringify(chain))
+    check('关卡链：下一关与通关奖励随关卡库往返', parsedChain.levels[0].nextId === 'level-2' && parsedChain.levels[0].reward === 120)
+  } finally {
+    for (const k of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[k]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== v2.65：涂装与徽记 ==')
+{
+  const painted = structuredClone(DEFAULT_FORTRESS)
+  painted.paint = { base: '#556B52', accent: '#D0A544' }
+  painted.decals = [{ id: 'badge-1', asset: 'builtin:library/track01', x: 2.5, y: 2, size: 0.8, angle: 15 }]
+  check('涂装：主体色、强调色与徽记锚点通过堡垒定义校验', validateFortressDef(painted).length === 0)
+  const badPaint = structuredClone(painted); badPaint.paint!.base = 'red'
+  check('涂装：非法颜色被保存校验拦截', validateFortressDef(badPaint).some(x => x.includes('主体色')))
+  const badDecal = structuredClone(painted); badDecal.decals![0].x = painted.w + 1
+  check('徽记：越界锚点被保存校验拦截', validateFortressDef(badDecal).some(x => x.includes('锚点超出')))
+}
+
+console.log('== v2.66：热管理预览 / 模块规划参考 ==')
+{
+  const hot = structuredClone(TURRET_DEFS[0]); hot.heatPerShot = 80; hot.fireRate = 1; hot.burst = 1; hot.barrels = 1
+  const fort = structuredClone(DEFAULT_FORTRESS); fort.heatCap = 100; fort.heatDissipation = 5
+  const curve = simulateTurretHeat(hot, fort, 5, 0.1)
+  check('热管理预览：高产热炮塔达到上限并进入过热迟滞', curve.some(p => p.overheated) && Math.max(...curve.map(p => p.heat)) === 100)
+  const cold = structuredClone(hot); cold.heatPerShot = 0
+  check('热管理预览：零产热曲线保持为零', simulateTurretHeat(cold, fort, 5).every(p => p.heat === 0 && !p.overheated))
+  const planFort = structuredClone(DEFAULT_FORTRESS); planFort.w = 2; planFort.h = 2; planFort.shape = ['0,0', '1,0', '0,1', '1,1']; planFort.interior = { cols: 2, rows: 2 }; planFort.interiorCells = undefined
+  const planMod = { id: 'plan', name: '规划件', desc: '', cost: 0, w: 1, h: 2, color: '#777777' }
+  const fits = modulePlanningFits(planFort, planMod)
+  check('模块规划：1×2 模块在 2×2 内部空间两种旋向各有 2 个起点', fits.normal === 2 && fits.rotated === 2, JSON.stringify(fits))
+}
+
+console.log('== v2.67：炮塔共用绘制层 ==')
+check('炮塔共用绘制：全部出厂炮塔仍通过美术配置校验', TURRET_DEFS.every(d => validateArt(d).ok))
+
+console.log('== v2.68：四向装甲与统一承伤 ==')
+{
+  let s = initialState()
+  const r = fortressRect(s), cx = r.x + r.w / 2, cy = r.y + r.h / 2
+  s.fortress.hp = 1000; s.fortress.maxHp = 1000
+  s.fortress.armor = { front: 10, rear: 10, left: 10, right: 10 }
+  s.fortress.maxArmor = structuredClone(s.fortress.armor)
+  check('装甲受击面：朝向 0 时世界上/下/左/右映射前/后/左/右',
+    fortressArmorSideAt(s, cx, r.y - 1) === 'front' && fortressArmorSideAt(s, cx, r.y + r.h + 1) === 'rear'
+    && fortressArmorSideAt(s, r.x - 1, cy) === 'left' && fortressArmorSideAt(s, r.x + r.w + 1, cy) === 'right')
+  const blocked = damageFortress(s, 9, { x: cx, y: r.y - 1, kind: 'projectile' })
+  check('统一承伤：伤害低于前装甲时完全格挡且结构不降', blocked.blocked && s.fortress.hp === 1000)
+  const overflow = damageFortress(s, 15, { x: cx, y: r.y - 1, kind: 'projectile' })
+  check('统一承伤：伤害达到装甲后仅溢出部分伤结构', overflow.structureDamage === 5 && s.fortress.hp === 995)
+  const penetrated = damageFortress(s, 10, { x: cx, y: r.y - 1, kind: 'projectile', armorPen: 0.5, armorDamage: 3 })
+  check('统一承伤：穿甲部分直伤结构并削弱对应装甲面', penetrated.structureDamage === 5 && penetrated.armorDamage === 3 && s.fortress.hp === 990 && s.fortress.armor.front === 7)
+  s.fortress.armor.front = 0
+  const unarmored = damageFortress(s, 4, { x: cx, y: r.y - 1, kind: 'aoe' })
+  check('统一承伤：装甲削穿后低伤害可直接伤结构', unarmored.structureDamage === 4 && s.fortress.hp === 986)
+  s.fortress.heading = Math.PI / 2
+  check('装甲受击面：车体旋转 90° 后世界右侧对应车头', fortressArmorSideAt(s, r.x + r.w + 1, cy) === 'front')
+
+  s = initialState(); s.phase = 'prep'; s.fortress.hp = s.fortress.maxHp - 10; s.fortress.maxArmor.front = 20; s.fortress.armor.front = 10
+  s.modules = [{ id: 900, defId: 'repair', x: 0, y: 0, rot: 0, timer: 0 }]
+  s = tick(s, 1)
+  check('维修模块：结构与受损装甲面共同均摊修复功率', s.fortress.hp === s.fortress.maxHp - 6 && s.fortress.armor.front === 14,
+    `hp=${s.fortress.hp}/${s.fortress.maxHp} armor=${s.fortress.armor.front}`)
+}
+
+console.log('== v2.69：防御能量罩 ==')
+{
+  let s = initialState(); s.phase = 'prep'; s.gold = 2000
+  check('护盾：未安装发生器时容量为 0', shieldStats(s).max === 0 && s.fortress.maxShield === 0)
+  const shieldTiles = shieldHexLayout(60, 100, 24)
+  check('护盾瓦片：覆盖护罩且边缘瓦片产生压缩', shieldTiles.length > 20 && shieldTiles.some(t => t.edge < 0.5 && (t.squashX < 0.8 || t.squashY < 0.8)))
+  check('护盾瓦片：一次受击仅向紧邻一圈扩散且命中格及时熄灭', shieldHexRipple(0, 0) === 1
+    && shieldHexRipple(0.2, 1) > 0 && shieldHexRipple(0.2, 2) === 0
+    && shieldHexRipple(0.3, 0) === 0 && shieldHexRipple(0.8, 0) === 0)
+  const edgeSamples = shieldPerimeterSamples(60, 100, 10)
+  const shieldRadius = shieldCornerRadius(60, 100)
+  check('护盾外缘：柔光素材沿圆角矩形轮廓近似等距覆盖', edgeSamples.length > 50
+    && edgeSamples.every(p => {
+      const qx = Math.max(Math.abs(p.x) - (60 - shieldRadius), 0)
+      const qy = Math.max(Math.abs(p.y) - (100 - shieldRadius), 0)
+      return Math.abs(Math.hypot(qx, qy) - shieldRadius) < 0.002
+        || (Math.abs(p.y) === 100 && Math.abs(p.x) <= 60 - shieldRadius)
+        || (Math.abs(p.x) === 60 && Math.abs(p.y) <= 100 - shieldRadius)
+    }))
+  check('护盾开展：从 50% 渐显、极限轻微回弹后稳定在完整场体', shieldUnfoldProgress(0) === 0
+    && shieldUnfoldProgress(0.5) > 0.8 && shieldUnfoldProgress(1) === 1
+    && shieldUnfoldScale(0) === 0.5 && shieldUnfoldScale(0.86) > 1 && shieldUnfoldScale(1) === 1)
+  const edgePulseSamples = Array.from({ length: 80 }, (_, i) => shieldEdgePulse(i * 0.125))
+  check('护盾外缘：常态亮度与线宽做可辨识的连续波动', edgePulseSamples.some((v, i) => i > 0 && Math.abs(v.alpha - edgePulseSamples[i - 1].alpha) > 0.003)
+    && edgePulseSamples.every(v => v.alpha >= 0.84 && v.alpha <= 1.16 && v.width >= 0.93 && v.width <= 1.07))
+  check('护盾破裂：整场闪光快速衰减并及时交给碎片演出', shieldBreakEnvelope(0) === 1
+    && shieldBreakEnvelope(0.2) > 0 && shieldBreakEnvelope(0.5) === 0 && shieldBreakEnvelope(1) === 0)
+  const field0 = shieldFieldMotion(0, 60, 100), field1 = shieldFieldMotion(1, 60, 100)
+  check('护盾内部场体：双层纹理持续反向漂移并错峰明灭', field0.x1 !== field1.x1 && field0.y2 !== field1.y2
+    && field0.r1 !== field1.r1 && field0.a1 !== field0.a2)
+  check('护盾碎片：尺寸随护盾短边增长并保持可读范围', shieldShardSize(1, 2) === 0.2
+    && shieldShardSize(3, 5) > shieldShardSize(2, 5) && shieldShardSize(10, 12) === 0.55)
+  const migrated = migrateModuleDefs(MODULE_DEFS.filter(d => !d.id.startsWith('shield_')), 0)
+  check('旧模块库迁移：保留原模块并补入三件护盾模块', ['shield_generator', 'shield_capacitor', 'shield_amplifier'].every(id => migrated.some(d => d.id === id)))
+  const legacyLimit = MODULE_DEFS.map(d => ({ ...d }))
+  const legacyGenerator = legacyLimit.find(d => d.id === 'shield_generator')!
+  delete legacyGenerator.maxCount
+  check('旧模块库迁移：护盾发生器补通用数量上限 1', migrateModuleDefs(legacyLimit, 4).find(d => d.id === 'shield_generator')?.maxCount === 1)
+
+  const limitedId = 'sim_limited_module'
+  MODULE_DEFS.push({ id: limitedId, name: '测试限装模块', desc: '', cost: 0, w: 1, h: 1, maxCount: 2, color: '#888888' })
+  let limited = initialState()
+  limited.gold = 999
+  limited = buildModule(limited, limitedId, 1, 1, 0)
+  limited = buildModule(limited, limitedId, 2, 1, 0)
+  const thirdLimited = canPlaceModule(limited, limitedId, 1, 2, 0)
+  check('通用数量上限：任意模块达到配置数量后拒绝继续装配', limited.modules.filter(m => m.defId === limitedId).length === 2 && !thirdLimited.ok && thirdLimited.reason === '测试限装模块装配上限 2')
+  MODULE_DEFS.splice(MODULE_DEFS.findIndex(d => d.id === limitedId), 1)
+
+  s = buildModule(s, 'shield_generator', 1, 1, 0)
+  check('护盾发生器：建造后以满盾启用', s.fortress.maxShield === 300 && s.fortress.shield === 300 && !s.fortress.shieldBroken)
+  check('护盾发生器：出厂数量上限 1 通过通用规则生效', !canPlaceModule(s, 'shield_generator', 1, 3, 0).ok)
+
+  s.energy = 50
+  s = tick(s, 1)
+  check('护盾满值：不消耗回复电力', Math.abs(s.energy - 59) < 1e-6 && s.fortress.shield === s.fortress.maxShield)
+
+  const r = fortressRect(s), hx = r.x + r.w / 2, hy = r.y - 1
+  const hp0 = s.fortress.hp
+  const absorbed = damageFortress(s, 100, { x: hx, y: hy, kind: 'projectile', armorPen: 1, armorDamage: 50 })
+  check('护盾承伤：穿甲对护盾无效且本体/装甲不受伤', absorbed.shieldDamage === 100 && absorbed.structureDamage === 0 && s.fortress.hp === hp0 && s.fortress.armor.front === s.fortress.maxArmor.front)
+  const energy0 = s.energy
+  s = tick(s, 1)
+  check('护盾回复：未破盾时持续回复并按点耗电', s.fortress.shield === 212 && Math.abs(s.energy - (Math.min(ENERGY.cap, energy0 + ENERGY.regen) - 4.2)) < 1e-9, `shield=${s.fortress.shield} energy=${s.energy}`)
+  s.fortress.shield = 50; s.fortress.hp = 1000; s.fortress.maxHp = 1000
+  const overflow = damageFortress(s, 100, { x: hx, y: hy, kind: 'aoe' })
+  check('护盾破裂：溢出伤害继续经过装甲后伤结构', overflow.shieldBroken && overflow.shieldDamage === 50 && overflow.structureDamage === 46 && s.fortress.hp === 954)
+  check('护盾破裂：生成破盾视觉事件', s.shieldHits.some(x => x.broken))
+  s = tick(s, 9)
+  check('破盾冷却：受击后 10 秒内不回复', s.fortress.shield === 0 && s.fortress.shieldBroken)
+  s.energy = 150; s = tick(s, 1.1)
+  check('破盾冷却：脱战满 10 秒后恢复', s.fortress.shield > 0 && !s.fortress.shieldBroken)
+  s.phase = 'prep'; s.gold = 2000
+  s = buildModule(s, 'shield_capacitor', 3, 1, 0)
+  check('护盾增效：容量模块叠加并补足新增容量', s.fortress.maxShield === 460 && s.fortress.shield > 160)
+  const generator = s.modules.find(m => m.defId === 'shield_generator')!
+  s = demolishModule(s, generator.id)
+  check('拆除发生器：增效模块单独存在时护盾关闭', s.fortress.maxShield === 0 && s.fortress.shield === 0)
+}
+
+console.log('== v2.70：防守波次自动节奏 ==')
+{
+  const oldLevel = structuredClone(LEVEL)
+  const migrated = normalizeObjective({ type: 'defend', waves: 4 }, 'defend')
+  check('旧防守目标迁移：默认等待波次、休整60秒、接踵5秒', migrated.type === 'defend' && migrated.waveWait === true && migrated.restTime === 60 && migrated.overlapTime === 5)
+
+  LEVEL.mode = 'defend'
+  LEVEL.objective = { type: 'defend', waves: 3, waveWait: true, restTime: 7, overlapTime: 5 }
+  let s = initialState()
+  check('等待模式：首波自动进入部署倒计时且无需手动开波', s.phase === 'prep' && s.prepLeft === 7)
+  s.phase = 'combat'; s.wave = 1; s.spawnQueue = []; s.enemies = []; s.ambushQueue = []; s.eventQueue = []
+  s = tick(s, 0.1)
+  check('等待模式：清场后进入配置的休整时间', s.phase === 'prep' && s.wave === 2 && s.prepLeft === 7)
+
+  LEVEL.objective = { type: 'defend', waves: 2, waveWait: false, restTime: 999, overlapTime: 5 }
+  s = initialState()
+  check('接踵模式：首波直接开战且休整时间不生效', s.phase === 'combat' && s.spawnQueue.length > 0 && s.prepLeft === 0)
+  s.spawnQueue = []; s.enemies = []; s.ambushQueue = []; s.eventQueue = []; s.nextWaveLeft = 5; s.wave = 1
+  s = tick(s, 4.9)
+  check('接踵模式：倒计时结束前不提前进入下波或休整', s.phase === 'combat' && s.wave === 1 && s.nextWaveLeft !== null && s.nextWaveLeft > 0)
+  s = tick(s, 0.11)
+  check('接踵模式：计时到点自动开始下波', s.phase === 'combat' && s.wave === 2 && (s.enemies.length > 0 || s.spawnQueue.length > 0))
+  s.spawnQueue = []; s.enemies = []; s.ambushQueue = []; s.eventQueue = []; s.nextWaveLeft = null
+  s = tick(s, 0.1)
+  check('接踵模式：最后一波清场后正常胜利', s.phase === 'won')
+  Object.assign(LEVEL, oldLevel)
+}
+
+console.log('== v2.75：堡垒战损痕迹 ==')
+{
+  let s = initialState()
+  const r = fortressRect(s), cx = r.x + r.w / 2
+  s.fortress.maxShield = 50; s.fortress.shield = 50
+  damageFortress(s, 20, { x: cx, y: r.y - 1, kind: 'projectile' })
+  check('战损：护盾完全吸收时不生成主体贴花、火花或白闪', s.fortress.damageMarks.length === 0 && s.fortressHits.length === 0 && s.fortress.hitFlash === 0)
+
+  s.fortress.maxShield = 0; s.fortress.shield = 0
+  s.fortress.armor.front = 20
+  damageFortress(s, 5, { x: cx, y: r.y - 2, kind: 'projectile' })
+  const scratch = s.fortress.damageMarks.at(-1)
+  check('战损：装甲格挡留下边缘擦痕并触发瞬时反馈', scratch?.kind === 'scratch' && scratch.y <= 0.081 && s.fortressHits.length === 1 && s.fortress.hitFlash === 0.08)
+
+  damageFortress(s, 10, { x: cx, y: r.y - 1, kind: 'projectile', armorPen: 0.6 })
+  check('战损：穿透实弹留下弹孔', s.fortress.damageMarks.at(-1)?.kind === 'bullet')
+  s.fortress.armor.front = 0
+  damageFortress(s, 8, { x: cx, y: r.y - 1, kind: 'aoe' })
+  check('战损：爆炸伤及结构时留下焦痕', s.fortress.damageMarks.at(-1)?.kind === 'scorch')
+
+  s.fortress.heading = Math.PI / 2
+  const local = fortressDamageLocalPoint(s, r.x + r.w + 2, r.y + r.h / 2)
+  check('战损：旋转车体的世界命中点正确反算到车头局部边缘', local.y <= 0.081 && local.x > r.w * 0.4 && local.x < r.w * 0.6)
+
+  s.fortress.heading = 0; s.fortress.hp = 10000; s.fortress.maxHp = 10000
+  for (let i = 0; i < FORTRESS_DAMAGE_MARK_CAP + 5; i++) {
+    s.time += 0.01
+    damageFortress(s, 1, { x: cx, y: r.y - 1, kind: 'projectile' })
+  }
+  check('战损：主体贴花按 60 条上限 FIFO 回收', s.fortress.damageMarks.length === FORTRESS_DAMAGE_MARK_CAP)
+  check('战损：结构阶段按 75%/50%/25% 阈值递进', fortressDamageStage(100, 100) === 0 && fortressDamageStage(74, 100) === 1
+    && fortressDamageStage(49, 100) === 2 && fortressDamageStage(24, 100) === 3)
+
+  s = tick(s, 0.2)
+  check('战损：白闪与船体火花事件按 TTL 正常回收', s.fortress.hitFlash === 0 && s.fortressHits.length === 0)
+}
+
+console.log('== v2.76：敌方直线实弹与装甲跳弹 ==')
+{
+  check('敌方远程化：现有五类敌人均配置射程、间隔、弹速、伤害与穿深', Object.values(ENEMY_DEFS).every(d =>
+    d.attackRange > 0 && d.attackInterval > 0 && d.projectileSpeed > 0 && d.projectileDamage > 0 && d.penetration > 0))
+  check('穿深概率：低穿深按比例、达到装甲必穿、零穿深保留最低5%', fortressPenetrationChance(3, 6) === 0.5
+    && fortressPenetrationChance(6, 6) === 1 && fortressPenetrationChance(0, 6) === 0.05 && fortressPenetrationChance(3, 0) === 1)
+
+  let s = arena()
+  const r = fortressRect(s), cx = r.x + r.w / 2
+  s.fortress.hp = 1000; s.fortress.maxHp = 1000; s.fortress.armor.front = 6; s.fortress.maxArmor.front = 6
+  let ricochetSeed = 1
+  while (eventRandom(ricochetSeed, 91) < 0.5) ricochetSeed++
+  s.nextId = ricochetSeed
+  const bounced = damageFortress(s, 10, { x: cx, y: r.y - 1, kind: 'projectile', penetration: 3 })
+  check('概率装甲：穿深不足且判定失败时跳弹、结构不受伤并生成跳弹事件', bounced.ricochet && bounced.blocked
+    && s.fortress.hp === 1000 && s.fortressHits.at(-1)?.ricochet === true)
+  const pierced = damageFortress(s, 10, { x: cx, y: r.y - 1, kind: 'projectile', penetration: 6 })
+  check('概率装甲：穿深达到装甲时必定穿透并造成完整单发伤害', !pierced.ricochet && pierced.structureDamage === 10 && s.fortress.hp === 990)
+
+  s = arena()
+  const fr = fortressRect(s), ex = fr.x + fr.w / 2, ey = fr.y - 1
+  s.fortress.armor.front = 0
+  const enemy = mkEnemy(s, 'walker', ex, ey)
+  enemy.attackCooldown = 0
+  const dist = fortressDistanceToPoint(s, enemy.x, enemy.y)
+  s = tick(s, 0.01)
+  check('敌方远程攻击：进入射程后停车并生成独立直线实弹', dist <= ENEMY_DEFS.walker.attackRange
+    && byId(s.enemies, enemy.id)?.mode === 'attack' && s.enemyProjectiles.length === 1)
+  const hp0 = s.fortress.hp
+  s = tick(s, 0.5)
+  check('敌方远程攻击：高速线段命中堡垒且不会跨帧穿模', s.enemyProjectiles.length === 0 && s.fortress.hp === hp0 - ENEMY_DEFS.walker.projectileDamage)
+
+  s = arena(); s.fortress.heading = Math.PI / 2
+  const rr = fortressRect(s), cy = rr.y + rr.h / 2
+  const hit = enemyProjectileFortressHit(s, rr.x + rr.w + 3, cy, rr.x + rr.w / 2, cy)
+  check('敌方实弹碰撞：车体旋转后仍能求出首次命中点', hit !== null && hit.x > rr.x + rr.w / 2)
+
+  s = arena(); s.fortress.heading = 0
+  const bodyRef = fortressDef(s).spriteBody!
+  const alpha = new Uint8Array(150 * 240)
+  for (let y = 0; y < 240; y++) for (let x = 45; x <= 104; x++) alpha[y * 150 + x] = 255
+  registerFortressBodyAlpha(bodyRef, 150, 240, alpha)
+  const ar = fortressRect(s), ay = ar.y + ar.h / 2
+  const transparentPass = enemyProjectileFortressHit(s, ar.x + ar.w + 1, ay, ar.x + ar.w - 1, ay)
+  const bodyHit = enemyProjectileFortressHit(s, ar.x + ar.w + 1, ay, ar.x + ar.w / 2, ay)
+  check('敌方实弹碰撞：轮胎与履带所在的主体透明外侧带不阻挡弹丸', transparentPass === null)
+  check('敌方实弹碰撞：弹丸越过外侧带后在主体首个不透明像素命中', bodyHit !== null
+    && bodyHit.x < ar.x + ar.w - 1.4 && bodyHit.x > ar.x + ar.w / 2)
+  clearFortressBodyAlpha(bodyRef)
 }
 
 // v1.72：总结移至真正末尾（此前在 case66 之前，尾部用例失败不会被门禁捕获）

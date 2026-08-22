@@ -85,9 +85,26 @@ export interface TrackDef {
 export interface WheelDef {
   id: string
   x: number; y: number // 轮心（堡垒局部格，原点在左上，-y = 船头方向）
-  r: number // 轮半径（格）
-  sprite?: string // 轮子贴图（素材库引用 id / /res 路径 / dataURL；缺省 = 几何轮胎）
-  steered?: boolean // 转向轮：随前轮转角 δ 偏转（前轮=true；缺省 false）
+  unit?: 'single' | 'pair' // 单个 / 一对；pair 以 x 为定义侧，另一侧按堡垒中心线镜像
+  r?: number // 遗留轮径字段（v2.73 起忽略，仅为旧存档兼容）
+  sprite?: string // 轮胎素材库引用 id（兼容遗留 /res 路径 / dataURL；缺省 = 几何轮胎）
+  steered?: boolean // 是否旋转：true 时按轴距与实际/配置转弯半径计算视觉偏角；false/缺省保持与车身平行
+}
+
+export interface FortressArmor {
+  front: number
+  rear: number
+  left: number
+  right: number
+}
+
+export interface FortressDecal {
+  id: string
+  asset: string
+  x: number
+  y: number
+  size: number
+  angle?: number
 }
 
 export interface FortressDef {
@@ -97,14 +114,17 @@ export interface FortressDef {
   h: number // 底座包围盒 宽（格）
   /** 自由网格形状：局部格坐标列表 "x,y"；须 4-连通成整体，允许镂空（未配置 = w×h 满矩形）。贴图不参与碰撞，形状格才是碰撞体 */
   shape?: string[]
-  spriteBase?: string // 底座贴图（dataURL 或 /res 路径（v2.5 起；旧 /sprites 前缀自动兼容），仅视觉，不参与碰撞）
-  spriteBody?: string // 主体贴图（dataURL 或 /res 路径（v2.5 起；旧 /sprites 前缀自动兼容），仅视觉，不参与碰撞）
+  spriteBase?: string // 堡垒底座素材库引用 id（兼容遗留 dataURL / /res 路径），仅视觉
+  spriteBody?: string // 堡垒主体素材库引用 id（兼容遗留 dataURL / /res 路径），仅视觉
+  paint?: { base: string; accent?: string } // 主体乘法染色 + 甲板/方向标强调色；不影响履带、轮子和炮塔
+  decals?: FortressDecal[] // 徽记/编号等装饰图，按堡垒局部锚点绘制
   interior: { cols: number; rows: number } // 内部模块空间编辑网格尺寸（interiorCells 缺省时 = 左上角锚定 cols×rows 满矩形）
   interiorCells?: string[] // 内部模块空间自由格阵 "x,y"（须 ⊆ 形状格；缺省 = cols×rows 满矩形）
   interiorSpecials?: InteriorSpecial[] // 内部特殊格：置于其上的模块对应属性加成
   effects?: FortressEffectPoint[] // 特效点：按堡垒停止/移动状态切换播放的程序化粒子（仅视觉）
   tracks?: TrackDef[] // 履带（v1.85：瓦片循环滚动动画，仅视觉；未配置 = 无履带动画层）
-  hp: number // 船体血量
+  hp: number // 船体结构值
+  armor?: FortressArmor // 四向装甲阈值；旧定义缺省为四面 0
   speed: number // 移动速度 格/s
   turnSpeed: number // 横摆角速度上限 度/s（v2.51 起为可选封顶：履带=min(本值, 2×极速/履带间距推导)，轮式=min(本值, v·tanδ/轴距)；未配置语义见各底盘推导）
   turnRadius?: number // 最小转弯半径（格，缺省 0）：>0 时两底盘通用弧线模式覆盖——绕外侧圆心走弧线（转弯带动前行）；0=按底盘物理（履带差速/轮式前轮角）
@@ -146,7 +166,7 @@ export const FORTRESS_DEFS: FortressDef[] = [
     spriteBase: '/res/fortresses/fort_1_02.png', // 内置底座贴图（原比例居中不缩放）
     spriteBody: '/res/fortresses/fort_1_01.png', // 内置主体贴图（原比例居中不缩放）
     interior: { cols: 5, rows: 8 },
-    hp: 2000, speed: 6, turnSpeed: 25, turnRadius: 10, reverseFactor: 0.8, brakeInertia: 4, pitchGain: 2, leanCap: 2, accel: 3, // v1.54：测试堡垒机动参数调整（速度6/加速度3/俯仰2/转向25°s/半径10格）；v2.19 口令(4)：leanCap 4→2
+    hp: 2000, armor: { front: 4, rear: 2, left: 3, right: 3 }, speed: 6, turnSpeed: 25, turnRadius: 10, reverseFactor: 0.8, brakeInertia: 4, pitchGain: 2, leanCap: 2, accel: 3, // v1.54：测试堡垒机动参数调整（速度6/加速度3/俯仰2/转向25°s/半径10格）；v2.19 口令(4)：leanCap 4→2
     heatCap: 200, heatDissipation: 10,
     tracks: [ // v1.85：按 fort_1_02.png 履带条带标定；v1.86：仅左履带（右侧自动镜像）；v1.87：瓦片尺寸取原图（20×8）、重叠 2pix
       { id: 'trackL', x1: 0.43, y1: 0.83, x2: 0.43, y2: 7.37, radius: 0.5, tile: 'builtin:library/track01', overlapPx: 2 },
@@ -401,6 +421,8 @@ export interface TurretDef {
   canGround: boolean
   // §4.2 伤害与弹道
   damage: number // 喷射类不使用（伤害由持续伤害表达）
+  armorPen?: number // 对堡垒装甲的穿透比例 0~1：该比例直入结构
+  armorDamage?: number // 每次命中削减受击面装甲；缺省 = damage×armorPen
   projectileSpeed?: number // m/s，直射/抛射
   guided?: boolean // 导弹：制导开关（v1.94 起与 guideDelay 组合成三模式：false=常规 / true=制导 / true+guideDelay>0=延迟制导）
   guideDelay?: number // 导弹·延迟制导（v1.94）：发射后沿炮塔方向直飞 N 秒才开启制导追踪（0.05~2；未配置=立即制导）
@@ -593,13 +615,18 @@ export interface EnemyDef {
   armor: number // 受击减伤 0-1
   color: string
   size: number // 碰撞半径（格）
+  attackRange: number // 远程直线实弹射程（格）
+  attackInterval: number // 射击间隔（秒）
+  projectileSpeed: number // 敌方实弹速度（米/秒）
+  projectileDamage: number // 单发伤害
+  penetration: number // 穿深；低于受击面装甲时按 穿深/装甲 概率穿透，否则跳弹
 }
 export const ENEMY_DEFS: Record<EnemyKind, EnemyDef> = {
-  walker: { kind: 'walker', name: '行尸', hp: 60, speed: 0.95, dps: 10, bounty: 15, air: false, priority: 'default', armor: 0, color: '#6F7D5C', size: 0.32 },
-  rusher: { kind: 'rusher', name: '冲核尸', hp: 45, speed: 1.5, dps: 12, bounty: 20, air: false, priority: 'core-rush', armor: 0, color: '#A9A06A', size: 0.3 },
-  brute: { kind: 'brute', name: '重甲尸', hp: 230, speed: 0.55, dps: 18, bounty: 40, air: false, priority: 'default', armor: 0.25, color: '#555B63', size: 0.4 },
-  flyer: { kind: 'flyer', name: '飞蝗', hp: 34, speed: 1.9, dps: 6, bounty: 18, air: true, priority: 'core-rush', armor: 0, color: '#7E8C5A', size: 0.3 },
-  runner: { kind: 'runner', name: '疾行尸', hp: 36, speed: 1.7, dps: 8, bounty: 12, air: false, priority: 'default', armor: 0, color: '#8A7F6E', size: 0.3 },
+  walker: { kind: 'walker', name: '行尸', hp: 60, speed: 0.95, dps: 10, bounty: 15, air: false, priority: 'default', armor: 0, color: '#6F7D5C', size: 0.32, attackRange: 8, attackInterval: 1.5, projectileSpeed: 100, projectileDamage: 10, penetration: 3 },
+  rusher: { kind: 'rusher', name: '冲核尸', hp: 45, speed: 1.5, dps: 12, bounty: 20, air: false, priority: 'core-rush', armor: 0, color: '#A9A06A', size: 0.3, attackRange: 7, attackInterval: 1.1, projectileSpeed: 115, projectileDamage: 12, penetration: 2.5 },
+  brute: { kind: 'brute', name: '重甲尸', hp: 230, speed: 0.55, dps: 18, bounty: 40, air: false, priority: 'default', armor: 0.25, color: '#555B63', size: 0.4, attackRange: 9, attackInterval: 2.2, projectileSpeed: 85, projectileDamage: 18, penetration: 6 },
+  flyer: { kind: 'flyer', name: '飞蝗', hp: 34, speed: 1.9, dps: 6, bounty: 18, air: true, priority: 'core-rush', armor: 0, color: '#7E8C5A', size: 0.3, attackRange: 10, attackInterval: 0.9, projectileSpeed: 140, projectileDamage: 6, penetration: 2 },
+  runner: { kind: 'runner', name: '疾行尸', hp: 36, speed: 1.7, dps: 8, bounty: 12, air: false, priority: 'default', armor: 0, color: '#8A7F6E', size: 0.3, attackRange: 7.5, attackInterval: 1.2, projectileSpeed: 125, projectileDamage: 8, penetration: 3 },
 }
 
 // 敌人 → 丧尸精灵图组（public/res/zombies/{group}_{dir}.png）
@@ -644,6 +671,7 @@ export interface ModuleDef {
   cost: number // 金币
   w: number // 内部空间占格 长（放置时可旋转 90°）
   h: number // 内部空间占格 宽
+  maxCount?: number // 同一定义模块的装配数量上限（正整数；缺省=不限）
   energyRegen?: number // 发电：电力回复 +点/s
   energyCap?: number // 储电上限 +
   ammoRegen?: number // 兵工厂：弹药回复 +发/s
@@ -654,6 +682,10 @@ export interface ModuleDef {
   turnBoost?: number // 转向速度加成（度/s，可为负）
   repair?: number // 维修站：修复功率池（hp/s），均摊到每座受损炮塔
   rangeBoost?: number // 火控雷达：射程增益池（比例，如 0.5 = 50%），均摊到每座炮塔
+  shieldGenerator?: boolean // 护盾发生器标记；存在时才启用全部护盾加成
+  shieldMax?: number // 护盾容量加成（发生器自带基础容量，增效模块可继续叠加）
+  shieldRegen?: number // 护盾回复 +点/s
+  shieldEnergyPerPoint?: number // 发生器每回复 1 点护盾消耗的电量
   produce?: { kind: AllyKind; interval: number; cap: number } // 生产类：周期产出友军单位，cap = 本模块同时存活上限
   color: string
   asset?: string // v2.30：贴图素材（素材库「模块」分类锚定；缺省=色块+名称回退）
@@ -684,6 +716,13 @@ export const ALLY_DEFS: Record<AllyKind, AllyDef> = {
   plane: { name: '战斗机', hp: 220, speed: 2.2, damage: 25, interval: 1, range: 60, canAir: true, canGround: true, air: true, color: '#7E8E9C', size: 0.3 },
 }
 
+/** 独立于可变模块注册表的迁移源；旧存档覆盖 MODULE_DEFS 时仍可安全补入。 */
+export const SHIELD_MODULE_DEFS: readonly ModuleDef[] = [
+  { id: 'shield_generator', name: '护盾发生器', desc: '护盾上限 300 · 回复 12/s · 回复每点耗电 0.35', cost: 220, w: 2, h: 2, maxCount: 1, shieldGenerator: true, shieldMax: 300, shieldRegen: 12, shieldEnergyPerPoint: 0.35, color: '#5E8E9C' },
+  { id: 'shield_capacitor', name: '护盾电容', desc: '护盾上限 +160（需护盾发生器）', cost: 120, w: 1, h: 2, shieldMax: 160, color: '#667E9A' },
+  { id: 'shield_amplifier', name: '护盾增效器', desc: '护盾回复 +6/s（需护盾发生器）', cost: 110, w: 1, h: 1, shieldRegen: 6, color: '#5A9A91' },
+]
+
 export const MODULE_DEFS: ModuleDef[] = [
   { id: 'generator', name: '发电模块', desc: '电力回复 +4/s · 储电上限 +15', cost: 120, w: 2, h: 2, energyRegen: 4, energyCap: 15, color: '#C8A83C' },
   { id: 'battery', name: '电池模块', desc: '储电上限 +50', cost: 90, w: 1, h: 2, energyCap: 50, color: '#7E9A4E' },
@@ -693,7 +732,8 @@ export const MODULE_DEFS: ModuleDef[] = [
   { id: 'armor_plate', name: '复合装甲', desc: '船体血量上限 +800，移动速度 -0.15 格/s', cost: 140, w: 1, h: 1, hpBoost: 800, speedBoost: -0.15, color: '#7A7E72' }, // v2.45 口令(5)：w 2→1
   { id: 'engine_boost', name: '推进引擎', desc: '移动速度 +0.35 格/s', cost: 150, w: 1, h: 2, speedBoost: 0.35, color: '#8E7A5E' },
   { id: 'gyro', name: '陀螺稳定器', desc: '转向速度 +50 度/s', cost: 120, w: 1, h: 1, turnBoost: 50, color: '#6E7E8A' },
-  { id: 'repair', name: '维修站', desc: '修复受损炮塔 8 hp/s（受损越多越摊薄）', cost: 130, w: 2, h: 2, repair: 8, color: '#9C8A6E' },
+  { id: 'repair', name: '维修站', desc: '修复结构、四向装甲与炮塔 8 点/s（受损项共享）', cost: 130, w: 2, h: 2, repair: 8, color: '#9C8A6E' },
+  ...SHIELD_MODULE_DEFS.map(d => ({ ...d })),
   { id: 'radar', name: '火控雷达', desc: '全部炮塔射程 +50%（炮塔越多越摊薄）', cost: 140, w: 1, h: 2, rangeBoost: 0.5, color: '#5E7E8E' },
   { id: 'barracks', name: '机器人模块', desc: '每 8s 产出 1 名士兵（同时存活 ≤6）', cost: 160, w: 3, h: 2, produce: { kind: 'soldier', interval: 8, cap: 6 }, color: '#8A7E5E' }, // v2.45 口令(5)：改名（原 兵营）
   { id: 'tank_factory', name: '坦克制造模块', desc: '每 15s 产出 1 辆坦克（同时存活 ≤3）', cost: 260, w: 3, h: 3, produce: { kind: 'tank', interval: 15, cap: 3 }, color: '#6A7462' }, // v2.45 口令(5)：改名（原 坦克制造厂）

@@ -6,12 +6,13 @@ import {
   ALLY_DEFS, AMMO, BARREL_BURN, FLASH_DURATION, OVERHEAT_RESUME,
   DEFAULT_FORTRESS, ENERGY, ENEMY_DEFS, FORTRESS_DEFS, M_PER_CELL,
   BOUNTY_MULT, MODULE_DEFS, PREP_TIME, SPAWN_ROWS, START_GOLD,
-  SPECIAL_MULT, TOTAL_WAVES, TURRET_DEFS, WALL_BUILD_COST, WALL_HP,
+  SPECIAL_MULT, TURRET_DEFS, WALL_BUILD_COST, WALL_HP,
   buildWave, levelScale, m2c, upgradeCost, waveHpScale, TURN_COAST_TAU, BASE_CELL } from './config'
-import type { AllyKind, BattleObject, EnemyKind, FixedBuilding, FortressDef, Hardpoint, ModuleDef, ResourceTagKey, SpecialBoost, TrackDef, TurretDef, TurretTag } from './config'
+import type { AllyKind, BattleObject, EnemyKind, FixedBuilding, FortressArmor, FortressDef, Hardpoint, ModuleDef, ResourceTagKey, SpecialBoost, TrackDef, TurretDef, TurretTag, WheelDef } from './config'
 import { getSelectedFortressId } from './persist'
-import { LEVEL, canPlaceBaseCell, getWallInfo, invalidateWallInfo, isBaseCell, isInnerCell } from './level'
-import type { LevelTerrain } from './level'
+import { DEFEND_OVERLAP_TIME_DEFAULT, DEFEND_REST_TIME_DEFAULT, LEVEL, TRIGGER_ENEMY_KINDS, canPlaceBaseCell, getWallInfo, invalidateWallInfo, isBaseCell, isInnerCell } from './level'
+import type { LevelBossPhase, LevelEventAction, LevelObjective, LevelTerrain, LevelZone } from './level'
+import { fortressBodyMaskSegmentEntry } from './fortressBodyMask'
 
 // ---------- 基础类型 ----------
 export type Phase = 'prep' | 'combat' | 'won' | 'lost'
@@ -84,6 +85,12 @@ export interface Enemy {
   attackedBy: { turretId: number; time: number }[]
   dots: BurnDot[]
   hitFlash: number
+  attackCooldown?: number // 远程实弹攻击冷却；可选以兼容旧测试/存档构造
+  bossName?: string
+  bossSizeScale?: number
+  bossPhases?: LevelBossPhase[]
+  bossDefeatActions?: LevelEventAction[]
+  bossPhaseDone?: number[]
 }
 
 export type ProjKind = 'bullet' | 'shell' | 'missile'
@@ -126,6 +133,22 @@ export interface Projectile {
   tgtPY?: number // v2.20 前置量追踪：上一 tick 目标位置 y
   splitDone?: boolean // v2.20 集束分裂：子弹标记（防止二次分裂；母弹分裂后移除）
   igniteAtT?: number // v2.23 点火时刻弹龄（秒；= 出生时的制导延迟，无延迟=0；集束子弹=分裂时刻弹龄）——点火大力喷射/烟尾「持续」窗口的计时基准
+}
+
+/** 敌方直线实弹：与玩家弹丸分池，命中目标固定为移动堡垒。 */
+export interface EnemyProjectile {
+  id: number
+  shooterId: number
+  x: number
+  y: number
+  px: number
+  py: number
+  heading: number
+  speed: number // 米/秒
+  damage: number
+  penetration: number
+  traveled: number // 米
+  maxTravel: number // 米
 }
 
 /** 导弹飞行时间耗尽后的淡出时长（秒） */
@@ -207,6 +230,39 @@ export interface Ally {
   hitFlash: number
 }
 
+export interface TriggerRuntime {
+  id: number
+  inside: boolean
+  activations: number
+  cooldown: number
+}
+
+export interface AmbushSpawn {
+  triggerId: number
+  kind: EnemyKind
+  left: number
+  x: number
+  y: number
+}
+
+export interface EventSequenceRuntime {
+  id: number
+  sourceId: number
+  zone: LevelZone
+  actions: LevelEventAction[]
+  index: number
+  waitLeft: number
+}
+
+export interface InteractableRuntime { id: number; inside: boolean; activations: number; enabled: boolean }
+export interface LevelNotice { id: number; text: string; left: number }
+export interface ShieldHitFx { id: number; x: number; y: number; ttl: number; max: number; broken: boolean }
+export type FortressDamageMarkKind = 'bullet' | 'scorch' | 'scratch'
+/** 主体层永久战损贴花：坐标为堡垒局部格，角度由事件 id 的黄金角稳定派生。 */
+export interface FortressDamageMark { id: number; kind: FortressDamageMarkKind; x: number; y: number; size: number; angle: number }
+/** 未被护盾完全吸收的船体受击瞬时事件：驱动火花，贴花本身存于 fortress.damageMarks。 */
+export interface FortressHitFx { id: number; x: number; y: number; ttl: number; max: number; penetrated: boolean; ricochet: boolean; ricochetDx: number; ricochetDy: number }
+
 export interface GameState {
   phase: Phase
   time: number
@@ -215,8 +271,13 @@ export interface GameState {
   energy: number
   wave: number
   prepLeft: number
+  /** 波次不等待时，从本波最后一名敌人登场到下波开始的倒计时；null=尚未开始。 */
+  nextWaveLeft: number | null
+  /** 当前目标累计交战时间（仅 combat 推进；生存目标据此判胜）。 */
+  objectiveElapsed: number
+  objective: LevelObjective
   /** 移动堡垒：连续坐标（格）左上角 + 船体耐久（取代旧核心血量；归零判负） */
-  fortress: { x: number; y: number; hp: number; maxHp: number; heat: number; overheated: boolean; heading: number; vx: number; vy: number; leanX: number; leanY: number; leanRbT: number; leanRbX: number; leanRbY: number; leanVX: number; leanVY: number; turnW: number; trackPhase: number[]; steerAngle: number; dyingT: number } // steerAngle=v2.51 轮式底盘前轮转角（rad；履带底盘恒 0）；turnW=当前转向角速度（rad/s，带方向；v1.56 松手转向过渡：输入解除后指数衰减归零） // heat=汇聚热量池；overheated=过热停火中；heading=船头朝向（弧度，0=朝上，顺时针为正）；vx/vy=当前速度向量（格/s，加速度驱动）；leanX/leanY=刹停惯性前倾位移（屏幕像素，仅视觉）；leanRbT/leanRbX/leanRbY=停稳回弹状态（v1.91：T=-1 未激活，X/Y=回弹起始倾角）；leanVX/leanVY=俯仰角速度（px/s，v1.92 弹簧-阻尼模型）；trackPhase=履带瓦片滚动相位（格，按 def.tracks 索引，v1.85）；dyingT=v2.53 毁灭序列计时（-1=存活；≥0=毁灭演出中，到 DEATH_END_T 判负；判负与毁灭事件解耦，驾驶员模式将改写判负规则）
+  fortress: { x: number; y: number; hp: number; maxHp: number; armor: FortressArmor; maxArmor: FortressArmor; shield: number; maxShield: number; shieldBroken: boolean; shieldLastHitAt: number; hitFlash: number; damageMarks: FortressDamageMark[]; damageMarkLastAt: number; damageFxLastAt: number; heat: number; overheated: boolean; heading: number; vx: number; vy: number; leanX: number; leanY: number; leanRbT: number; leanRbX: number; leanRbY: number; leanVX: number; leanVY: number; turnW: number; trackPhase: number[]; steerAngle: number; dyingT: number } // armor/maxArmor=四向当前/上限；护盾由模块动态提供；damageMarks=主体局部永久战损；heading=船头朝向（0=朝上，顺时针为正）
   fortressDefId: string
   /** 移动输入（UI 直接写入 gameRef.current.moveDir；tick 消费并随状态克隆延续） */
   moveDir: { x: number; y: number }
@@ -239,15 +300,23 @@ export interface GameState {
   objects: BattleObject[]
   enemies: Enemy[]
   projectiles: Projectile[]
+  enemyProjectiles: EnemyProjectile[]
   burnZones: BurnZone[]
   explosions: ExplosionFx[]
   tracers: Tracer[]
   muzzles: MuzzleEvent[] // 炮口事件（后坐/火光表现层驱动）
   beamFades: BeamFade[] // 光束停火消退动画
   impacts: ImpactFx[] // 非爆炸命中特效（§3A）
+  shieldHits: ShieldHitFx[] // 护盾受击涟漪/破盾事件
+  fortressHits: FortressHitFx[] // 船体受击火花事件（护盾完全吸收时不生成）
   floats: FloatText[]
   spawnQueue: { kind: EnemyKind; delay: number }[]
   spawnTimer: number
+  triggerStates: TriggerRuntime[]
+  ambushQueue: AmbushSpawn[]
+  eventQueue: EventSequenceRuntime[]
+  interactableStates: InteractableRuntime[]
+  notices: LevelNotice[]
   kills: number
   pathVersion: number // 结构变化即 +1，触发敌人重寻路
   nextId: number
@@ -295,20 +364,34 @@ export function turretCenter(t: Turret): { x: number; y: number } {
 export function initialState(): GameState {
   // 出战堡垒：堡垒编辑器「设为出战」的选择（localStorage），缺省内置标准型
   const fdef = FORTRESS_DEFS.find(f => f.id === getSelectedFortressId()) ?? DEFAULT_FORTRESS
+  const spawnX = LEVEL.mode === 'advance'
+    ? Math.max(0, Math.min(LEVEL.cols - fdef.w, LEVEL.startZone.x + (LEVEL.startZone.w - fdef.w) / 2))
+    : (LEVEL.cols - fdef.w) / 2
+  const spawnY = LEVEL.mode === 'advance'
+    ? Math.max(0, Math.min(LEVEL.rows - fdef.h, LEVEL.startZone.y + (LEVEL.startZone.h - fdef.h) / 2))
+    : LEVEL.rows - fdef.h - 1
   // 从可变关卡配置 LEVEL 构建（战场编辑器可改；墙布局固定由 buildTemplateWalls 生成）
+  const initialArmor: FortressArmor = { front: fdef.armor?.front ?? 0, rear: fdef.armor?.rear ?? 0, left: fdef.armor?.left ?? 0, right: fdef.armor?.right ?? 0 }
+  const noWaveWait = LEVEL.objective.type === 'defend' && LEVEL.objective.waveWait === false
   const s: GameState = {
-    phase: 'prep',
+    phase: LEVEL.mode === 'advance' || noWaveWait ? 'combat' : 'prep',
     time: 0,
     gold: START_GOLD,
     ammo: AMMO.start,
     energy: ENERGY.start,
     wave: 1,
-    prepLeft: PREP_TIME,
+    prepLeft: LEVEL.mode === 'advance' || noWaveWait ? 0 : LEVEL.objective.type === 'defend' ? (LEVEL.objective.restTime ?? DEFEND_REST_TIME_DEFAULT) : PREP_TIME,
+    nextWaveLeft: null,
+    objectiveElapsed: 0,
+    objective: structuredClone(LEVEL.objective),
     fortress: {
-      x: (LEVEL.cols - fdef.w) / 2,
-      y: LEVEL.rows - fdef.h - 1, // 底部中央，底边留 1 行余量
+      x: spawnX,
+      y: spawnY,
       hp: fdef.hp,
       maxHp: fdef.hp,
+      armor: structuredClone(initialArmor), maxArmor: structuredClone(initialArmor),
+      shield: 0, maxShield: 0, shieldBroken: false, shieldLastHitAt: -1e9,
+      hitFlash: 0, damageMarks: [], damageMarkLastAt: -1e9, damageFxLastAt: -1e9,
       heat: 0, overheated: false,
       heading: 0, // 初始船头朝上
       vx: 0, vy: 0, // 初始静止
@@ -324,8 +407,8 @@ export function initialState(): GameState {
     turnDir: 0,
     desiredHeading: null,
     reverse: false,
-    fortCellX: Math.floor((LEVEL.cols - fdef.w) / 2 + fdef.w / 2),
-    fortCellY: Math.floor(LEVEL.rows - fdef.h - 1 + fdef.h / 2),
+    fortCellX: Math.floor(spawnX + fdef.w / 2),
+    fortCellY: Math.floor(spawnY + fdef.h / 2),
     walls: [], // 玩家侧墙体退役（移动堡垒无墙圈）；墙系统保留供未来敌方要塞使用
     turrets: [],
     modules: [], // 要塞内部模块（初始空，备战期建造）
@@ -334,15 +417,23 @@ export function initialState(): GameState {
     objects: LEVEL.objects.map((o, i): BattleObject => ({ ...o, id: 2000 + i, maxHp: o.hp })),
     enemies: [],
     projectiles: [],
+    enemyProjectiles: [],
     burnZones: [],
     explosions: [],
     tracers: [],
     muzzles: [],
     beamFades: [],
     impacts: [],
+    shieldHits: [],
+    fortressHits: [],
     floats: [],
-    spawnQueue: [],
-    spawnTimer: 0,
+    spawnQueue: LEVEL.mode === 'advance' || noWaveWait ? buildWave(1).map(it => ({ ...it })) : [],
+    spawnTimer: LEVEL.mode === 'advance' || noWaveWait ? 0.5 : 0,
+    triggerStates: LEVEL.triggers.map(t => ({ id: t.id, inside: false, activations: 0, cooldown: 0 })),
+    ambushQueue: [],
+    eventQueue: [],
+    interactableStates: LEVEL.interactables.map(t => ({ id: t.id, inside: false, activations: 0, enabled: t.enabled })),
+    notices: [],
     kills: 0,
     pathVersion: 0,
     nextId: 1,
@@ -413,6 +504,14 @@ export function fortressInteriorSet(d: FortressDef): Set<string> {
 export function validateFortressDef(d: FortressDef): string[] {
   const errs: string[] = []
   if (!(d.hp >= 500 && d.hp <= 20000)) errs.push('耐久需在 500~20000')
+  if (d.armor && Object.entries(d.armor).some(([, v]) => !Number.isFinite(v) || v < 0 || v > 10000)) errs.push('四向装甲需在 0~10000')
+  if (d.paint && !/^#[0-9a-f]{6}$/i.test(d.paint.base)) errs.push('涂装主体色须为 #RRGGBB')
+  if (d.paint?.accent && !/^#[0-9a-f]{6}$/i.test(d.paint.accent)) errs.push('涂装强调色须为 #RRGGBB')
+  for (const decal of d.decals ?? []) {
+    if (!decal.asset) errs.push(`徽记 ${decal.id} 缺少素材`)
+    if (![decal.x, decal.y, decal.size, decal.angle ?? 0].every(Number.isFinite) || decal.size <= 0) errs.push(`徽记 ${decal.id} 坐标/尺寸/角度非法`)
+    if (decal.x < 0 || decal.x > d.w || decal.y < 0 || decal.y > d.h) errs.push(`徽记 ${decal.id} 锚点超出堡垒包围盒`)
+  }
   if (!(d.speed >= 0.2 && d.speed <= 6)) errs.push('移动速度需在 0.2~6 格/s')
   if (!(d.turnSpeed >= 15 && d.turnSpeed <= 240)) errs.push('转向速度需在 15~240 度/s')
   if (d.turnRadius !== undefined && !(d.turnRadius >= 0 && d.turnRadius <= 20)) errs.push('转向半径需在 0~20 格（0=按底盘物理）')
@@ -424,7 +523,10 @@ export function validateFortressDef(d: FortressDef): string[] {
   if (d.steerMax !== undefined && !(d.steerMax > 0 && d.steerMax <= 80)) errs.push('最大前轮转角需在 0~80°')
   if (d.steerRate !== undefined && !(d.steerRate > 0 && d.steerRate <= 720)) errs.push('方向盘转速需在 0~720°/s')
   if (d.gripMax !== undefined && !(d.gripMax > 0 && d.gripMax <= 100)) errs.push('横向附着上限需在 0~100 m/s²')
-  for (const w of d.wheels ?? []) { if (!(w.r > 0 && w.r <= 3)) errs.push(`轮子 ${w.id} 半径需在 0~3 格`) }
+  for (const w of d.wheels ?? []) {
+    if (![w.x, w.y].every(Number.isFinite)) errs.push(`轮子 ${w.id} 坐标须为数值`)
+    if (w.unit !== undefined && w.unit !== 'single' && w.unit !== 'pair') errs.push(`轮子 ${w.id} 单位仅支持 single(个)/pair(对)`)
+  }
   if (d.reverseFactor !== undefined && !(d.reverseFactor >= 0 && d.reverseFactor <= 1)) errs.push('倒退系数需在 0~1（如 0.8 = 倒退极速/加速度为前进的 80%）')
   if (d.brakeInertia !== undefined && !(d.brakeInertia >= 1 && d.brakeInertia <= 10)) errs.push('刹停惯性需在 1~10（1=3×加速度急停，5=同加速度，10=1/5 加速度滑行）')
   if (d.pitchGain !== undefined && !(d.pitchGain >= 0 && d.pitchGain <= 10)) errs.push('车身俯仰需在 0~10（0=关闭俯仰效果）')
@@ -537,6 +639,13 @@ export function fortressCenter(s: GameState): { x: number; y: number } {
   return { x: r.x + r.w / 2, y: r.y + r.h / 2 }
 }
 
+/** 推进目标：堡垒中心进入终点区域即完成，矩形边界计入区域。 */
+export function fortressReachedFinish(s: GameState): boolean {
+  const c = fortressCenter(s)
+  const z = LEVEL.finishZone
+  return c.x >= z.x && c.x <= z.x + z.w && c.y >= z.y && c.y <= z.y + z.h
+}
+
 /** 船体血量上限 = 堡垒基础 + 模块加成 */
 export function fortressMaxHp(s: GameState): number {
   return fortressDef(s).hp + moduleBonuses(s).hpBoostPool
@@ -557,17 +666,37 @@ export function fortressTurnRadius(s: GameState): number {
   return Math.max(0, fortressDef(s).turnRadius ?? 0)
 }
 
-/** v2.51 落印/滚动相位列（统一数据源）：履带（左定义列 + 右镜像列）在前，轮子逐轮单列在后。
+/** 可旋转轮胎的视觉偏角：优先使用配置的弧线半径，否则由实际曲率 ω/v 反推；不转弯时归零。 */
+export function wheelVisualSteerAngle(s: GameState, fd: FortressDef = fortressDef(s)): number {
+  const f = s.fortress
+  if (Math.abs(f.turnW) < 1e-6) return 0
+  const vLon = f.vx * dirX(f.heading) + f.vy * dirY(f.heading)
+  const configuredRadius = Math.max(0, fd.turnRadius ?? 0)
+  if (configuredRadius <= 0 && Math.abs(vLon) < 1e-6) return 0
+  const radius = configuredRadius > 0 ? configuredRadius : Math.abs(vLon / f.turnW)
+  const curvatureSign = Math.abs(vLon) > 1e-6 ? Math.sign(f.turnW / vLon) : Math.sign(f.turnW) * (s.reverse ? -1 : 1)
+  const wheelbase = Math.max(0.5, fd.wheelbase ?? fd.h * 0.6)
+  const maxAngle = Math.max(1, Math.min(80, fd.steerMax ?? 35)) * Math.PI / 180
+  return Math.max(-maxAngle, Math.min(maxAngle, Math.atan(wheelbase / Math.max(1e-6, radius)) * curvatureSign))
+}
+
+/** 落印/滚动相位列（统一数据源）：履带（左定义列 + 右镜像列）在前，轮胎按“个/对”展开在后。
  *  相位推进公式统一：dphase = (纵向速度 − turnW × 横向偏移) × dt（倒退/差速/原地转向天然正确） */
-export interface MarkColumn { x1: number; y1: number; x2: number; y2: number; mirror: boolean; tile: string; overlapPx: number }
+export interface MarkColumn { x1: number; y1: number; x2: number; y2: number; mirror: boolean; tile: string; overlapPx: number; steered?: boolean }
+export interface WheelPlacement { x: number; y: number; mirror: boolean }
+/** 轮胎放置展开：旧配置缺省为单个；pair 复用履带的定义侧 + 中心线镜像语义。 */
+export function wheelPlacements(fd: FortressDef, wheel: WheelDef): WheelPlacement[] {
+  const one = { x: wheel.x, y: wheel.y, mirror: false }
+  return wheel.unit === 'pair' ? [one, { x: fd.w - wheel.x, y: wheel.y, mirror: true }] : [one]
+}
 export function fortressMarkColumns(fd: FortressDef): MarkColumn[] {
   const cols: MarkColumn[] = []
   for (const t of fd.tracks ?? []) {
     cols.push({ x1: t.x1, y1: t.y1, x2: t.x2, y2: t.y2, mirror: false, tile: t.tile, overlapPx: t.overlapPx })
     cols.push({ x1: t.x1, y1: t.y1, x2: t.x2, y2: t.y2, mirror: true, tile: t.tile, overlapPx: t.overlapPx })
   }
-  for (const w of fd.wheels ?? []) { // 轮子 = 退化列（段长 0，落印取轮心点）；未配贴图沿用履带瓦片
-    cols.push({ x1: w.x, y1: w.y, x2: w.x, y2: w.y, mirror: false, tile: w.sprite ?? 'builtin:library/track01', overlapPx: 2 })
+  for (const w of fd.wheels ?? []) { // 轮子 = 退化列（段长 0，落印取轮心点）；pair 展开为左右两列
+    for (const p of wheelPlacements(fd, w)) cols.push({ x1: p.x, y1: p.y, x2: p.x, y2: p.y, mirror: false, tile: w.sprite ?? 'builtin:library/track01', overlapPx: 0, steered: w.steered })
   }
   return cols
 }
@@ -1063,6 +1192,9 @@ function moduleInstCellSet(m: ModuleInst): Set<string> {
 /** 模块放置校验：内部格阵界内 + 不与其他模块重叠（v2.31 逐格） + 金币足够（不查金币余额时传 skipGold） */
 export function canPlaceModule(s: GameState, defId: string, x: number, y: number, rot: 0 | 1): { ok: boolean; reason?: string } {
   const def = moduleDefOf(defId)
+  if (def.maxCount !== undefined && s.modules.filter(m => m.defId === defId).length >= def.maxCount) {
+    return { ok: false, reason: `${def.name}装配上限 ${def.maxCount}` }
+  }
   const cells = moduleCells(def, rot)
   const iSet = fortressInteriorSet(fortressDef(s)) // 内部自由格阵：模块每格都须落在内部格内
   if (x < 0 || y < 0) return { ok: false, reason: '超出内部空间' }
@@ -1089,6 +1221,7 @@ export function buildModule(s: GameState, defId: string, x: number, y: number, r
   const m = n.modules[n.modules.length - 1]
   if (def.produce) m.timer = def.produce.interval / moduleSpecialMult(n, m, 'produce') // 生产特殊格：间隔 ÷1.5
   n.fortress.maxHp = fortressMaxHp(n)
+  syncShieldCapacity(n)
   return n
 }
 
@@ -1102,6 +1235,7 @@ export function demolishModule(s: GameState, moduleId: number): GameState {
   n.modules = n.modules.filter(x => x.id !== moduleId)
   n.fortress.maxHp = fortressMaxHp(n)
   n.fortress.hp = Math.min(n.fortress.hp, n.fortress.maxHp)
+  syncShieldCapacity(n)
   return n
 }
 
@@ -1116,6 +1250,10 @@ export interface ModuleBonuses {
   hpBoostPool: number // 船体血量上限加成池
   speedBoostPool: number // 移动速度加成池（格/s，可为负）
   turnBoostPool: number // 转向速度加成池（度/s，可为负）
+  shieldGeneratorCount: number // 护盾发生器数量（具体上限由各模块定义的 maxCount 决定）
+  shieldMaxPool: number // 护盾容量池
+  shieldRegenPool: number // 护盾回复池（点/s）
+  shieldEnergyPerPoint: number // 每回复 1 点护盾耗电
 }
 
 /** 模块特殊格倍率：模块占格覆盖对应类别的特殊格 → SPECIAL_MULT（否则 1）；生产类用于间隔除算 */
@@ -1132,7 +1270,7 @@ export function moduleSpecialMult(s: GameState, m: ModuleInst, boost: SpecialBoo
 
 /** 汇总全部内部模块的加成（覆盖特殊格的模块对应属性 ×SPECIAL_MULT） */
 export function moduleBonuses(s: GameState): ModuleBonuses {
-  const b: ModuleBonuses = { energyRegen: 0, energyCap: 0, ammoRegen: 0, ammoCap: 0, coolingPool: 0, repairPool: 0, rangeBoostPool: 0, hpBoostPool: 0, speedBoostPool: 0, turnBoostPool: 0 }
+  const b: ModuleBonuses = { energyRegen: 0, energyCap: 0, ammoRegen: 0, ammoCap: 0, coolingPool: 0, repairPool: 0, rangeBoostPool: 0, hpBoostPool: 0, speedBoostPool: 0, turnBoostPool: 0, shieldGeneratorCount: 0, shieldMaxPool: 0, shieldRegenPool: 0, shieldEnergyPerPoint: 0 }
   for (const m of s.modules) {
     const d = moduleDefOf(m.defId)
     const mt = (boost: SpecialBoost) => moduleSpecialMult(s, m, boost)
@@ -1146,14 +1284,100 @@ export function moduleBonuses(s: GameState): ModuleBonuses {
     b.hpBoostPool += (d.hpBoost ?? 0) * mt('hp')
     b.speedBoostPool += (d.speedBoost ?? 0) * mt('speed')
     b.turnBoostPool += (d.turnBoost ?? 0) * mt('turn')
+    b.shieldMaxPool += Math.max(0, d.shieldMax ?? 0)
+    b.shieldRegenPool += Math.max(0, d.shieldRegen ?? 0)
+    if (d.shieldGenerator) {
+      b.shieldGeneratorCount++
+      b.shieldEnergyPerPoint = Math.max(b.shieldEnergyPerPoint, Math.max(0, d.shieldEnergyPerPoint ?? 0.5))
+    }
   }
   return b
+}
+
+export interface ShieldStats { enabled: boolean; max: number; regen: number; energyPerPoint: number }
+/** 护盾模块汇总：没有发生器时，容量/回复增效模块不单独生效。 */
+export function shieldStats(s: GameState): ShieldStats {
+  const b = moduleBonuses(s)
+  const enabled = b.shieldGeneratorCount > 0 && b.shieldMaxPool > 0
+  return { enabled, max: enabled ? b.shieldMaxPool : 0, regen: enabled ? b.shieldRegenPool : 0, energyPerPoint: enabled ? b.shieldEnergyPerPoint : 0 }
+}
+
+/** 同步模块变化后的动态护盾上限；首次装上发生器及新增容量均补足新增部分。 */
+function syncShieldCapacity(s: GameState): ShieldStats {
+  const stats = shieldStats(s)
+  const oldMax = s.fortress.maxShield
+  s.fortress.maxShield = stats.max
+  if (!stats.enabled) {
+    s.fortress.shield = 0
+    s.fortress.shieldBroken = false
+    return stats
+  }
+  if (oldMax <= 0) {
+    s.fortress.shield = stats.max
+    s.fortress.shieldBroken = false
+  } else if (stats.max > oldMax) {
+    s.fortress.shield = Math.min(stats.max, s.fortress.shield + stats.max - oldMax)
+  } else {
+    s.fortress.shield = Math.min(stats.max, s.fortress.shield)
+  }
+  return stats
+}
+
+/** 护盾回复：未破时持续回复；破盾后须 10s 未受攻击。满盾不耗电，电量不足按可用电量部分回复。 */
+function updateShield(s: GameState, dt: number): void {
+  const stats = syncShieldCapacity(s)
+  const f = s.fortress
+  if (!stats.enabled || f.shield >= f.maxShield || stats.regen <= 0) return
+  if (f.shieldBroken) {
+    if (s.time - f.shieldLastHitAt < 10) return
+    f.shieldBroken = false
+  }
+  const wanted = Math.min(f.maxShield - f.shield, stats.regen * dt)
+  const possible = stats.energyPerPoint > 0 ? Math.min(wanted, s.energy / stats.energyPerPoint) : wanted
+  if (possible <= 0) return
+  f.shield += possible
+  s.energy = Math.max(0, s.energy - possible * stats.energyPerPoint)
 }
 
 /** 资源动态上限 = 基础 cap + 模块加成（UI 与 tick 共用） */
 export function resourceCaps(s: GameState): { ammoCap: number; energyCap: number } {
   const b = moduleBonuses(s)
   return { ammoCap: AMMO.cap + b.ammoCap, energyCap: ENERGY.cap + b.energyCap }
+}
+
+export interface HeatCurvePoint { time: number; heat: number; overheated: boolean }
+/** 炮塔编辑器只读热曲线：按单座炮塔持续射击的平均产热，复用实战过热/50%迟滞口径。 */
+export function simulateTurretHeat(def: TurretDef, fortress: FortressDef, seconds = 20, dt = 0.1): HeatCurvePoint[] {
+  const cap = Math.max(1, fortress.heatCap)
+  const barrels = Math.max(1, Math.floor(def.barrels ?? 1))
+  const shotsPerRound = Math.max(1, Math.floor(def.burst ?? 1)) * ((def.barrelMode ?? 'salvo') === 'salvo' ? barrels : 1)
+  const heatPerSecond = (def.heatPerShot ?? 0) * shotsPerRound / Math.max(0.05, def.fireRate || 1)
+  let heat = 0, overheated = false
+  const out: HeatCurvePoint[] = [{ time: 0, heat, overheated }]
+  const steps = Math.ceil(seconds / dt)
+  for (let i = 1; i <= steps; i++) {
+    heat = Math.max(0, heat - fortress.heatDissipation * dt)
+    if (overheated && heat <= cap * OVERHEAT_RESUME) overheated = false
+    if (!overheated) heat = Math.min(cap, heat + heatPerSecond * dt)
+    if (heat >= cap) overheated = true
+    out.push({ time: Math.min(seconds, i * dt), heat, overheated })
+  }
+  return out
+}
+
+/** 模块规划参考：忽略当前装配，只计算模块在目标堡垒内部自由格阵中的可放起点数量。 */
+export function modulePlanningFits(fortress: FortressDef, module: ModuleDef): { normal: number; rotated: number } {
+  const inside = fortressInteriorSet(fortress)
+  const count = (rot: 0 | 1) => {
+    const cells = moduleCells(module, rot)
+    const foot = moduleFoot(module, rot)
+    let n = 0
+    for (let y = 0; y <= fortress.h - foot.h; y++) for (let x = 0; x <= fortress.w - foot.w; x++) {
+      if (cells.every(c => inside.has(`${x + c.x},${y + c.y}`))) n++
+    }
+    return n
+  }
+  return { normal: count(0), rotated: count(1) }
 }
 
 /** 堡垒散热速率（点/s）= 堡垒自然散热 + 散热器功率池（全额直连，不按炮塔数摊薄） */
@@ -1193,12 +1417,17 @@ export function allySpawnPoint(s: GameState): { x: number; y: number } {
 /** 生产模块倒计时 + 维修站修复 + 友军单位推进（备战/交战都生效；tick 每帧调用） */
 function updateModulesAndAllies(s: GameState, dt: number) {
   const mb = moduleBonuses(s)
-  // 维修站：修复功率均摊到每座受损炮塔
+  // 维修站：结构、四面装甲与受损炮塔共同均摊修复功率
   if (mb.repairPool > 0) {
     const damaged = s.turrets.filter(t => t.hp < t.maxHp)
-    if (damaged.length > 0) {
-      const per = (mb.repairPool / damaged.length) * dt
+    const sides = (['front', 'rear', 'left', 'right'] as FortressArmorSide[]).filter(side => s.fortress.armor[side] < s.fortress.maxArmor[side])
+    const structureDamaged = s.fortress.hp < s.fortress.maxHp
+    const consumers = damaged.length + sides.length + (structureDamaged ? 1 : 0)
+    if (consumers > 0) {
+      const per = (mb.repairPool / consumers) * dt
       for (const t of damaged) t.hp = Math.min(t.maxHp, t.hp + per)
+      for (const side of sides) s.fortress.armor[side] = Math.min(s.fortress.maxArmor[side], s.fortress.armor[side] + per)
+      if (structureDamaged) s.fortress.hp = Math.min(s.fortress.maxHp, s.fortress.hp + per)
     }
   }
   // 生产模块：倒计时产出友军（受本模块存活上限约束）
@@ -1309,6 +1538,7 @@ export function startWave(s: GameState, bonus: number): GameState {
   n.phase = 'combat'
   n.gold += bonus
   n.prepLeft = 0
+  n.nextWaveLeft = null
   n.spawnQueue = buildWave(n.wave).map(it => ({ ...it }))
   n.spawnTimer = 0.5
   return n
@@ -1317,6 +1547,139 @@ export function startWave(s: GameState, bonus: number): GameState {
 // ---------- 内部工具 ----------
 function clone(s: GameState): GameState {
   return structuredClone(s)
+}
+
+function spawnEnemyAt(s: GameState, kind: EnemyKind, x: number, y: number): Enemy {
+  const def = ENEMY_DEFS[kind]
+  const enemyId = s.nextId++
+  const hp = Math.round(def.hp * waveHpScale(s.wave))
+  const enemy: Enemy = {
+    id: enemyId, kind,
+    x: Math.max(0.1, Math.min(LEVEL.cols - 0.1, x)),
+    y: Math.max(-0.5, Math.min(LEVEL.rows - 0.1, y)),
+    hp, maxHp: hp, mode: 'move', targetKind: null, targetId: null,
+    goalX: x, goalY: y, hasGoal: false, pathVersion: -1,
+    attackedBy: [], dots: [], hitFlash: 0,
+    attackCooldown: eventRandom(enemyId, 97) * def.attackInterval,
+  }
+  s.enemies.push(enemy)
+  return enemy
+}
+
+function zoneSpawnPoint(z: LevelZone, seed: number): { x: number; y: number } {
+  const side = Math.floor(eventRandom(seed, 0) * 4)
+  const px = z.x + 0.35 + eventRandom(seed, 1) * Math.max(0.1, z.w - 0.7)
+  const py = z.y + 0.35 + eventRandom(seed, 2) * Math.max(0.1, z.h - 0.7)
+  if (side === 0) return { x: px, y: z.y + 0.15 }
+  if (side === 1) return { x: z.x + z.w - 0.15, y: py }
+  if (side === 2) return { x: px, y: z.y + z.h - 0.15 }
+  return { x: z.x + 0.15, y: py }
+}
+
+function queueEvent(s: GameState, sourceId: number, zone: LevelZone, actions: LevelEventAction[]) {
+  if (actions.length === 0) return
+  s.eventQueue.push({ id: s.nextId++, sourceId, zone: { ...zone }, actions: structuredClone(actions), index: 0, waitLeft: 0 })
+}
+
+function executeEventAction(s: GameState, seq: EventSequenceRuntime, action: LevelEventAction): boolean {
+  if (action.type === 'wait') {
+    if (seq.waitLeft <= 0) seq.waitLeft = action.seconds
+    return seq.waitLeft <= 0
+  }
+  if (action.type === 'spawn') {
+    let order = 0
+    for (const kind of TRIGGER_ENEMY_KINDS) for (let i = 0; i < action.enemies[kind]; i++) {
+      const p = zoneSpawnPoint(seq.zone, seq.id * 1000003 + order)
+      s.ambushQueue.push({ triggerId: seq.sourceId, kind, left: order * action.interval, x: p.x, y: p.y })
+      order++
+    }
+  } else if (action.type === 'boss') {
+    const p = zoneSpawnPoint(seq.zone, seq.id * 1000003 + seq.index)
+    const e = spawnEnemyAt(s, action.boss.kind, p.x, p.y)
+    e.maxHp = Math.round(e.maxHp * action.boss.hpScale)
+    e.hp = e.maxHp
+    e.bossName = action.boss.name
+    e.bossSizeScale = action.boss.sizeScale
+    e.bossPhases = structuredClone(action.boss.phases)
+    e.bossDefeatActions = structuredClone(action.boss.defeatActions)
+    e.bossPhaseDone = []
+    s.notices.push({ id: s.nextId++, text: `Boss 出现：${action.boss.name}`, left: 4 })
+  } else if (action.type === 'message') {
+    if (action.text) s.notices.push({ id: s.nextId++, text: action.text, left: action.duration })
+  } else if (action.type === 'reward') {
+    s.gold += action.gold
+    addFloat(s, s.fortress.x, s.fortress.y, `奖励 +${action.gold}`)
+  } else if (action.type === 'objective') {
+    s.objective = structuredClone(action.objective)
+    s.objectiveElapsed = 0
+    s.nextWaveLeft = null
+  } else if (action.type === 'toggle') {
+    const rt = s.interactableStates.find(v => v.id === action.interactableId)
+    if (rt) rt.enabled = action.enabled
+  } else if (action.type === 'complete') {
+    if (s.fortress.hp > 0 && s.fortress.dyingT < 0) s.phase = 'won'
+  }
+  return true
+}
+
+function updateEventQueue(s: GameState, dt: number) {
+  for (const seq of s.eventQueue) {
+    if (seq.waitLeft > 0) {
+      seq.waitLeft = Math.max(0, seq.waitLeft - dt)
+      if (seq.waitLeft > 0) continue
+      seq.index++
+    }
+    let guard = 0
+    while (seq.index < seq.actions.length && guard++ < 50) {
+      if (!executeEventAction(s, seq, seq.actions[seq.index])) break
+      seq.index++
+      if (s.phase === 'won') break
+    }
+  }
+  s.eventQueue = s.eventQueue.filter(q => q.index < q.actions.length)
+}
+
+function updateInteractables(s: GameState) {
+  const c = fortressCenter(s)
+  for (const item of LEVEL.interactables) {
+    let rt = s.interactableStates.find(v => v.id === item.id)
+    if (!rt) { rt = { id: item.id, inside: false, activations: 0, enabled: item.enabled }; s.interactableStates.push(rt) }
+    const inside = c.x >= item.x && c.x <= item.x + item.w && c.y >= item.y && c.y <= item.y + item.h
+    if (rt.enabled && inside && !rt.inside && (!item.once || rt.activations === 0)) {
+      rt.activations++
+      queueEvent(s, -item.id, item, item.actions)
+      s.notices.push({ id: s.nextId++, text: `${item.name} 已激活`, left: 2.5 })
+    }
+    rt.inside = inside
+  }
+}
+
+/** 区域伏击：只在“区域外→区域内”沿触发；重复触发须先离开并满足冷却。 */
+function updateRegionTriggers(s: GameState, dt: number) {
+  const c = fortressCenter(s)
+  for (const t of LEVEL.triggers) {
+    let rt = s.triggerStates.find(v => v.id === t.id)
+    if (!rt) {
+      rt = { id: t.id, inside: false, activations: 0, cooldown: 0 }
+      s.triggerStates.push(rt)
+    }
+    rt.cooldown = Math.max(0, rt.cooldown - dt)
+    const inside = c.x >= t.x && c.x <= t.x + t.w && c.y >= t.y && c.y <= t.y + t.h
+    if (t.enabled && inside && !rt.inside && rt.cooldown <= 0 && rt.activations < t.activationLimit) {
+      rt.activations++
+      rt.cooldown = t.cooldown
+      if (t.actions?.length) queueEvent(s, t.id, t, t.actions)
+      else {
+        let order = 0
+        for (const kind of TRIGGER_ENEMY_KINDS) for (let i = 0; i < t.enemies[kind]; i++) {
+          const p = zoneSpawnPoint(t, t.id * 1000003 + rt.activations * 1009 + order)
+          s.ambushQueue.push({ triggerId: t.id, kind, left: t.delay + order * t.interval, x: p.x, y: p.y })
+          order++
+        }
+      }
+    }
+    rt.inside = inside
+  }
 }
 
 function wallStateOf(w: WallSeg): WallState {
@@ -1333,6 +1696,155 @@ function distToFortress(s: GameState, e: { x: number; y: number }): number {
 
 function addFloat(s: GameState, x: number, y: number, text: string) {
   s.floats.push({ id: s.nextId++, x, y, text, ttl: 0.8 })
+}
+
+export type FortressArmorSide = keyof FortressArmor
+export interface FortressDamageSource {
+  x: number
+  y: number
+  kind: 'melee' | 'projectile' | 'aoe'
+  armorPen?: number
+  armorDamage?: number
+  penetration?: number // 概率穿深值：小于当前装甲时以 penetration/armor 判定；失败则跳弹且不伤结构
+  duration?: number // 持续伤害按秒给攻击强度，duration=本 tick 秒数
+}
+export interface FortressDamageResult {
+  side: FortressArmorSide
+  blocked: boolean
+  shieldDamage: number
+  shieldBroken: boolean
+  structureDamage: number
+  armorDamage: number
+  ricochet: boolean
+}
+
+export const FORTRESS_DAMAGE_MARK_CAP = 60
+
+/** 英雄连式穿深概率：穿深达到装甲即必穿，否则按比例，最低保留 5% 幸运穿透。 */
+export function fortressPenetrationChance(penetration: number, armor: number): number {
+  if (armor <= 0) return 1
+  return Math.max(0.05, Math.min(1, Math.max(0, penetration) / armor))
+}
+
+/** 世界命中点 → 堡垒主体局部格；越出车体的攻击源投影到主体边缘，保证贴花落在车上。 */
+export function fortressDamageLocalPoint(s: GameState, x: number, y: number): { x: number; y: number } {
+  const r = fortressRect(s)
+  const cx = r.x + r.w / 2, cy = r.y + r.h / 2
+  const dx = x - cx, dy = y - cy
+  const c = Math.cos(s.fortress.heading), sn = Math.sin(s.fortress.heading)
+  const lx = dx * c + dy * sn + r.w / 2
+  const ly = -dx * sn + dy * c + r.h / 2
+  const inset = Math.min(0.08, r.w / 4, r.h / 4)
+  return {
+    x: Math.max(inset, Math.min(r.w - inset, lx)),
+    y: Math.max(inset, Math.min(r.h - inset, ly)),
+  }
+}
+
+function recordFortressBodyHit(s: GameState, source: FortressDamageSource, penetrated: boolean, ricochet = false): void {
+  s.fortress.hitFlash = 0.08
+  const continuous = source.duration !== undefined && source.duration < 0.25
+  const local = fortressDamageLocalPoint(s, source.x, source.y)
+  if (!continuous || s.time - s.fortress.damageMarkLastAt >= 0.14) {
+    const id = s.nextId++
+    const kind: FortressDamageMarkKind = penetrated
+      ? source.kind === 'aoe' ? 'scorch' : source.kind === 'projectile' ? 'bullet' : 'scratch'
+      : 'scratch'
+    const baseSize = kind === 'scorch' ? 0.46 : kind === 'scratch' ? 0.32 : 0.22
+    s.fortress.damageMarks.push({
+      id, kind, x: local.x, y: local.y,
+      size: baseSize * (0.85 + eventRandom(id, 74) * 0.3),
+      angle: (id * 137.50776405003785) % 360,
+    })
+    if (s.fortress.damageMarks.length > FORTRESS_DAMAGE_MARK_CAP) {
+      s.fortress.damageMarks.splice(0, s.fortress.damageMarks.length - FORTRESS_DAMAGE_MARK_CAP)
+    }
+    s.fortress.damageMarkLastAt = s.time
+  }
+  if (!continuous || s.time - s.fortress.damageFxLastAt >= 0.08) {
+    const r = fortressRect(s)
+    const dx = local.x - r.w / 2, dy = local.y - r.h / 2
+    const c = Math.cos(s.fortress.heading), sn = Math.sin(s.fortress.heading)
+    const wx = r.x + r.w / 2 + dx * c - dy * sn
+    const wy = r.y + r.h / 2 + dx * sn + dy * c
+    const nx0 = wx - (r.x + r.w / 2), ny0 = wy - (r.y + r.h / 2)
+    const nl = Math.max(1e-6, Math.hypot(nx0, ny0)), nx = nx0 / nl, ny = ny0 / nl
+    const ix0 = wx - source.x, iy0 = wy - source.y
+    const il = Math.max(1e-6, Math.hypot(ix0, iy0)), ix = ix0 / il, iy = iy0 / il
+    const dot = ix * nx + iy * ny
+    let rx = ix - 2 * dot * nx, ry = iy - 2 * dot * ny
+    const rl = Math.max(1e-6, Math.hypot(rx, ry)); rx /= rl; ry /= rl
+    s.fortressHits.push({
+      id: s.nextId++,
+      x: wx, y: wy,
+      ttl: ricochet ? 0.28 : 0.18, max: ricochet ? 0.28 : 0.18, penetrated, ricochet,
+      ricochetDx: rx, ricochetDy: ry,
+    })
+    s.fortress.damageFxLastAt = s.time
+  }
+}
+
+/** 世界命中点映射到堡垒四向受击面；角部按矩形归一化对角线裁决。 */
+export function fortressArmorSideAt(s: GameState, x: number, y: number): FortressArmorSide {
+  const r = fortressRect(s)
+  const cx = r.x + r.w / 2, cy = r.y + r.h / 2
+  const dx = x - cx, dy = y - cy
+  const c = Math.cos(s.fortress.heading), sn = Math.sin(s.fortress.heading)
+  const lx = dx * c + dy * sn
+  const ly = -dx * sn + dy * c
+  const nx = lx / Math.max(0.01, r.w / 2)
+  const ny = ly / Math.max(0.01, r.h / 2)
+  if (Math.abs(nx) > Math.abs(ny)) return nx < 0 ? 'left' : 'right'
+  return ny < 0 ? 'front' : 'rear'
+}
+
+/** 堡垒唯一承伤入口：受击面装甲阈值 → 穿甲直伤/削甲 → 结构值。 */
+export function damageFortress(s: GameState, rawDamage: number, source: FortressDamageSource): FortressDamageResult {
+  const side = fortressArmorSideAt(s, source.x, source.y)
+  const duration = Math.max(0, source.duration ?? 1)
+  const raw = Math.max(0, rawDamage)
+  const actualRaw = raw * duration
+  let shieldDamage = 0
+  let shieldBroken = false
+  if (actualRaw > 0) s.fortress.shieldLastHitAt = s.time
+  let remainingActual = actualRaw
+  if (remainingActual > 0 && s.fortress.maxShield > 0 && s.fortress.shield > 0) {
+    shieldDamage = Math.min(s.fortress.shield, remainingActual)
+    s.fortress.shield = Math.max(0, s.fortress.shield - shieldDamage)
+    remainingActual -= shieldDamage
+    shieldBroken = s.fortress.shield <= 0
+    if (shieldBroken) s.fortress.shieldBroken = true
+    s.shieldHits.push({ id: s.nextId++, x: source.x, y: source.y, ttl: shieldBroken ? 0.8 : 0.45, max: shieldBroken ? 0.8 : 0.45, broken: shieldBroken })
+  }
+  if (remainingActual <= 0 || duration <= 0) return { side, blocked: true, shieldDamage, shieldBroken, structureDamage: 0, armorDamage: 0, ricochet: false }
+  const remainingRaw = remainingActual / duration
+  const armor = Math.max(0, s.fortress.armor?.[side] ?? 0)
+  const pen = Math.max(0, Math.min(1, source.armorPen ?? 0))
+  let structureDamage = 0
+  let armorDamage = 0
+  let ricochet = false
+  if (armor > 0 && source.penetration !== undefined) {
+    const chance = fortressPenetrationChance(source.penetration, armor)
+    ricochet = eventRandom(s.nextId, 91) >= chance
+    if (!ricochet) {
+      structureDamage = remainingActual
+      armorDamage = Math.min(armor, Math.max(0, source.armorDamage ?? 0) * duration)
+      s.fortress.armor[side] = Math.max(0, armor - armorDamage)
+    }
+  } else if (armor <= 0) {
+    structureDamage = remainingActual
+  } else if (pen > 0) {
+    const direct = remainingRaw * pen
+    const checked = remainingRaw - direct
+    structureDamage = (direct + Math.max(0, checked - armor)) * duration
+    armorDamage = Math.min(armor, Math.max(0, source.armorDamage ?? remainingRaw * pen) * duration)
+    s.fortress.armor[side] = Math.max(0, armor - armorDamage)
+  } else if (remainingRaw >= armor) {
+    structureDamage = (remainingRaw - armor) * duration
+  }
+  s.fortress.hp = Math.max(0, s.fortress.hp - structureDamage)
+  recordFortressBodyHit(s, source, structureDamage > 0, ricochet)
+  return { side, blocked: structureDamage <= 0, shieldDamage, shieldBroken, structureDamage, armorDamage, ricochet }
 }
 
 /** 对敌人结算伤害（护甲、受击记录、燃烧 dot 挂载） */
@@ -1438,7 +1950,7 @@ function damageBuilding(s: GameState, b: FixedBuilding, dmg: number) {
 }
 
 /** 对目标实体结算敌人攻击，返回目标是否仍有效 */
-function enemyDealDamage(s: GameState, e: Enemy, dmg: number): boolean {
+function enemyDealDamage(s: GameState, e: Enemy, dmg: number, duration = 1): boolean {
   switch (e.targetKind) {
     case 'wall': {
       const w = s.walls.find(w => w.id === e.targetId)
@@ -1468,7 +1980,7 @@ function enemyDealDamage(s: GameState, e: Enemy, dmg: number): boolean {
       // 攻击船体：堡垒已移动脱离接触 => 目标失效，重新追击
       const r = fortressRect(s)
       if (e.x < r.x - 0.7 || e.x > r.x + r.w + 0.7 || e.y < r.y - 0.7 || e.y > r.y + r.h + 0.7) return false
-      s.fortress.hp = Math.max(0, s.fortress.hp - dmg)
+      damageFortress(s, dmg, { x: e.x, y: e.y, kind: 'melee', duration })
       return s.fortress.hp > 0
     }
     case 'ally': {
@@ -1571,13 +2083,60 @@ function moveToward(s: GameState, e: Enemy, tx: number, ty: number, dt: number, 
   e.y += (dy / d) * step
 }
 
+/** 点到旋转堡垒矩形的最短距离（格），供远程敌人决定停车射击。 */
+export function fortressDistanceToPoint(s: GameState, x: number, y: number): number {
+  const r = fortressRect(s)
+  const cx = r.x + r.w / 2, cy = r.y + r.h / 2
+  const dx = x - cx, dy = y - cy
+  const c = Math.cos(s.fortress.heading), sn = Math.sin(s.fortress.heading)
+  const lx = dx * c + dy * sn, ly = -dx * sn + dy * c
+  const ox = Math.max(0, Math.abs(lx) - r.w / 2)
+  const oy = Math.max(0, Math.abs(ly) - r.h / 2)
+  return Math.hypot(ox, oy)
+}
+
+function enemyFireAtFortress(s: GameState, e: Enemy, def: (typeof ENEMY_DEFS)[EnemyKind]): void {
+  const r = fortressRect(s)
+  const tx = r.x + r.w / 2, ty = r.y + r.h / 2
+  const heading = bearing(tx - e.x, ty - e.y)
+  s.enemyProjectiles.push({
+    id: s.nextId++, shooterId: e.id,
+    x: e.x, y: e.y, px: e.x, py: e.y, heading,
+    speed: def.projectileSpeed, damage: def.projectileDamage, penetration: def.penetration,
+    traveled: 0, maxTravel: def.attackRange * M_PER_CELL * 1.25,
+  })
+}
+
+/** 全部现有敌人的测试用远程模式：进入射程即停车，按各自间隔发射直线实弹。 */
+function updateEnemyRangedAttack(s: GameState, e: Enemy, def: (typeof ENEMY_DEFS)[EnemyKind], dt: number): boolean {
+  const distance = fortressDistanceToPoint(s, e.x, e.y)
+  if (distance > def.attackRange) {
+    if (e.mode === 'attack' && e.targetKind === 'core') {
+      e.mode = 'move'; e.targetKind = null; e.targetId = null; e.hasGoal = false
+    }
+    return false
+  }
+  e.mode = 'attack'; e.targetKind = 'core'; e.targetId = 0; e.hasGoal = false
+  e.attackCooldown = (e.attackCooldown ?? 0) - dt
+  if (e.attackCooldown <= 0) {
+    enemyFireAtFortress(s, e, def)
+    e.attackCooldown += def.attackInterval
+    if (e.attackCooldown <= 0) e.attackCooldown = def.attackInterval
+  }
+  return true
+}
+
 function updateEnemy(s: GameState, e: Enemy, dist: number[], dt: number) {
   const def = ENEMY_DEFS[e.kind]
   e.hitFlash = Math.max(0, e.hitFlash - dt)
 
+  if (updateEnemyRangedAttack(s, e, def, dt)) return
+
   // 攻击状态：目标失效才重选（§6.3 重寻路不打断攻击）
   if (e.mode === 'attack') {
-    const ok = enemyDealDamage(s, e, def.dps * dt)
+    const ok = e.targetKind === 'core'
+      ? enemyDealDamage(s, e, def.dps, dt)
+      : enemyDealDamage(s, e, def.dps * dt)
     if (!ok) {
       e.mode = 'move'
       e.targetKind = null
@@ -2246,6 +2805,48 @@ function updateTurretBody(s: GameState, t: Turret, dt: number) {
 
 // ================= 弹道更新 =================
 
+/** 世界线段与旋转后的主体贴图 alpha 首次交点；底座、履带和轮胎不阻挡弹丸。 */
+export function enemyProjectileFortressHit(s: GameState, x1: number, y1: number, x2: number, y2: number): { x: number; y: number } | null {
+  const r = fortressRect(s)
+  const cx = r.x + r.w / 2, cy = r.y + r.h / 2
+  const c = Math.cos(s.fortress.heading), sn = Math.sin(s.fortress.heading)
+  const local = (x: number, y: number) => {
+    const dx = x - cx, dy = y - cy
+    return { x: dx * c + dy * sn, y: -dx * sn + dy * c }
+  }
+  const a = local(x1, y1), b = local(x2, y2)
+  const t = fortressBodyMaskSegmentEntry(
+    fortressDef(s).spriteBody, r.w, r.h,
+    a.x + r.w / 2, a.y + r.h / 2,
+    b.x + r.w / 2, b.y + r.h / 2,
+  )
+  if (t === null) return null
+  return { x: x1 + (x2 - x1) * t, y: y1 + (y2 - y1) * t }
+}
+
+function updateEnemyProjectile(s: GameState, p: EnemyProjectile, dt: number): boolean {
+  const stepM = p.speed * dt
+  p.px = p.x; p.py = p.y
+  p.x += dirX(p.heading) * m2c(stepM)
+  p.y += dirY(p.heading) * m2c(stepM)
+  p.traveled += stepM
+  const hit = enemyProjectileFortressHit(s, p.px, p.py, p.x, p.y)
+  if (hit) {
+    const result = damageFortress(s, p.damage, { x: hit.x, y: hit.y, kind: 'projectile', penetration: p.penetration })
+    if (result.ricochet) addFloat(s, hit.x, hit.y, '跳弹')
+    return false
+  }
+  const cx = Math.floor(p.x), cy = Math.floor(p.y)
+  if (cx < 0 || cx >= LEVEL.cols || cy < 0 || cy >= LEVEL.rows || p.traveled >= p.maxTravel) return false
+  const block = projectileBlockerAt(s, cx, cy)
+  if (block) {
+    damageObject(s, block, p.damage)
+    s.explosions.push({ id: s.nextId++, x: p.x, y: p.y, r: 0.2, ttl: 0.12, max: 0.12, kind: 'groundImpact' })
+    return false
+  }
+  return true
+}
+
 function updateBullet(s: GameState, p: Projectile, dt: number): boolean {
   const def = defOf(p.defId)
   const stepM = (def.projectileSpeed ?? 200) * dt
@@ -2570,13 +3171,18 @@ export function tick(prev: GameState, dt: number): GameState {
   const s = clone(prev)
   lastDt = dt
   s.time += dt
+  if (prev.phase === 'combat') s.objectiveElapsed += dt
   // 视觉效果衰减
   s.tracers = s.tracers.filter(tr => (tr.ttl -= dt) > 0)
   s.muzzles = s.muzzles.filter(m => (m.ttl -= dt) > 0)
   s.beamFades = s.beamFades.filter(b => (b.ttl -= dt) > 0)
   s.impacts = s.impacts.filter(m => (m.ttl -= dt) > 0) // 命中事件 ttl 衰减（此前缺失：事件永存导致粒子每帧重复发射）
+  s.shieldHits = s.shieldHits.filter(m => (m.ttl -= dt) > 0)
+  s.fortressHits = s.fortressHits.filter(m => (m.ttl -= dt) > 0)
   s.explosions = s.explosions.filter(ex => (ex.ttl -= dt) > 0)
   s.floats = s.floats.filter(f => (f.ttl -= dt) > 0)
+  s.notices = s.notices.filter(n => (n.left -= dt) > 0)
+  s.fortress.hitFlash = Math.max(0, s.fortress.hitFlash - dt)
 
   // v2.53 毁灭序列中：冻结操控输入（堡垒已毁，只推进演出；运动求解器照常运行 → 惯性滑停）
   if (s.fortress.dyingT >= 0) { s.moveDir.x = 0; s.moveDir.y = 0; s.desiredHeading = null; s.reverse = false; s.turnDir = 0 }
@@ -2585,6 +3191,7 @@ export function tick(prev: GameState, dt: number): GameState {
   const mb = moduleBonuses(s)
   s.ammo = Math.min(AMMO.cap + mb.ammoCap, s.ammo + (AMMO.regen + mb.ammoRegen) * dt)
   s.energy = Math.min(ENERGY.cap + mb.energyCap, s.energy + (ENERGY.regen + mb.energyRegen) * dt)
+  updateShield(s, dt)
 
   // 堡垒机动（备战/交战均可）：加速度驱动速度向量 → 轴分离位移；移动不改变朝向（平移）
   // 转向速率 = turnSpeed × （当前速度/最大速度）；仅 A/D 显式转向（v1.61，原 Q/E）
@@ -2710,7 +3317,7 @@ export function tick(prev: GameState, dt: number): GameState {
     }
     // 履带/轮滚动相位（v1.85 履带；v2.51 统一为落印列含轮子）：本 tick 真实纵向速度 × dt 累加；转向差速 = v_i = vLon − turnW×横向偏移
     // （右转为正 turnW → 右侧为内侧变慢；倒退 vLon<0 自然反滚；原地转向 vLon=0 时两侧一正一反）
-    // v1.86：def 只存左履带，右侧按中心线镜像；v2.51：列布局 = [左0,右0, 左1,右1, ...] + 轮子逐轮单列（fortressMarkColumns）
+    // def 只存左履带，右侧按中心线镜像；轮胎 unit=pair 同样展开为左右两列（fortressMarkColumns）
     const cols51 = fortressMarkColumns(d)
     if (cols51.length > 0) {
       if (f.trackPhase.length !== cols51.length) f.trackPhase = Array.from({ length: cols51.length }, (_, i) => f.trackPhase[i] ?? 0)
@@ -2811,6 +3418,7 @@ export function tick(prev: GameState, dt: number): GameState {
       if (p.kind === 'shell') return updateShell(s, p, dt)
       return updateMissile(s, p, dt)
     })
+    s.enemyProjectiles = s.enemyProjectiles.filter(p => updateEnemyProjectile(s, p, dt))
     if (splitSpawnQueue.length > 0) { s.projectiles.push(...splitSpawnQueue); splitSpawnQueue.length = 0 } // v2.20 集束子弹入队
     coolFortress(s, dt) // 备战阶段堡垒散热继续生效
     s.prepLeft = Math.max(0, s.prepLeft - dt)
@@ -2819,22 +3427,41 @@ export function tick(prev: GameState, dt: number): GameState {
   }
   if (s.phase !== 'combat') return s
 
+  // 防守任务关闭“波次等待”时：上一波最后一名敌人上场后，按接踵时间自动排入下一波。
+  if (s.objective.type === 'defend' && s.objective.waveWait === false && s.nextWaveLeft !== null) {
+    s.nextWaveLeft = Math.max(0, s.nextWaveLeft - dt)
+    if (s.nextWaveLeft <= 0 && s.wave < s.objective.waves) {
+      s.wave++
+      s.spawnQueue = buildWave(s.wave).map(it => ({ ...it }))
+      s.spawnTimer = 0
+      s.nextWaveLeft = null
+    }
+  }
+
   // 1) 出怪
+  updateRegionTriggers(s, dt)
+  updateInteractables(s)
+  updateEventQueue(s, dt)
+  if ((s.phase as Phase) === 'won') return s
+  if (s.ambushQueue.length > 0) {
+    const pending: AmbushSpawn[] = []
+    for (const a of s.ambushQueue) {
+      a.left -= dt
+      if (a.left <= 0) spawnEnemyAt(s, a.kind, a.x, a.y)
+      else pending.push(a)
+    }
+    s.ambushQueue = pending
+  }
   if (s.spawnQueue.length > 0) {
     s.spawnTimer -= dt
     if (s.spawnTimer <= 0) {
       const item = s.spawnQueue.shift()!
-      const def = ENEMY_DEFS[item.kind]
-      const enemyId = s.nextId++
-      const col = 1 + eventRandom(enemyId, 0) * (LEVEL.cols - 2)
-      const hp = Math.round(def.hp * waveHpScale(s.wave))
-      s.enemies.push({
-        id: enemyId, kind: item.kind, x: col, y: -0.5,
-        hp, maxHp: hp, mode: 'move', targetKind: null, targetId: null,
-        goalX: col, goalY: 0, hasGoal: false, pathVersion: -1,
-        attackedBy: [], dots: [], hitFlash: 0,
-      })
+      const col = 1 + eventRandom(s.nextId, 0) * (LEVEL.cols - 2)
+      spawnEnemyAt(s, item.kind, col, -0.5)
       s.spawnTimer = item.delay
+      if (s.spawnQueue.length === 0 && s.objective.type === 'defend' && s.objective.waveWait === false && s.wave < s.objective.waves) {
+        s.nextWaveLeft = s.objective.overlapTime ?? DEFEND_OVERLAP_TIME_DEFAULT
+      }
     }
   }
 
@@ -2857,6 +3484,7 @@ export function tick(prev: GameState, dt: number): GameState {
     if (p.kind === 'shell') return updateShell(s, p, dt)
     return updateMissile(s, p, dt)
   })
+  s.enemyProjectiles = s.enemyProjectiles.filter(p => updateEnemyProjectile(s, p, dt))
   if (splitSpawnQueue.length > 0) { s.projectiles.push(...splitSpawnQueue); splitSpawnQueue.length = 0 } // v2.20 集束子弹入队
 
   // 6) 燃烧区域（只结算敌人，§8.3）
@@ -2880,6 +3508,16 @@ export function tick(prev: GameState, dt: number): GameState {
       if (d.timer <= 0) { d.timer += d.interval; damageEnemy(s, e, d.damage, null) }
     }
     e.dots = e.dots.filter(d => d.left > 0)
+    if (e.bossPhases && e.hp > 0) {
+      const done = e.bossPhaseDone ?? (e.bossPhaseDone = [])
+      e.bossPhases.forEach((phase, index) => {
+        if (!done.includes(index) && e.hp / e.maxHp * 100 <= phase.hpPercent) {
+          done.push(index)
+          queueEvent(s, e.id, { x: e.x - 1, y: e.y - 1, w: 2, h: 2 }, phase.actions)
+          s.notices.push({ id: s.nextId++, text: `${e.bossName ?? 'Boss'} 进入阶段 ${index + 2}`, left: 3 })
+        }
+      })
+    }
   }
 
   // 8) 击杀结算
@@ -2890,6 +3528,10 @@ export function tick(prev: GameState, dt: number): GameState {
       s.gold += bounty
       s.kills++
       addFloat(s, e.x, e.y, `+${bounty}`)
+      if (e.bossName) {
+        queueEvent(s, e.id, { x: e.x - 1, y: e.y - 1, w: 2, h: 2 }, e.bossDefeatActions ?? [])
+        s.notices.push({ id: s.nextId++, text: `${e.bossName} 已被击败`, left: 4 })
+      }
     } else {
       alive.push(e)
     }
@@ -2899,11 +3541,28 @@ export function tick(prev: GameState, dt: number): GameState {
   // 9) 阶段判定（船体归零 → v2.53 毁灭序列；演出期间不判胜、不推进波次，演出毕判负）
   if (s.fortress.hp <= 0 && s.fortress.dyingT < 0) s.fortress.dyingT = 0
   if (s.fortress.dyingT >= 0) { advanceFortressDeath(s, dt); return s }
-  if (s.spawnQueue.length === 0 && s.enemies.length === 0) {
-    if (s.wave >= TOTAL_WAVES) { s.phase = 'won'; return s }
+  updateEventQueue(s, 0)
+  if ((s.phase as Phase) === 'won') return s
+  if (s.objective.type === 'reach' && fortressReachedFinish(s)) {
+    s.phase = 'won'
+    return s
+  }
+  if (s.objective.type === 'survive' && s.objectiveElapsed >= s.objective.duration) {
+    s.phase = 'won'
+    return s
+  }
+  if (s.spawnQueue.length === 0 && s.ambushQueue.length === 0 && s.eventQueue.length === 0 && s.enemies.length === 0) {
+    if (s.objective.type === 'defend' && s.wave >= s.objective.waves) { s.phase = 'won'; return s }
+    if (LEVEL.mode === 'advance') {
+      s.wave++
+      s.spawnQueue = buildWave(s.wave).map(it => ({ ...it }))
+      s.spawnTimer = 0.8
+      return s
+    }
+    if (s.objective.type === 'defend' && s.objective.waveWait === false) return s
     s.phase = 'prep'
     s.wave++
-    s.prepLeft = PREP_TIME
+    s.prepLeft = s.objective.type === 'defend' ? (s.objective.restTime ?? DEFEND_REST_TIME_DEFAULT) : PREP_TIME
   }
   return s
 }

@@ -11,8 +11,8 @@ import { ringProgress } from './particles'
 const tintCache = new Map<string, HTMLCanvasElement>()
 
 /** 染色版贴图：填色 + destination-in 乘原图 alpha（particlealpha32 白 RGB/glow32 黑 RGB 均适用）；无 DOM 回退 null */
-export function tintedFx(img: HTMLImageElement, colorKey: string): HTMLCanvasElement | null {
-  const key = `${img.src}|${colorKey}`
+export function tintedFx(img: HTMLImageElement, colorKey: string, mode: 'mask' | 'multiply' = 'mask'): HTMLCanvasElement | null {
+  const key = `${img.src}|${colorKey}|${mode}`
   const hit = tintCache.get(key)
   if (hit) return hit
   if (typeof document === 'undefined') return null
@@ -21,10 +21,19 @@ export function tintedFx(img: HTMLImageElement, colorKey: string): HTMLCanvasEle
   cv.height = img.height
   const c = cv.getContext('2d')
   if (!c) return null
-  c.fillStyle = colorKey
-  c.fillRect(0, 0, cv.width, cv.height)
-  c.globalCompositeOperation = 'destination-in' // 保留原图 alpha 遮罩
-  c.drawImage(img, 0, 0)
+  if (mode === 'multiply') {
+    c.drawImage(img, 0, 0)
+    c.globalCompositeOperation = 'multiply'
+    c.fillStyle = colorKey
+    c.fillRect(0, 0, cv.width, cv.height)
+    c.globalCompositeOperation = 'destination-in'
+    c.drawImage(img, 0, 0)
+  } else {
+    c.fillStyle = colorKey
+    c.fillRect(0, 0, cv.width, cv.height)
+    c.globalCompositeOperation = 'destination-in'
+    c.drawImage(img, 0, 0)
+  }
   tintCache.set(key, cv)
   return cv
 }
@@ -78,6 +87,38 @@ export function drawParticlePool(ctx: CanvasRenderingContext2D, pool: ParticlePo
     if (a <= 0.01) continue
     const r = Math.max(0.5, pt.size * cell) // 尺寸已由 stepParticles 积分 grow
     ctx.globalCompositeOperation = pt.grow > 0 ? 'source-over' : 'lighter' // 烟尘不加光
+    if (pt.shape === 'shieldShard') { // v2.71：同一护盾色生成三类能量玻璃碎片，无需额外贴图
+      const pc = particleColor(pt, k, a)
+      const variant = Math.floor(((pt.phase ?? 0) / (Math.PI * 2)) * 3) % 3
+      ctx.save()
+      ctx.translate(X(pt.x), Y(pt.y))
+      ctx.rotate(pt.rotation ?? 0)
+      ctx.fillStyle = pc.fill
+      ctx.strokeStyle = '#DDF8FA'
+      ctx.lineWidth = Math.max(0.7, r * 0.16)
+      ctx.beginPath()
+      if (variant === 0) {
+        for (let i = 0; i < 6; i++) {
+          const ang = -Math.PI / 2 + i * Math.PI / 3
+          const px = Math.cos(ang) * r, py = Math.sin(ang) * r
+          if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py)
+        }
+      } else if (variant === 1) {
+        ctx.moveTo(-r * 0.85, -r * 0.55); ctx.lineTo(r, 0); ctx.lineTo(-r * 0.85, r * 0.55)
+      } else {
+        ctx.moveTo(-r, -r * 0.25); ctx.lineTo(r * 0.85, -r * 0.55); ctx.lineTo(r * 0.45, r * 0.55); ctx.lineTo(-r * 0.7, r * 0.35)
+      }
+      ctx.closePath()
+      // 碎片保持足够尺寸，但主体像薄能量玻璃而非实心白块；亮度集中在断裂边缘。
+      ctx.globalCompositeOperation = 'source-over'
+      ctx.globalAlpha = pc.alpha * 0.2
+      ctx.fill()
+      ctx.globalCompositeOperation = 'lighter'
+      ctx.globalAlpha = pc.alpha * 0.68
+      ctx.stroke()
+      ctx.restore()
+      continue
+    }
     if (pt.streak) { // v2.15 电焊式拖尾（v2.54 加长 0.09s、加粗 0.8r）；速度反向亮线（加法发光，颜色随渐变）
       const sk = pt.colorEnd ? gradientColorKey(pt.color, pt.colorEnd, 1 - k) : pt.color
       ctx.globalAlpha = a

@@ -4,13 +4,14 @@ import {
   TERRAIN_DEFS, TURRET_DEFS, PROJECTILE_KIND_COLOR, MODULE_DEFS, BASE_CELL,
 } from './config'
 import { isInnerCell, LEVEL } from './level'
-import { artMounts, beamLength, defOf, eventRandom, trackPlacements, turretRenderKey, dirX, dirY, fortressDef, fortressRect, fortressShapeSet, fortressInteriorSet, hardpointOf, MISSILE_FADE, missileVisHeading, moduleCells, moduleFoot, muzzlePos, RACK_RELOAD_ANIM, rackCounts, rackMissilePos, turretCenter, DEATH_MAIN_T, DEATH_END_T, type MuzzleEvent } from './engine'
+import { artMounts, beamLength, defOf, eventRandom, trackPlacements, turretRenderKey, dirX, dirY, fortressDef, fortressRect, fortressShapeSet, fortressInteriorSet, hardpointOf, MISSILE_FADE, missileVisHeading, moduleCells, moduleFoot, muzzlePos, RACK_RELOAD_ANIM, rackCounts, rackMissilePos, turretCenter, DEATH_MAIN_T, DEATH_END_T, wheelPlacements, wheelVisualSteerAngle, type MuzzleEvent } from './engine'
 import { SPECIAL_BOOST_NAME } from './config'
 
 // ---- 堡垒贴图缓存（dataURL；render 每帧轮询，加载完成自动生效；贴图仅视觉不参与碰撞） ----
 const fortressSpriteCache = new Map<string, { status: 'loading' | 'ready' | 'error'; img?: HTMLImageElement }>()
 function fortressSprite(srcData?: string): HTMLImageElement | null {
   if (!srcData) return null
+  srcData = getAsset(srcData)?.src ?? srcData // v2.72：堡垒底座/主体从素材库按 id 选择；遗留路径继续直读
   srcData = resCompatUrl(srcData) // v2.5 兼容旧 /sprites/ 路径
   let e = fortressSpriteCache.get(srcData)
   if (!e) {
@@ -41,7 +42,8 @@ import { drawExplosionLayers, drawImpactFlash, drawParticlePool, hexA, tintedFx 
 import { emitFortressEffects, updateTrackMarks, TRACK_MARK_LIFE, TRACK_MARK_FADE, TRACK_MARK_ALPHA, type TrackMark, type TrackMarkState } from './fortressFx' // v2.40 堡垒特效点粒子化；v2.41 履带印；v2.43 印透明度/渐隐参数
 import { craterOpacity, updateCraters, type Crater } from './craters'
 import { rmxpAutotileIndex, rmxpQuarterSrc, RMXP_SUBTILES } from './autotile'
-import type { ProjectileArtDef } from './config'
+import type { FortressDef, ProjectileArtDef, TurretDef } from './config'
+import { registerFortressBodyImage } from './fortressBodyMask'
 
 // v2.55：fadeColor / tintedFx / hexRgb / hexA / drawParticlePool / drawExplosionLayers / drawImpactFlash 已迁至 ./fxDraw（战场与编辑器预览共用画法层）
 
@@ -83,7 +85,7 @@ function ammoAssetsFor(defId: string): { ammo: ProjectileArtDef; assets: Project
   if (st.status !== 'ready' || !st.assets) return null
   return { ammo, assets: st.assets }
 }
-import type { Enemy, GameState, Turret } from './engine'
+import type { Enemy, FortressDamageMark, GameState, Turret } from './engine'
 
 // ================= 丧尸精灵（按需加载，失败降级为圆形） =================
 type SpriteDir = 'front' | 'right' | 'back' | 'left'
@@ -352,6 +354,10 @@ export interface EditOverlay {
   buildings: { x: number; y: number; w: number; h: number; color: string }[]
   core: { x: number; y: number; w: number; h: number } | null
   turrets: { defId: string; x: number; y: number }[]
+  startZone: { x: number; y: number; w: number; h: number }
+  finishZone: { x: number; y: number; w: number; h: number }
+  triggers: { id: number; name: string; x: number; y: number; w: number; h: number; enabled: boolean; selected: boolean }[]
+  interactables: { id: number; name: string; kind: string; x: number; y: number; w: number; h: number; enabled: boolean; selected: boolean }[]
   hover: { x: number; y: number; w: number; h: number; ok: boolean } | null
 }
 
@@ -367,6 +373,17 @@ export function clampViewY(viewY: number, cell: number, canvasH: number): number
 export function clampViewX(viewX: number, cell: number, canvasW: number): number {
   const vis = canvasW / cell
   return Math.max(0, Math.min(LEVEL.cols - vis, viewX))
+}
+
+/** 推进模式边缘带相机：目标可在中央自由移动，越过 22%/78% 安全带才推动视口。 */
+export function edgeBandView(current: number, target: number, visible: number, worldSize: number, band = 0.22): number {
+  const safeBand = Math.max(0.05, Math.min(0.45, band))
+  const near = current + visible * safeBand
+  const far = current + visible * (1 - safeBand)
+  let next = current
+  if (target < near) next = target - visible * safeBand
+  else if (target > far) next = target - visible * (1 - safeBand)
+  return Math.max(0, Math.min(Math.max(0, worldSize - visible), next))
 }
 
 /** 绘制一层 RMXP Autotile 地面（96×128 单帧；cells 为同层格集合） */
@@ -433,6 +450,118 @@ function craterTexture(seed: number): HTMLCanvasElement | null {
   return cv
 }
 
+/** 结构值阶段：0=完好，1=轻度变暗，2=裂纹，3=低结构警戒/冒烟。 */
+export function fortressDamageStage(hp: number, maxHp: number): 0 | 1 | 2 | 3 {
+  const ratio = maxHp > 0 ? Math.max(0, hp / maxHp) : 0
+  return ratio >= 0.75 ? 0 : ratio >= 0.5 ? 1 : ratio >= 0.25 ? 2 : 3
+}
+
+function drawFortressDamageMark(ctx: CanvasRenderingContext2D, mark: FortressDamageMark, x: number, y: number, cell: number): void {
+  const r = Math.max(2, mark.size * cell)
+  ctx.save()
+  ctx.translate(x, y)
+  ctx.rotate(mark.angle * Math.PI / 180)
+  if (mark.kind === 'bullet') {
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r)
+    g.addColorStop(0, 'rgba(8,7,6,0.96)')
+    g.addColorStop(0.28, 'rgba(30,24,20,0.92)')
+    g.addColorStop(0.62, 'rgba(88,72,55,0.55)')
+    g.addColorStop(1, 'rgba(24,20,17,0)')
+    ctx.fillStyle = g
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill()
+    ctx.strokeStyle = 'rgba(205,183,139,0.72)'
+    ctx.lineWidth = Math.max(0.8, r * 0.12)
+    ctx.beginPath(); ctx.arc(0, 0, r * 0.58, Math.PI * 0.98, Math.PI * 1.82); ctx.stroke()
+  } else if (mark.kind === 'scorch') {
+    const g = ctx.createRadialGradient(0, 0, r * 0.08, 0, 0, r)
+    g.addColorStop(0, 'rgba(16,12,9,0.78)')
+    g.addColorStop(0.48, 'rgba(48,35,25,0.58)')
+    g.addColorStop(0.78, 'rgba(104,67,35,0.22)')
+    g.addColorStop(1, 'rgba(40,28,20,0)')
+    ctx.fillStyle = g
+    ctx.beginPath(); ctx.ellipse(0, 0, r, r * 0.78, 0, 0, Math.PI * 2); ctx.fill()
+  } else {
+    ctx.lineCap = 'round'
+    for (let i = -1; i <= 1; i++) {
+      const off = i * r * 0.22
+      ctx.strokeStyle = i === -1 ? 'rgba(201,180,139,0.48)' : 'rgba(22,18,15,0.76)'
+      ctx.lineWidth = Math.max(0.8, r * 0.09)
+      ctx.beginPath()
+      ctx.moveTo(-r * 0.82, off - r * 0.1)
+      ctx.lineTo(-r * 0.12, off + r * 0.08)
+      ctx.lineTo(r * 0.86, off - r * 0.04)
+      ctx.stroke()
+    }
+  }
+  ctx.restore()
+}
+
+let fortressDamageLayer: HTMLCanvasElement | null = null
+
+function drawFortressDamageContent(ctx: CanvasRenderingContext2D, s: GameState, stage: number, ox: number, oy: number, fw: number, fh: number, cell: number): void {
+  if (stage > 0) {
+    const ratio = s.fortress.maxHp > 0 ? Math.max(0, s.fortress.hp / s.fortress.maxHp) : 0
+    const darkAlpha = Math.min(0.34, 0.06 + (0.75 - ratio) * 0.42)
+    ctx.fillStyle = `rgba(20,18,16,${darkAlpha.toFixed(3)})`
+    ctx.fillRect(ox, oy, fw, fh)
+  }
+  if (stage >= 2) {
+    const crackCount = stage === 3 ? 4 : 2
+    ctx.lineCap = 'round'
+    for (let i = 0; i < crackCount; i++) {
+      const x = ox + fw * (0.22 + eventRandom(913, i * 3) * 0.56)
+      const y = oy + fh * (0.18 + eventRandom(913, i * 3 + 1) * 0.64)
+      const len = cell * (0.35 + eventRandom(913, i * 3 + 2) * 0.3)
+      ctx.save(); ctx.translate(x, y); ctx.rotate((i * 2.17 + 0.4) % Math.PI)
+      ctx.strokeStyle = 'rgba(18,15,13,0.7)'; ctx.lineWidth = Math.max(1, cell * 0.045)
+      ctx.beginPath(); ctx.moveTo(-len, -len * 0.16); ctx.lineTo(-len * 0.18, len * 0.06); ctx.lineTo(len * 0.22, -len * 0.11); ctx.lineTo(len, len * 0.2); ctx.stroke()
+      ctx.restore()
+    }
+  }
+  for (const mark of s.fortress.damageMarks) drawFortressDamageMark(ctx, mark, ox + mark.x * cell, oy + mark.y * cell, cell)
+  if (s.fortress.hitFlash > 0) {
+    ctx.fillStyle = `rgba(255,248,220,${Math.min(0.62, s.fortress.hitFlash / 0.08 * 0.62).toFixed(3)})`
+    ctx.fillRect(ox, oy, fw, fh)
+  }
+}
+
+/** 主体战损覆盖：有主体贴图时严格使用其 alpha 作遮罩，透明区下方的底座/履带/轮子不会被染到。 */
+function drawFortressDamageOverlay(
+  ctx: CanvasRenderingContext2D, s: GameState, fd: FortressDef, bodyImg: HTMLImageElement | null,
+  fx: number, fy: number, fw: number, fh: number, cell: number, stage: number,
+): void {
+  if (bodyImg && typeof document !== 'undefined') {
+    fortressDamageLayer ??= document.createElement('canvas')
+    const sw = Math.max(1, Math.round(fw)), sh = Math.max(1, Math.round(fh))
+    if (fortressDamageLayer.width !== sw) fortressDamageLayer.width = sw
+    if (fortressDamageLayer.height !== sh) fortressDamageLayer.height = sh
+    const dc = fortressDamageLayer.getContext('2d')
+    if (!dc) return
+    dc.setTransform(1, 0, 0, 1, 0, 0); dc.clearRect(0, 0, sw, sh)
+    dc.setTransform(sw / fw, 0, 0, sh / fh, 0, 0)
+    dc.globalCompositeOperation = 'source-over'
+    drawFortressDamageContent(dc, s, stage, 0, 0, fw, fh, cell)
+    const zm = cell / BASE_CELL
+    const dw = bodyImg.naturalWidth * zm, dh = bodyImg.naturalHeight * zm
+    dc.globalCompositeOperation = 'destination-in'
+    dc.drawImage(bodyImg, (fw - dw) / 2, (fh - dh) / 2, dw, dh)
+    dc.setTransform(1, 0, 0, 1, 0, 0); dc.globalCompositeOperation = 'source-over'
+    ctx.drawImage(fortressDamageLayer, 0, 0, sw, sh, fx, fy, fw, fh)
+    return
+  }
+  ctx.save()
+  ctx.beginPath()
+  if (fd.shape && fd.shape.length > 0) {
+    for (const key of fd.shape) {
+      const [sx, sy] = key.split(',').map(Number)
+      ctx.rect(fx + sx * cell, fy + sy * cell, cell, cell)
+    }
+  } else ctx.rect(fx, fy, fw, fh)
+  ctx.clip()
+  drawFortressDamageContent(ctx, s, stage, fx, fy, fw, fh, cell)
+  ctx.restore()
+}
+
 // ---- 轻量粒子系统（渲染端纯视觉，wall-clock 驱动；引擎零侵入）----
 // v2.40 双通道：groundPool = 地面层（地形之上/堡垒底座之下：尘土等）；fxPool = 空中层（最上，现状口径）
 const fxPool: ParticlePool = createPool()
@@ -449,6 +578,145 @@ const trailAcc = new Map<number, number>() // 弹丸 id → 尾焰发射累积�
 const projPrev = new Map<number, { x: number; y: number }>() // 弹丸 id → 上帧插值位置（尾焰惯性继承的弹速估算）
 const smokeAcc = new Map<number, number>() // v2.20 弹丸 id → 长存留烟尾发射累积器（与主尾焰并行的第二股粒子流）
 const beamFxAcc = new Map<number, { absorb: number; scatter: number; smoke: number }>() // v2.10 炮塔 id → 光束三组粒子发射累积器
+let shieldInteriorWasOpen = false
+let shieldUnfoldStartedAt = -1
+let damageSmokeAcc = 0
+let damageSmokeSeq = 0
+let damageSmokeTime = -1
+
+export interface ShieldHexTile { x: number; y: number; edge: number; squashX: number; squashY: number }
+
+/** 圆角半径随护盾短边缩放；保留矩形体量，同时避免四角过于生硬。 */
+export function shieldCornerRadius(hw: number, hh: number): number {
+  return Math.max(0, Math.min(hw, hh) * 0.38)
+}
+
+/** 常态护盾边缘的轻微双频呼吸；只改变亮度/线宽，不移动轮廓位置。 */
+export function shieldEdgePulse(time: number): { alpha: number; width: number } {
+  return {
+    alpha: 1 + Math.sin(time * 1.34) * 0.12 + Math.sin(time * 0.47 + 1.8) * 0.035,
+    width: 1 + Math.sin(time * 1.08 + 0.65) * 0.065,
+  }
+}
+
+/** v2.71 六边形护盾铺格：点阵覆盖圆角矩形护罩；边缘瓦片按最近边压缩。 */
+export function shieldHexLayout(hw: number, hh: number, tileSize: number): ShieldHexTile[] {
+  if (!(hw > 0) || !(hh > 0) || !(tileSize > 0)) return []
+  const hexW = tileSize * 0.75
+  const hexH = tileSize * 0.875
+  const stepY = hexH * 0.75
+  const radius = shieldCornerRadius(hw, hh)
+  const margin = tileSize * 0.38
+  const rows = Math.ceil((hh * 2 + margin * 2) / stepY)
+  const cols = Math.ceil((hw * 2 + margin * 2) / hexW)
+  const out: ShieldHexTile[] = []
+  for (let row = -1; row <= rows + 1; row++) {
+    const y = -hh - margin + row * stepY
+    const offset = row & 1 ? hexW / 2 : 0
+    for (let col = -1; col <= cols + 1; col++) {
+      const x = -hw - margin + col * hexW + offset
+      const ax = Math.abs(x), ay = Math.abs(y)
+      // 圆角矩形 signed-distance：d>0 在场体内，d<0 在场体外。
+      const qx = ax - (hw - radius), qy = ay - (hh - radius)
+      const outside = Math.hypot(Math.max(qx, 0), Math.max(qy, 0))
+      const inside = Math.min(Math.max(qx, qy), 0)
+      const d = radius - outside - inside
+      if (d < -margin) continue
+      const edge = Math.max(0.22, Math.min(1, (d + margin) / (margin * 1.55)))
+      const sideNearest = hw > 0 && hh > 0 ? ax / hw > ay / hh : false
+      const corner = qx > 0 && qy > 0
+      const squash = 0.48 + edge * 0.52
+      out.push({ x, y, edge, squashX: sideNearest || corner ? squash : 1, squashY: !sideNearest || corner ? squash : 1 })
+    }
+  }
+  return out
+}
+
+/** 命中扩散亮度：一次命中只从命中格传播到紧邻一圈，每圈仅产生一个亮度脉冲。 */
+export function shieldHexRipple(progress: number, ring: number, broken = false): number {
+  if (ring < 0 || ring > 1 || progress < 0 || progress >= 1) return 0
+  const start = ring * (broken ? 0.12 : 0.14)
+  const duration = broken ? 0.34 : 0.26
+  const local = (progress - start) / duration
+  // 单向衰减而非往复正弦：命中格不会在扩散结束后再次变亮。
+  return local >= 0 && local < 1 ? Math.pow(1 - local, 1.55) : 0
+}
+
+/** 护盾开展使用快速起步、柔和收尾的 ease-out。 */
+export function shieldUnfoldProgress(progress: number): number {
+  const p = Math.max(0, Math.min(1, progress))
+  return 1 - Math.pow(1 - p, 3)
+}
+
+/** 从 50% 等比尺寸开展，末段轻微超过极限后回落至 100%。 */
+export function shieldUnfoldScale(progress: number): number {
+  const p = Math.max(0, Math.min(1, progress))
+  const base = 0.5 + shieldUnfoldProgress(p) * 0.5
+  const rebound = p > 0.72 ? Math.sin(((p - 0.72) / 0.28) * Math.PI) * 0.018 : 0
+  return base + rebound
+}
+
+/** 破盾整场闪光：从满强度快速衰减，后半段完全归零交给碎片表现。 */
+export function shieldBreakEnvelope(progress: number): number {
+  const p = Math.max(0, Math.min(1, progress))
+  return p < 0.42 ? Math.pow(1 - p / 0.42, 1.55) : 0
+}
+
+export interface ShieldFieldMotion { x1: number; y1: number; r1: number; a1: number; x2: number; y2: number; r2: number; a2: number }
+
+/** 同一场体素材的双层反向漂移参数，产生缓慢能量干涉而无需额外贴图。 */
+export function shieldFieldMotion(time: number, hw: number, hh: number): ShieldFieldMotion {
+  return {
+    x1: Math.sin(time * 0.43) * hw * 0.075,
+    y1: Math.cos(time * 0.31) * hh * 0.055,
+    r1: Math.sin(time * 0.22) * 0.045,
+    a1: 0.76 + Math.sin(time * 0.67) * 0.14,
+    x2: Math.cos(time * 0.37 + 1.4) * hw * 0.065,
+    y2: Math.sin(time * 0.28 + 2.1) * hh * 0.06,
+    r2: -Math.sin(time * 0.19 + 0.8) * 0.052,
+    a2: 0.58 + Math.sin(time * 0.53 + 2.4) * 0.12,
+  }
+}
+
+/** 碎片尺寸随护盾短边增长，并钳制在兼顾可读性与遮挡的范围内。 */
+export function shieldShardSize(hw: number, hh: number): number {
+  return Math.max(0.2, Math.min(0.55, Math.min(hw, hh) * 2 * 0.07))
+}
+
+/** 沿圆角矩形护盾外缘近似等距采样，供柔光与破盾碎片共用同一边界。 */
+export function shieldPerimeterSamples(hw: number, hh: number, spacing: number): { x: number; y: number }[] {
+  if (!(hw > 0) || !(hh > 0) || !(spacing > 0)) return []
+  const radius = shieldCornerRadius(hw, hh)
+  const top = Math.max(0, 2 * (hw - radius))
+  const side = Math.max(0, 2 * (hh - radius))
+  const arc = Math.PI * radius / 2
+  const perimeter = top * 2 + side * 2 + arc * 4
+  const count = Math.max(16, Math.ceil(perimeter / spacing))
+  const out: { x: number; y: number }[] = []
+  for (let i = 0; i < count; i++) {
+    let d = (i / count) * perimeter
+    if (d < top) out.push({ x: -hw + radius + d, y: -hh })
+    else if ((d -= top) < arc) { const a = -Math.PI / 2 + d / radius; out.push({ x: hw - radius + Math.cos(a) * radius, y: -hh + radius + Math.sin(a) * radius }) }
+    else if ((d -= arc) < side) out.push({ x: hw, y: -hh + radius + d })
+    else if ((d -= side) < arc) { const a = d / radius; out.push({ x: hw - radius + Math.cos(a) * radius, y: hh - radius + Math.sin(a) * radius }) }
+    else if ((d -= arc) < top) out.push({ x: hw - radius - d, y: hh })
+    else if ((d -= top) < arc) { const a = Math.PI / 2 + d / radius; out.push({ x: -hw + radius + Math.cos(a) * radius, y: hh - radius + Math.sin(a) * radius }) }
+    else if ((d -= arc) < side) out.push({ x: -hw, y: hh - radius - d })
+    else { d -= side; const a = Math.PI + d / radius; out.push({ x: -hw + radius + Math.cos(a) * radius, y: -hh + radius + Math.sin(a) * radius }) }
+  }
+  return out
+}
+
+function shieldClipPath(ctx: CanvasRenderingContext2D, hw: number, hh: number): void {
+  const r = shieldCornerRadius(hw, hh)
+  ctx.beginPath()
+  ctx.moveTo(-hw + r, -hh)
+  ctx.lineTo(hw - r, -hh); ctx.quadraticCurveTo(hw, -hh, hw, -hh + r)
+  ctx.lineTo(hw, hh - r); ctx.quadraticCurveTo(hw, hh, hw - r, hh)
+  ctx.lineTo(-hw + r, hh); ctx.quadraticCurveTo(-hw, hh, -hw, hh - r)
+  ctx.lineTo(-hw, -hh + r); ctx.quadraticCurveTo(-hw, -hh, -hw + r, -hh)
+  ctx.closePath()
+}
 
 export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui: UiHints, W: number, H: number) {
   const { cell, viewX, viewY } = v
@@ -464,6 +732,11 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
   const fxDt = fxLastStep < 0 ? 0 : Math.min(0.1, Math.max(0, nowFx - fxLastStep))
   fxLastStep = nowFx
   stepParticles(fxPool, fxDt)
+  if (ui.interiorMode) shieldInteriorWasOpen = true
+  else if (shieldInteriorWasOpen) {
+    shieldInteriorWasOpen = false
+    if (s.fortress.maxShield > 0) shieldUnfoldStartedAt = s.time
+  }
   stepParticles(groundPool, fxDt)
   // v2.40 堡垒特效点粒子发射（编辑模式不发射）：粒子离口即世界空间独立运动，不再跟船
   if (!ui.edit) emitFortressEffects(s, fortressDef(s), fxDt, groundPool, fxPool, fxEmitterAccs)
@@ -472,6 +745,32 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
     craterTime = s.time
     updateCraters(craters, craterSeen, s.explosions, s.time)
   }
+  // 结构值低于 25%：主体持续冒出少量深色烟；重开时清累加器，毁灭序列接管后停止本通道。
+  const damageStage = fortressDamageStage(s.fortress.hp, s.fortress.maxHp)
+  if (damageSmokeTime >= 0 && s.time < damageSmokeTime) { damageSmokeAcc = 0; damageSmokeSeq = 0 }
+  damageSmokeTime = s.time
+  if (!ui.edit && damageStage === 3 && s.fortress.dyingT < 0 && fxDt > 0) {
+    const ratio = s.fortress.maxHp > 0 ? s.fortress.hp / s.fortress.maxHp : 0
+    damageSmokeAcc += (3 + (0.25 - Math.max(0, ratio)) * 16) * fxDt
+    const count = Math.floor(damageSmokeAcc)
+    damageSmokeAcc -= count
+    const fdDmg = fortressDef(s)
+    const frDmg = fortressRect(s)
+    const cxDmg = frDmg.x + frDmg.w / 2, cyDmg = frDmg.y + frDmg.h / 2
+    const coDmg = Math.cos(s.fortress.heading), siDmg = Math.sin(s.fortress.heading)
+    for (let i = 0; i < count; i++) {
+      const seed = ++damageSmokeSeq
+      const lx = (eventRandom(seed, 81) - 0.5) * fdDmg.w * 0.42
+      const ly = (eventRandom(seed, 82) - 0.5) * fdDmg.h * 0.34
+      const x = cxDmg + lx * coDmg - ly * siDmg
+      const y = cyDmg + lx * siDmg + ly * coDmg
+      spawnTrail(fxPool, x, y, {
+        vx: (eventRandom(seed, 83) - 0.5) * 0.18, vy: -(0.3 + eventRandom(seed, 84) * 0.22),
+        life: 0.8 + eventRandom(seed, 85) * 0.35, size: 0.1 + eventRandom(seed, 86) * 0.045,
+        color: '#4C4842', colorEnd: '#252321', drag: 1.1, grow: 1.8, growUntil: 0.55, fadeIn: 0.12,
+      })
+    }
+  } else if (damageStage !== 3 || s.fortress.dyingT >= 0) damageSmokeAcc = 0
   // v2.53 毁灭序列浓烟：内伤期缓释、主爆后加浓（累加器节率，与 emitFortressEffects 同模式）
   if (!ui.edit && s.fortress.dyingT >= 0 && fxDt > 0) {
     const dead53 = s.fortress.dyingT >= DEATH_MAIN_T
@@ -535,6 +834,31 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
         ctx.fillRect(X(x), Y(y), cell, cell)
       }
     }
+  }
+
+  // 推进终点：游玩态给出清晰但不遮挡战场的撤离区域标记。
+  if (!ui.edit && s.objective.type === 'reach') {
+    const z = LEVEL.finishZone
+    ctx.fillStyle = 'rgba(217,164,65,0.14)'
+    ctx.fillRect(X(z.x), Y(z.y), z.w * cell, z.h * cell)
+    ctx.strokeStyle = 'rgba(217,164,65,0.9)'
+    ctx.lineWidth = 2
+    ctx.setLineDash([8, 5])
+    ctx.strokeRect(X(z.x), Y(z.y), z.w * cell, z.h * cell)
+    ctx.setLineDash([])
+  }
+
+  if (!ui.edit) for (const item of LEVEL.interactables) {
+    const rt = s.interactableStates.find(v => v.id === item.id)
+    if (rt && !rt.enabled) continue
+    const color = item.kind === 'supply' ? '#3E7D46' : item.kind === 'gate' ? '#5C7E8C' : item.kind === 'target' ? '#D9762E' : '#8A5C9E'
+    ctx.fillStyle = `${color}24`
+    ctx.fillRect(X(item.x), Y(item.y), item.w * cell, item.h * cell)
+    ctx.strokeStyle = color
+    ctx.lineWidth = 2
+    ctx.setLineDash([4, 3])
+    ctx.strokeRect(X(item.x), Y(item.y), item.w * cell, item.h * cell)
+    ctx.setLineDash([])
   }
 
   // 内角凹转角叠加（基地内部格被 2 段垂直墙夹成 90° 内角；地面已由基地层铺设）
@@ -801,7 +1125,7 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
       // 自由形状底盘：逐格绘制（镂空处透明 = 真实碰撞体）
       for (const k of fd.shape) {
         const [cx, cy] = k.split(',').map(Number)
-        ctx.fillStyle = fd.color
+        ctx.fillStyle = fd.paint?.base ?? fd.color
         ctx.fillRect(fx + cx * cell + 0.5, fy + cy * cell + 0.5, cell - 1, cell - 1)
         ctx.strokeStyle = '#1A1A18'
         ctx.lineWidth = 1.5
@@ -811,7 +1135,7 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
       ctx.fillStyle = '#4A4D45'
       ctx.fillRect(fx, fy + cell * 0.15, cell * 0.35, fh - cell * 0.3)
       ctx.fillRect(fx + fw - cell * 0.35, fy + cell * 0.15, cell * 0.35, fh - cell * 0.3)
-      ctx.fillStyle = fd.color
+      ctx.fillStyle = fd.paint?.base ?? fd.color
       ctx.fillRect(fx + cell * 0.18, fy + cell * 0.12, fw - cell * 0.36, fh - cell * 0.24)
       ctx.strokeStyle = '#1A1A18'
       ctx.lineWidth = 3
@@ -848,33 +1172,32 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
       ctx.globalAlpha = 1
       if (typeof window !== 'undefined') { const w88 = window as unknown as { __tdTrack?: number; __tdTrackPhase?: number; __tdFrame?: number }; w88.__tdTrack = trackDrawn; w88.__tdTrackPhase = lastPh88; w88.__tdFrame = (w88.__tdFrame ?? 0) + 1 } // 无头探针：本帧履带瓦片绘制数 + 最后渲染相位（v1.88）
     }
-    // 轮子层（v2.51）：与履带同层级（底座之上/主体之下）、不随俯仰 lean；steered 轮随前轮角 δ 偏转（轮式底盘）；
-    // 与履带独立共存（半履带 = 前轮后履带）；贴图原比例按 2r 定高，缺省几何轮胎（轮毂线示偏转方向）
+    // 轮子层：与履带同层级、不随俯仰 lean；原始像素尺寸直绘；pair 按中心线展开左右两轮。
     if (fd.wheels && fd.wheels.length > 0) {
+      const visualSteer = wheelVisualSteerAngle(s, fd)
       for (const wd of fd.wheels) {
         const img51 = wd.sprite ? trackTileImage(wd.sprite) : null
         if (wd.sprite && !img51) continue // 配了贴图但未加载：跳过（与履带瓦片同口径）
-        const rpx = Math.max(2, wd.r * cell)
-        ctx.save()
-        ctx.translate(fx + wd.x * cell, fy + wd.y * cell)
-        ctx.rotate(wd.steered ? s.fortress.steerAngle : 0)
-        if (img51) {
-          const zmW = cell / BASE_CELL
-          const hw = img51.height * zmW
-          const ww = img51.width * zmW
-          const sc51 = (rpx * 2) / hw
-          ctx.drawImage(img51, -ww * sc51 / 2, -hw * sc51 / 2, ww * sc51, hw * sc51)
-        } else { // 几何轮胎：深色圆角矩形（纵向，-y=船头）+ 轮毂线
-          const tw = rpx * 1.1, th = rpx * 2
-          ctx.fillStyle = '#2A2A28'
-          ctx.strokeStyle = '#1A1A18'
-          ctx.lineWidth = 1.5
-          ctx.beginPath(); ctx.roundRect(-tw / 2, -th / 2, tw, th, tw * 0.35); ctx.fill(); ctx.stroke()
-          ctx.strokeStyle = '#8C8878'
-          ctx.lineWidth = 1
-          ctx.beginPath(); ctx.moveTo(0, -th * 0.28); ctx.lineTo(0, th * 0.28); ctx.stroke()
+        const zmW = cell / BASE_CELL
+        const ww = (img51?.width ?? 11) * zmW
+        const hw = (img51?.height ?? 20) * zmW
+        for (const p of wheelPlacements(fd, wd)) {
+          ctx.save()
+          ctx.translate(fx + p.x * cell, fy + p.y * cell)
+          ctx.rotate(wd.steered ? visualSteer : 0)
+          if (img51) {
+            ctx.drawImage(img51, -ww / 2, -hw / 2, ww, hw)
+          } else { // 遗留无贴图配置：固定 11×20 基准像素几何回退，不再读取旧轮径
+            ctx.fillStyle = '#2A2A28'
+            ctx.strokeStyle = '#1A1A18'
+            ctx.lineWidth = 1.5
+            ctx.beginPath(); ctx.roundRect(-ww / 2, -hw / 2, ww, hw, ww * 0.35); ctx.fill(); ctx.stroke()
+            ctx.strokeStyle = '#8C8878'
+            ctx.lineWidth = 1
+            ctx.beginPath(); ctx.moveTo(0, -hw * 0.28); ctx.lineTo(0, hw * 0.28); ctx.stroke()
+          }
+          ctx.restore()
         }
-        ctx.restore()
       }
     }
     if (ui.interiorMode) {
@@ -964,15 +1287,36 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
       ctx.translate(lx, ly)
       const bodyImg = fortressSprite(fd.spriteBody)
       if (bodyImg) {
-        // 主体贴图：原比例显示（不缩放），规则同底座；仅视觉不参与碰撞
+        // 主体贴图：原比例显示（不缩放），并把 alpha 缓存给敌方弹丸主体命中检测。
+        if (fd.spriteBody) registerFortressBodyImage(fd.spriteBody, bodyImg)
         const zm = v.cell / BASE_CELL // v1.49：基准格统一 30px
         const dw = bodyImg.naturalWidth * zm
         const dh = bodyImg.naturalHeight * zm
-        ctx.drawImage(bodyImg, fx + (fw - dw) / 2, fy + (fh - dh) / 2, dw, dh)
+        const paintedBody = fd.paint?.base ? tintedFx(bodyImg, fd.paint.base, 'multiply') : null
+        ctx.drawImage(paintedBody ?? bodyImg, fx + (fw - dw) / 2, fy + (fh - dh) / 2, dw, dh)
       } else {
         ctx.strokeStyle = 'rgba(26,26,24,0.35)'
         ctx.lineWidth = 1.5
         ctx.strokeRect(fx + cell * 0.5, fy + cell * 0.45, fw - cell * 1.0, fh - cell * 0.9)
+      }
+      for (const decal of fd.decals ?? []) {
+        const img = trackTileImage(decal.asset)
+        if (!img) continue
+        const size = Math.max(0.1, decal.size) * cell
+        const ratio = img.width / Math.max(1, img.height)
+        ctx.save()
+        ctx.translate(fx + decal.x * cell, fy + decal.y * cell)
+        ctx.rotate((decal.angle ?? 0) * Math.PI / 180)
+        ctx.drawImage(img, -size * ratio / 2, -size / 2, size * ratio, size)
+        ctx.restore()
+      }
+      // 结构阶段损伤与命中点贴花：主体贴图之上、炮塔挂点之下；贴图 alpha 严格隔离底座/履带/轮子。
+      const bodyDamageStage = fortressDamageStage(s.fortress.hp, s.fortress.maxHp)
+      drawFortressDamageOverlay(ctx, s, fd, bodyImg, fx, fy, fw, fh, cell, bodyDamageStage)
+      if (typeof window !== 'undefined') {
+        (window as unknown as { __tdDamage?: { marks: number; stage: number; flash: number } }).__tdDamage = {
+          marks: s.fortress.damageMarks.length, stage: bodyDamageStage, flash: s.fortress.hitFlash,
+        }
       }
       // v2.53 毁灭序列：船体渐进变暗（内伤期 0.10→0.45；主爆后焦黑残骸态 0.45→0.75）
       if (s.fortress.dyingT >= 0) {
@@ -989,7 +1333,7 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
       ctx.lineTo(fx + fw / 2 + cell * 0.22, fy + cell * 0.34)
       ctx.lineTo(fx + fw / 2, fy + cell * 0.06)
       ctx.closePath()
-      ctx.fillStyle = '#C8B568'
+      ctx.fillStyle = fd.paint?.accent ?? '#C8B568'
       ctx.fill()
       // 可见炮位（S/M/L 标记；隐藏内置炮位不画；挂炮模式高亮匹配位；视界弧线）
       let hpDrawn = 0 // v1.75：本帧绘制的槽位圈数（观测探针）
@@ -1081,6 +1425,155 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
     w.__tdLean = { n: leanN, max: mag, ever: Math.max(prev.ever, mag) }
   }
 
+  // ---- v2.71 堡垒护盾：单张灰度六边形瓦片 + 程序命中扩散 / 电弧 / 破盾碎片 ----
+  if (!ui.edit && !ui.interiorMode && s.fortress.dyingT < DEATH_MAIN_T) {
+    const fr = fortressRect(s)
+    const fw = fr.w * cell, fh = fr.h * cell
+    const activeHits = s.shieldHits
+    const visible = s.fortress.maxShield > 0 && (s.fortress.shield > 0 || activeHits.length > 0)
+    const tileImg = activeHits.length > 0 ? trackTileImage('/res/fx/shield_hex_tile_32_v1.png') : null
+    const tileTint = tileImg ? tintedFx(tileImg, '#76C8D2') : null
+    const fieldImg = visible ? trackTileImage('/res/fx/shield_field_inner_128_v1.png') : null
+    const edgeImg = visible ? trackTileImage('/res/fx/shield_edge_glow_64_v1.png') : null
+    const fieldTint = fieldImg ? tintedFx(fieldImg, '#6DBCC8') : null
+    const edgeTint = edgeImg ? tintedFx(edgeImg, '#B7F4F7') : null
+    if (visible) {
+      const ratio = s.fortress.maxShield > 0 ? Math.max(0, Math.min(1, s.fortress.shield / s.fortress.maxShield)) : 0
+      const pad = Math.max(6, cell * 0.22)
+      const hw = fw / 2 + pad, hh = fh / 2 + pad
+      const tileSize = Math.max(13, cell * 0.72)
+      const tiles = tileTint ? shieldHexLayout(hw, hh, tileSize) : []
+      const co = Math.cos(s.fortress.heading), si = Math.sin(s.fortress.heading)
+      const localHits = activeHits.map(hit => {
+        const dx = (hit.x - (fr.x + fr.w / 2)) * cell
+        const dy = (hit.y - (fr.y + fr.h / 2)) * cell
+        return { hit, x: dx * co + dy * si, y: -dx * si + dy * co }
+      })
+      let wholeBreakFlash = 0
+      for (const h of localHits) {
+        if (!h.hit.broken) continue
+        wholeBreakFlash = Math.max(wholeBreakFlash, shieldBreakEnvelope(1 - h.hit.ttl / h.hit.max))
+      }
+      const unfoldElapsed = shieldUnfoldStartedAt >= 0 ? s.time - shieldUnfoldStartedAt : 1
+      const unfolding = unfoldElapsed >= 0 && unfoldElapsed < 0.82
+      const unfoldPhase = unfolding ? unfoldElapsed / 0.82 : 1
+      const unfold = shieldUnfoldProgress(unfoldPhase)
+      const unfoldScale = shieldUnfoldScale(unfoldPhase)
+      if (!unfolding && shieldUnfoldStartedAt >= 0) shieldUnfoldStartedAt = -1
+      const unfoldAlpha = unfolding ? 0.06 + unfold * 0.94 : 1
+      const unfoldEdgeBoost = 1 + (unfolding ? Math.sin(unfoldPhase * Math.PI) * 0.7 : 0)
+      const edgePulse = shieldEdgePulse(s.time)
+      ctx.save()
+      ctx.translate(X(fr.x + fr.w / 2), Y(fr.y + fr.h / 2))
+      ctx.rotate(s.fortress.heading)
+      ctx.scale(unfoldScale, unfoldScale)
+      // 常态由两张灰度素材动态染色：淡内部场体 + 沿轮廓重复的径向柔光。
+      ctx.globalCompositeOperation = 'source-over'
+      ctx.globalAlpha = 1
+      shieldClipPath(ctx, hw, hh)
+      const fieldBaseAlpha = s.fortress.shield > 0 ? (0.022 + ratio * 0.016) * unfoldAlpha : 0
+      // 破盾后内部场体立即消失，避免加法闪光把下方战车底盘照成亮色块。
+      ctx.fillStyle = `rgba(76, 190, 207, ${fieldBaseAlpha})`
+      ctx.fill()
+      if (edgeTint && (s.fortress.shield > 0 || wholeBreakFlash > 0)) {
+        ctx.globalCompositeOperation = 'lighter'
+        const stableEdgeAlpha = s.fortress.shield > 0 ? (0.06 + ratio * 0.055) * unfoldAlpha * unfoldEdgeBoost : 0
+        ctx.globalAlpha = Math.min(0.58, stableEdgeAlpha * edgePulse.alpha + wholeBreakFlash * 0.46)
+        const glowSize = Math.max(10, cell * 0.56) * edgePulse.width
+        for (const p of shieldPerimeterSamples(hw, hh, Math.max(3, cell * 0.16))) {
+          ctx.drawImage(edgeTint, p.x - glowSize / 2, p.y - glowSize / 2, glowSize, glowSize)
+        }
+      }
+      ctx.globalCompositeOperation = 'source-over'
+      ctx.globalAlpha = unfoldAlpha
+      shieldClipPath(ctx, hw, hh)
+      const stableStrokeAlpha = s.fortress.shield > 0 ? 0.34 + ratio * 0.12 : 0.04
+      ctx.strokeStyle = `rgba(225, 255, 255, ${Math.min(0.92, stableStrokeAlpha * edgePulse.alpha + wholeBreakFlash * 0.7)})`
+      ctx.lineWidth = Math.max(0.7, cell * (0.026 * edgePulse.width + wholeBreakFlash * 0.055))
+      ctx.stroke()
+      shieldClipPath(ctx, hw, hh); ctx.clip()
+      if (fieldTint && s.fortress.shield > 0) {
+        ctx.globalCompositeOperation = 'lighter'
+        const stableFieldAlpha = s.fortress.shield > 0 ? (0.16 + ratio * 0.08) * unfoldAlpha : 0
+        const motion = shieldFieldMotion(s.time, hw, hh)
+        ctx.save()
+        ctx.translate(motion.x1, motion.y1); ctx.rotate(motion.r1)
+        ctx.globalAlpha = Math.min(0.58, stableFieldAlpha * motion.a1)
+        ctx.drawImage(fieldTint, -hw * 1.13, -hh * 1.13, hw * 2.26, hh * 2.26)
+        ctx.restore()
+        ctx.save()
+        ctx.translate(motion.x2, motion.y2); ctx.rotate(Math.PI + motion.r2)
+        ctx.globalAlpha = Math.min(0.48, stableFieldAlpha * motion.a2)
+        ctx.drawImage(fieldTint, -hw * 1.12, -hh * 1.12, hw * 2.24, hh * 2.24)
+        ctx.restore()
+      }
+      ctx.globalCompositeOperation = 'lighter'
+      for (const tile of tiles) {
+        if (!tileTint) continue
+        let hitLight = 0
+        let breakFlash = 0
+        for (const h of localHits) {
+          const progress = 1 - h.hit.ttl / h.hit.max
+          const ring = Math.max(0, Math.round(Math.hypot(tile.x - h.x, tile.y - h.y) / (tileSize * 0.68)))
+          hitLight = Math.max(hitLight, shieldHexRipple(progress, ring, h.hit.broken))
+          // 破盾也只显现命中格与紧邻一圈；整盾瓦解由电弧和碎片承担，避免六边形全屏常亮。
+          if (h.hit.broken && ring <= 1) breakFlash = Math.max(breakFlash, Math.max(0, 1 - progress * 1.4) * 0.22)
+        }
+        ctx.globalAlpha = tile.edge * Math.min(0.92, hitLight * 0.82 + breakFlash)
+        if (ctx.globalAlpha <= 0.005) continue
+        const dw = tileSize * tile.squashX, dh = tileSize * tile.squashY
+        ctx.drawImage(tileTint, tile.x - dw / 2, tile.y - dh / 2, dw, dh)
+      }
+      ctx.restore()
+    }
+    for (const hit of activeHits) {
+      const firstSeen = !fxSeen.has(hit.id)
+      fxElapsed(hit)
+      if (firstSeen) {
+        spawnBurst(fxPool, { x: hit.x, y: hit.y, count: hit.broken ? 7 : 3, speed: hit.broken ? 2.8 : 1.8, life: 0.24, size: 0.035, color: '#B9F4F7', drag: 5, seed: hit.id, streak: true })
+        if (hit.broken) {
+          // 破盾以整个场体为主体：沿完整轮廓分布式生成碎片，而非只在命中点爆开。
+          const padWorld = Math.max(6, cell * 0.22) / cell
+          const hwWorld = fr.w / 2 + padWorld, hhWorld = fr.h / 2 + padWorld
+          const co = Math.cos(s.fortress.heading), si = Math.sin(s.fortress.heading)
+          const cx = fr.x + fr.w / 2, cy = fr.y + fr.h / 2
+          const anchors = shieldPerimeterSamples(hwWorld, hhWorld, 0.62)
+          const shardSize = shieldShardSize(hwWorld, hhWorld)
+          for (let i = 0; i < anchors.length; i++) {
+            const p = anchors[i]
+            const x = cx + p.x * co - p.y * si
+            const y = cy + p.x * si + p.y * co
+            spawnBurst(fxPool, { x, y, count: 3, speed: 4.2, life: 0.98, size: shardSize, color: '#83D6DF', drag: 1.9, seed: hit.id + 900 + i * 37, grow: -0.38, shape: 'shieldShard', speedJitter: 0.72, lifeJitter: 0.4, sizeJitter: 0.38 })
+          }
+        }
+      }
+    }
+  }
+
+  // ---- 船体受击火花：仅未被护盾完全吸收的事件进入本通道；首见一次性发射。 ----
+  for (const hit of s.fortressHits) {
+    const firstSeen = !fxSeen.has(hit.id)
+    fxElapsed(hit)
+    const frHit = fortressRect(s)
+    const dx = hit.x - (frHit.x + frHit.w / 2), dy = hit.y - (frHit.y + frHit.h / 2)
+    const len = Math.max(1e-6, Math.hypot(dx, dy))
+    if (firstSeen) {
+      spawnBurst(fxPool, {
+        x: hit.x, y: hit.y, count: hit.ricochet ? 9 : hit.penetrated ? 7 : 4, speed: hit.ricochet ? 4.2 : hit.penetrated ? 3.3 : 2.2,
+        life: 0.24, size: 0.038, color: hit.ricochet ? '#FFE09A' : hit.penetrated ? '#F2B45F' : '#D6C39A', drag: 5.5,
+        seed: hit.id, streak: true, dirX: hit.ricochet ? hit.ricochetDx : dx / len, dirY: hit.ricochet ? hit.ricochetDy : dy / len, bias: hit.ricochet ? 0.82 : 0.62,
+      })
+    }
+    if (hit.ricochet) {
+      const life = Math.max(0, hit.ttl / hit.max)
+      const travel = (1 - life) * 1.35 * cell
+      ctx.strokeStyle = `rgba(255,224,154,${(life * 0.9).toFixed(3)})`
+      ctx.lineWidth = Math.max(1.2, cell * 0.055)
+      ctx.beginPath(); ctx.moveTo(X(hit.x) + hit.ricochetDx * travel, Y(hit.y) + hit.ricochetDy * travel)
+      ctx.lineTo(X(hit.x) + hit.ricochetDx * (travel + cell * 0.72), Y(hit.y) + hit.ricochetDy * (travel + cell * 0.72)); ctx.stroke()
+    }
+  }
+
   // ---- 敌人 ----
   // 清理已死亡敌人的朝向缓存
   for (const id of prevPos.keys()) {
@@ -1090,9 +1583,20 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
     const def = ENEMY_DEFS[e.kind]
     const px = X(e.x)
     const py = Y(e.y)
-    const r = def.size * cell
+    const r = def.size * (e.bossSizeScale ?? 1) * cell
     drawEnemy(ctx, e, px, py, r, s.time)
     drawHpBar(ctx, px - r, py - r - 6, r * 2, e.hp / e.maxHp)
+    if (e.bossName) {
+      ctx.save()
+      ctx.font = `bold ${Math.max(9, Math.round(10 * zf))}px sans-serif`
+      ctx.textAlign = 'center'
+      ctx.fillStyle = '#EFEBD8'
+      ctx.strokeStyle = '#1A1A18'
+      ctx.lineWidth = 3
+      ctx.strokeText(e.bossName, px, py - r - 11)
+      ctx.fillText(e.bossName, px, py - r - 11)
+      ctx.restore()
+    }
   }
 
   // ---- 友军单位（生产模块产出）：士兵=圆+短枪线，坦克=方车体+炮管，战斗机=三角+偏移阴影（高度感） ----
@@ -1264,6 +1768,17 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
     if (p.kind === 'missile' && paGlow && resolveTrailFx(paGlow)) drawEngineGlow(p)
   }
 
+  // 敌方测试实弹：暖红色直线曳光，与玩家弹丸分池，便于观察来袭方向和跳弹。
+  for (const p of s.enemyProjectiles) {
+    const tail = Math.max(cell * 0.18, Math.hypot(X(p.x) - X(p.px), Y(p.y) - Y(p.py)) * 0.75)
+    const hx = dirX(p.heading), hy = dirY(p.heading)
+    ctx.strokeStyle = 'rgba(244,116,72,0.82)'
+    ctx.lineWidth = Math.max(1.4, cell * 0.055)
+    ctx.beginPath(); ctx.moveTo(X(p.x) - hx * tail, Y(p.y) - hy * tail); ctx.lineTo(X(p.x), Y(p.y)); ctx.stroke()
+    ctx.fillStyle = '#FFE0A6'; ctx.strokeStyle = '#48251D'; ctx.lineWidth = 1
+    ctx.beginPath(); ctx.arc(X(p.x), Y(p.y), Math.max(2, cell * 0.075), 0, Math.PI * 2); ctx.fill(); ctx.stroke()
+  }
+
   // ---- 炮口火光（规范 §5.3：击发时刻炮口点，帧条按渲染帧推进，朝向 = 击发时刻炮口方向不跟随旋转）----
   {
     const live = new Set<number>()
@@ -1302,6 +1817,8 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
     // 否则爆炸/命中 id 被误删 → firstSeen 每帧重复触发 → 粒子重复发射不消失
     for (const ex of s.explosions) live.add(ex.id)
     for (const im of s.impacts) live.add(im.id)
+    for (const sh of s.shieldHits) live.add(sh.id)
+    for (const fh of s.fortressHits) live.add(fh.id)
     for (const id of [...fxSeen.keys()]) if (!live.has(id)) fxSeen.delete(id)
   }
 
@@ -1721,6 +2238,46 @@ export function draw(ctx: CanvasRenderingContext2D, s: GameState, v: ViewCtx, ui
       ctx.lineWidth = 2
       ctx.strokeRect(X(b.x), Y(b.y), b.w * cell, b.h * cell)
     }
+    for (const [z, color, label] of [[eo.startZone, '#3E7D46', '起点'], [eo.finishZone, '#D9A441', '终点']] as const) {
+      ctx.fillStyle = `${color}33`
+      ctx.fillRect(X(z.x), Y(z.y), z.w * cell, z.h * cell)
+      ctx.strokeStyle = color
+      ctx.lineWidth = 2
+      ctx.setLineDash([6, 4])
+      ctx.strokeRect(X(z.x), Y(z.y), z.w * cell, z.h * cell)
+      ctx.setLineDash([])
+      ctx.fillStyle = color
+      ctx.font = `bold ${Math.max(10, cell * 0.38)}px sans-serif`
+      ctx.textAlign = 'left'
+      ctx.fillText(label, X(z.x) + 4, Y(z.y) + Math.max(12, cell * 0.45))
+    }
+    for (const t of eo.triggers) {
+      const color = t.enabled ? '#B3392E' : '#777269'
+      ctx.fillStyle = `${color}${t.selected ? '42' : '24'}`
+      ctx.fillRect(X(t.x), Y(t.y), t.w * cell, t.h * cell)
+      ctx.strokeStyle = color
+      ctx.lineWidth = t.selected ? 3 : 2
+      ctx.setLineDash(t.selected ? [8, 3] : [5, 4])
+      ctx.strokeRect(X(t.x), Y(t.y), t.w * cell, t.h * cell)
+      ctx.setLineDash([])
+      ctx.fillStyle = color
+      ctx.font = `bold ${Math.max(10, cell * 0.34)}px sans-serif`
+      ctx.textAlign = 'left'
+      ctx.fillText(`伏击 · ${t.name}`, X(t.x) + 4, Y(t.y) + Math.max(12, cell * 0.42))
+    }
+    for (const t of eo.interactables) {
+      const color = t.enabled ? (t.kind === 'supply' ? '#3E7D46' : t.kind === 'gate' ? '#5C7E8C' : t.kind === 'target' ? '#D9762E' : '#8A5C9E') : '#777269'
+      ctx.fillStyle = `${color}${t.selected ? '42' : '24'}`
+      ctx.fillRect(X(t.x), Y(t.y), t.w * cell, t.h * cell)
+      ctx.strokeStyle = color
+      ctx.lineWidth = t.selected ? 3 : 2
+      ctx.setLineDash([3, 3])
+      ctx.strokeRect(X(t.x), Y(t.y), t.w * cell, t.h * cell)
+      ctx.setLineDash([])
+      ctx.fillStyle = color
+      ctx.font = `bold ${Math.max(10, cell * 0.34)}px sans-serif`
+      ctx.fillText(`交互 · ${t.name}`, X(t.x) + 4, Y(t.y) + Math.max(12, cell * 0.42))
+    }
     if (eo.core) {
       // 核心：金色虚线框
       ctx.strokeStyle = '#D9A441'
@@ -2058,6 +2615,39 @@ function drawTurretLayers(
     }
   }
   ctx.imageSmoothingEnabled = prevSmooth
+}
+
+/** 编辑器与战场共用的炮塔核心绘制入口；编辑器只在外层叠加网格、坐标轴与点位标注。 */
+export function drawTurretPreviewCore(
+  ctx: CanvasRenderingContext2D,
+  def: TurretDef,
+  box: { x: number; y: number; cell: number },
+  state: { chargeProgress?: number | null; firing?: boolean; fireElapsed?: (number | null)[]; overheated?: boolean } = {},
+) {
+  const t: Turret = {
+    id: -900, defId: def.id, x: box.x / box.cell, y: box.y / box.cell, w: def.w, h: def.h,
+    level: 1, hp: def.hp, maxHp: def.hp, angle: 0, cooldown: 0, burstLeft: 0,
+    rackLeft: Math.max(1, def.burst ?? 1), rackAnim: 0, rackTimer: 0, burstTimer: 0,
+    chargeLeft: state.chargeProgress == null || !def.chargeTime ? 0 : Math.max(0, def.chargeTime * (1 - state.chargeProgress)),
+    firing: state.firing ?? false, firingLeft: state.firing ? 1 : 0, tickTimer: 0, targetId: null, barrelIdx: 0,
+  }
+  const muzzles: MuzzleEvent[] = (state.fireElapsed ?? []).flatMap((elapsed, i) => elapsed == null ? [] : [{
+    id: -100000 - i * 10000 - Math.round(elapsed * 1000), turretId: t.id, barrelIdx: i,
+    x: 0, y: 0, angle: 0, ttl: Math.max(0, FLASH_DURATION - elapsed), max: FLASH_DURATION,
+  }])
+  const v: ViewCtx = { cell: box.cell, viewX: 0, viewY: 0, overheated: state.overheated ?? false }
+  const artEntry = turretArtState(def)
+  if (artEntry.status === 'ready' && artEntry.assets) {
+    drawTurretLayers(ctx, t, def, v, artEntry.assets, muzzles, 0, 1)
+    return
+  }
+  const px = box.x, py = box.y, w = def.w * box.cell, h = def.h * box.cell
+  if (def.art?.baseAsset !== 'none') { ctx.fillStyle = def.color; ctx.fillRect(px + 1, py + 1, w - 2, h - 2) }
+  const a = def.art?.anchor ?? [0.5, 0.5]
+  const ax = px + a[0] * w, ay = py + a[1] * h
+  ctx.strokeStyle = '#A8A28C'; ctx.lineWidth = 1.5
+  for (const b of artMounts(t, def)) { ctx.beginPath(); ctx.moveTo(ax + b.mount[0] * 30, ay - b.mount[1] * 30); ctx.lineTo(ax + b.muzzle[0] * 30, ay - b.muzzle[1] * 30); ctx.stroke() }
+  ctx.fillStyle = '#4A4740'; ctx.beginPath(); ctx.arc(ax, ay, Math.min(w, h) * 0.2, 0, Math.PI * 2); ctx.fill()
 }
 
 function drawTurret(ctx: CanvasRenderingContext2D, t: Turret, v: ViewCtx, selected: boolean, muzzles: MuzzleEvent[], baseAngle = 0, hp?: { arc?: { start: number; end: number }; fixed?: number }, zf = v.cell / 30) {

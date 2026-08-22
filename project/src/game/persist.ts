@@ -1,7 +1,7 @@
 /** debug 数据持久化（localStorage，模式同 level.ts）：TURRET_DEFS / PROJECTILE_ARTS 全量 JSON。
  *  模块初始化时加载并就地替换注册表内容（splice，保持 import 引用有效，引擎/render 零改动）；
  *  无存储环境（sim/node）解析失败均静默用默认。version 不符 → 丢弃用默认。 */
-import { applyMountFoot, DEFAULT_FORTRESS, FORTRESS_DEFS, MODULE_DEFS, PROJECTILE_ARTS, TURRET_DEFS } from './config'
+import { applyMountFoot, DEFAULT_FORTRESS, FORTRESS_DEFS, MODULE_DEFS, PROJECTILE_ARTS, SHIELD_MODULE_DEFS, TURRET_DEFS } from './config'
 import type { FortressDef, ModuleDef, ProjectileArtDef, TurretDef } from './config'
 
 export const TURRET_DEFS_KEY = 'td-turret-defs'
@@ -37,6 +37,8 @@ export const serializeProjectileArts = (arts: ProjectileArtDef[]): string => ser
 export const parseProjectileArts = (json: string): ProjectileArtDef[] | null => parse(json)
 // v2.30 模块库（MODULE_DEFS 注册表化，同 TURRET_DEFS 全量 JSON 模式；声明须在 load() 之前避免 TDZ）
 export const MODULE_DEFS_KEY = 'td-module-defs'
+export const MODULE_DEFS_SCHEMA_KEY = 'td-module-defs-schema'
+export const MODULE_DEFS_SCHEMA_VERSION = 6 // v6：通用模块数量上限，并清理旧发生器硬编码描述
 export const serializeModuleDefs = (defs: ModuleDef[]): string => serialize(defs)
 export const parseModuleDefs = (json: string): ModuleDef[] | null => parse(json)
 
@@ -53,6 +55,26 @@ function storage(): Storage | null {
 const FACTORY_TURRETS = JSON.parse(JSON.stringify(TURRET_DEFS)) as TurretDef[]
 const FACTORY_AMMO = JSON.parse(JSON.stringify(PROJECTILE_ARTS)) as ProjectileArtDef[]
 const FACTORY_MODULES = JSON.parse(JSON.stringify(MODULE_DEFS)) as ModuleDef[]
+
+/** 保留用户自定义模块，仅为旧模块库补入新版本增加的出厂模块。 */
+export function migrateModuleDefs(defs: ModuleDef[], fromVersion: number): ModuleDef[] {
+  const next = JSON.parse(JSON.stringify(defs)) as ModuleDef[]
+  if (fromVersion < 4) {
+    for (const factory of SHIELD_MODULE_DEFS) {
+      if (!next.some(d => d.id === factory.id)) next.push(JSON.parse(JSON.stringify(factory)) as ModuleDef)
+    }
+  }
+  if (fromVersion < 6) {
+    const generator = next.find(d => d.id === 'shield_generator')
+    if (generator) {
+      if (generator.maxCount === undefined) generator.maxCount = 1
+      if (generator.desc === '护盾上限 300 · 回复 12/s · 回复每点耗电 0.35（限装一台）') {
+        generator.desc = '护盾上限 300 · 回复 12/s · 回复每点耗电 0.35'
+      }
+    }
+  }
+  return next
+}
 
 function load() {
   const st = storage()
@@ -76,7 +98,15 @@ function load() {
     const mj = st.getItem(MODULE_DEFS_KEY) // v2.30 模块库
     if (mj) {
       const mods = parseModuleDefs(mj)
-      if (mods) MODULE_DEFS.splice(0, MODULE_DEFS.length, ...mods)
+      if (mods) {
+        const schema = Number(st.getItem(MODULE_DEFS_SCHEMA_KEY) ?? 0)
+        const migrated = migrateModuleDefs(mods, schema)
+        MODULE_DEFS.splice(0, MODULE_DEFS.length, ...migrated)
+        if (schema < MODULE_DEFS_SCHEMA_VERSION) {
+          st.setItem(MODULE_DEFS_KEY, serializeModuleDefs(migrated))
+          st.setItem(MODULE_DEFS_SCHEMA_KEY, String(MODULE_DEFS_SCHEMA_VERSION))
+        }
+      }
     }
   } catch { /* 静默用默认 */ }
 }
@@ -97,7 +127,10 @@ export function saveProjectileArts() {
 export function saveModuleDefs() {
   const st = storage()
   if (!st) return
-  try { st.setItem(MODULE_DEFS_KEY, serializeModuleDefs(MODULE_DEFS)) } catch { /* 静默 */ }
+  try {
+    st.setItem(MODULE_DEFS_KEY, serializeModuleDefs(MODULE_DEFS))
+    st.setItem(MODULE_DEFS_SCHEMA_KEY, String(MODULE_DEFS_SCHEMA_VERSION))
+  } catch { /* 静默 */ }
 }
 
 /** v2.30 仅模块库回出厂（就地替换 + 清 key；不影响炮塔/弹丸库） */
@@ -105,7 +138,10 @@ export function resetModuleDefsToFactory() {
   MODULE_DEFS.splice(0, MODULE_DEFS.length, ...JSON.parse(JSON.stringify(FACTORY_MODULES)) as ModuleDef[])
   const st = storage()
   if (!st) return
-  try { st.removeItem(MODULE_DEFS_KEY) } catch { /* 静默 */ }
+  try {
+    st.removeItem(MODULE_DEFS_KEY)
+    st.removeItem(MODULE_DEFS_SCHEMA_KEY)
+  } catch { /* 静默 */ }
 }
 
 /** 所有 debug 编辑（bump）后调用 */
@@ -128,6 +164,7 @@ export function resetPersistedToDefaults() {
     st.removeItem(TURRET_DEFS_KEY)
     st.removeItem(PROJECTILE_ARTS_KEY)
     st.removeItem(MODULE_DEFS_KEY)
+    st.removeItem(MODULE_DEFS_SCHEMA_KEY)
   } catch { /* 静默 */ }
 }
 

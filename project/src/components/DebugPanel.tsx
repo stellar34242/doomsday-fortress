@@ -1,17 +1,17 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Bug, Play, Plus, RotateCcw, Square, Trash2, X } from 'lucide-react'
-import { BASE_CELL, CORE, DEFAULT_FORTRESS, MOUNT_FOOT, EFFECT_KIND_NAME, EFFECT_LAYER_NAME, EFFECT_STATE_NAME, FLASH_DURATION, FLASH_FRAME_DUR, FLASH_FRAMES, FLASH_SCALES, FORTRESS_DEFS, M_PER_CELL, MODULE_DEFS, PROJECTILE_ARTS, PROJECTILE_KIND_COLOR, PROJECTILE_KIND_NAME, SPECIAL_BOOST_NAME, TURRET_DEFS } from '@/game/config'
+import { BASE_CELL, CORE, DEFAULT_FORTRESS, ENEMY_DEFS, MOUNT_FOOT, EFFECT_KIND_NAME, EFFECT_LAYER_NAME, EFFECT_STATE_NAME, FLASH_DURATION, FLASH_FRAME_DUR, FLASH_FRAMES, FLASH_SCALES, FORTRESS_DEFS, M_PER_CELL, MODULE_DEFS, PROJECTILE_ARTS, PROJECTILE_KIND_COLOR, PROJECTILE_KIND_NAME, SPECIAL_BOOST_NAME, TURRET_DEFS } from '@/game/config'
 import type { AllyKind, ModuleDef, ProjectileArtDef, ProjectileArtKind } from '@/game/config'
 import type { BattleObject, ExcludeTagKey, FortressDef, FortressEffectKind, FortressEffectLayer, FortressEffectState, Hardpoint, MountSize, PreferTagKey, ResourceTagKey, SpecialBoost, TurretDef, TurretTag, WeaponType } from '@/game/config'
-import { BRUSH_DEFAULTS, COLS_MIN, LEVEL, reanchorCols, reanchorRows, resetLevel, ROWS_MIN, saveLevel } from '@/game/level'
-import { fortressInteriorSet, fortressShapeSet, trackPlacements, validateFortressDef } from '@/game/engine'
+import { BRUSH_DEFAULTS, COLS_MIN, DEFEND_OVERLAP_TIME_DEFAULT, DEFEND_REST_TIME_DEFAULT, DEFEND_TIME_MAX, emptyTriggerEnemies, LEVEL, OBJECTIVE_WAVES_MAX, OBJECTIVE_WAVES_MIN, reanchorCols, reanchorRows, resetLevel, ROWS_MIN, saveLevel, SURVIVE_SECONDS_MAX, SURVIVE_SECONDS_MIN, TRIGGER_ENEMY_KINDS } from '@/game/level'
+import { fortressInteriorSet, fortressShapeSet, modulePlanningFits, simulateTurretHeat, trackPlacements, validateFortressDef, wheelPlacements } from '@/game/engine'
 import type { GameState } from '@/game/engine'
 import { beamArtConfig, beamArtConfigOf, chargeFrameRect, projectileArtDef, projectileArtState, resCompatUrl, resolveExplosionFx, resolveImpactFx, resolveTrailFx, srcImage, turretArtState, validateArt } from '@/game/art'
-import { drawBeamLayer } from '@/game/render'
+import { drawBeamLayer, drawTurretPreviewCore } from '@/game/render'
 import { drawExplosionLayers, drawImpactFlash, drawParticlePool, tintedFx } from '@/game/fxDraw' // v2.55：特效画法统一走共用层
 import { deleteCustomFortress, fortressPersistFailed, getSelectedFortressId, isBuiltinFortressOverridden, listCustomFortresses, resetModuleDefsToFactory, resetPersistedToDefaults, saveAll, saveCustomFortress, setSelectedFortressId } from '@/game/persist'
 import { applyConfig, exportConfig } from '@/game/config_transfer'
-import { addAsset, filterAssets, getAsset, listAssets, removeAsset, setAssetCategory, ASSET_CATEGORY_NAME } from '@/game/assetlib'
+import { addAsset, filterAssets, getAsset, listAssets, removeAsset, resolveAssetSrc, setAssetCategory, ASSET_CATEGORY_NAME } from '@/game/assetlib'
 import { createPool, gradientColorKey, spawnTrail, stepParticles } from '@/game/particles'
 import { canPlay, createFxState, FX_PREVIEW_RADIUS, FX_SEQ_HIT_X, fxRaySeqFade, fxRaySeqLen, fxTick, simAmmoFx } from '@/game/ammoFxPreview'
 import type { AmmoFxMode } from '@/game/ammoFxPreview'
@@ -149,6 +149,8 @@ const FIELDS: FieldSpec[] = [
   },
   { path: 'reload', label: '装填/冷却(s)', tip: '两轮开火之间的冷却（秒）', type: 'number', step: 0.1 },
   { path: 'heatPerShot', label: '热量/发', tip: '每发产热汇聚到堡垒热量池，堡垒积满即全炮塔过热停火', type: 'number' },
+  { path: 'armorPen', label: '穿甲比例', tip: '命中堡垒时直接穿过装甲进入结构的比例（0~1）', type: 'number', step: 0.05, showIf: () => true },
+  { path: 'armorDamage', label: '削甲/命中', tip: '每次命中削减受击面装甲；留空时按伤害×穿甲比例', type: 'number', step: 1, showIf: () => true },
   { path: 'ammoPerShot', label: '弹药/发', tip: '每发消耗弹药量', type: 'number' },
   { path: 'ammoPerSec', label: '弹药/秒', tip: '喷射武器每秒弹药消耗', type: 'number' },
   { path: 'energyPerShot', label: '发射电量', tip: '每发消耗电量', type: 'number' },
@@ -169,7 +171,7 @@ const PREFER_LABELS: [PreferTagKey, string][] = [ // 预留键（fortress/wingma
   ['air', '空中优先'], ['ground', '地面优先'],
 ]
 const EXCLUDE_LABELS: [ExcludeTagKey, string][] = [['air', '不打空中'], ['ground', '不打地面']]
-const RESOURCE_LABELS: [ResourceTagKey, string][] = [['ammo', '弹药'], ['energy', '电量'], ['heat', '热量'], ['defense', '防御(堡垒耐久)']]
+const RESOURCE_LABELS: [ResourceTagKey, string][] = [['ammo', '弹药'], ['energy', '电量'], ['heat', '热量'], ['defense', '结构值']]
 
 function tagText(tg: TurretTag): string {
   if (tg.kind === 'prefer') return `偏好·${PREFER_LABELS.find(([k]) => k === tg.key)?.[1] ?? tg.key}`
@@ -286,50 +288,6 @@ function previewMounts(def: TurretDef): { mount: [number, number]; muzzle: [numb
   })
 }
 
-/** 预览挂载绘制：满挂 round-robin 均分到管，贴图优先、几何小导弹回退（与 render.drawRackMissiles 同规则） */
-function drawPreviewRack(
-  ctx: CanvasRenderingContext2D, def: TurretDef,
-  mounts: { mount: [number, number] }[],
-  P30: (x: number, y: number) => [number, number],
-) {
-  const rackLeft = Math.max(1, def.burst ?? 1) // 预览满挂
-  const nBar = mounts.length
-  const per = Math.floor(rackLeft / nBar)
-  const extra = rackLeft % nBar
-  const ammoId = def.art?.projectile
-  const ammo = ammoId ? projectileArtDef(ammoId) : undefined
-  const st = ammo ? projectileArtState(ammo) : null
-  const img = st?.status === 'ready' ? st.assets?.projectile : undefined
-  // v1.81：与战场 drawRackMissiles 严格一致——统一美术坐标 30px=1格（P30），贴图原尺寸无缩放
-  // （此前用预览 cell 基准：贴图被强制缩放到 0.34×预览格，且坐标随炮塔占格漂移，与战场不一致）
-  const size = img ? img.height : 0.34 * 30
-  const spacing = 0.34 * 0.48 * 30 // = engine RACK_SLOT_SPACING × 30px（弹宽×1.2 同战场规则）
-  const dx = def.art?.rack?.dx ?? 0
-  const dy = def.art?.rack?.dy ?? 0.12
-  mounts.forEach((b, i) => {
-    const count = per + (i < extra ? 1 : 0)
-    const [ox, oy] = P30(b.mount[0] + dx, b.mount[1] + dy)
-    for (let j = 0; j < count; j++) {
-      const y = oy + j * spacing
-      if (img) {
-        const bw = size * (img.width / img.height)
-        ctx.drawImage(img, ox - bw / 2, y - size / 2, bw, size)
-      } else {
-        ctx.fillStyle = PROJECTILE_KIND_COLOR[ammo?.kind ?? 'missile']
-        ctx.strokeStyle = '#A8A28C'
-        ctx.lineWidth = 1
-        ctx.beginPath()
-        ctx.moveTo(ox, y - size * 0.45)
-        ctx.lineTo(ox - size * 0.16, y + size * 0.2)
-        ctx.lineTo(ox + size * 0.16, y + size * 0.2)
-        ctx.closePath()
-        ctx.fill()
-        ctx.stroke()
-      }
-    }
-  })
-}
-
 /** 预览绘制（模块级纯函数）：网格 + 贴图分层/几何回退 + 坐标点彩色标注；angle=0 炮口朝上 */
 // v2.10 光束粒子预览池（模块级：drawArtPreview 每帧推进；静态重绘时清空）
 const artPrevBeamPool = createPool()
@@ -417,73 +375,8 @@ function drawArtPreview(cv: HTMLCanvasElement, def: TurretDef, anim?: { t: numbe
       }
     }
   }
-  const recoilPx = (i: number, rec: number) => { // v1.57 后座位移（与战场同规则：2×火光时长内线性回位；美术坐标 30px=1格）
-    const el = fireEl[i]
-    return el != null && rec > 0 ? rec * Math.max(0, 1 - el / (2 * FLASH_DURATION)) * 30 : 0
-  }
   const st = turretArtState(def)
-  if (st.status === 'ready' && st.assets) { // 贴图分层（逐层降级：ready 层贴图、缺失层几何补绘）：base → turret(anchor 为轴) → barrel × N；zBias<0 时炮管在炮身下
-    ctx.imageSmoothingEnabled = false
-    const F = 1 // 预览按素材原始尺寸绘制（1 贴图像素 = 1 预览像素，与战场 zoom=1 一致）
-    // 底座：原始尺寸，居中于占格；「无」→ 不绘制；无贴图（含「几何」）→ 色块底座
-    if (def.art?.baseAsset === 'none') { /* 底座选配「无」：不绘制底座层 */ }
-    else if (st.assets.base) ctx.drawImage(st.assets.base, tpx + (def.w * cell - st.assets.base.width * F) / 2, tpy + (def.h * cell - st.assets.base.height * F) / 2, st.assets.base.width * F, st.assets.base.height * F)
-    else { ctx.fillStyle = def.color; ctx.fillRect(tpx + 1, tpy + 1, def.w * cell - 2, def.h * cell - 2) }
-    const barrelBelow = (def.art?.zBias ?? 0) < 0
-    const noBarrel = def.art?.barrelAsset === 'none'
-    const drawBarrels = () => {
-      // 炮管按原始尺寸绘制（30px=1格绝对基准），根部锚定挂点；炮口仅为定位点不参与缩放
-      if (!noBarrel) { // 选配「无」→ 跳过炮管层（挂载预览仍绘制——导弹巢无管也有弹架）
-        const barrelImg = st.assets!.barrel
-        if (barrelImg) {
-          mounts.forEach((b, i) => {
-            const [mx, my] = P30(b.mount[0], b.mount[1])
-            const bw = barrelImg.width * F
-            const bh = barrelImg.height * F
-            ctx.drawImage(barrelImg, mx - bw / 2, my - bh + recoilPx(i, b.recoil), bw, bh) // v1.57 后座位移
-          })
-        } else { // 逐层降级：无炮管贴图 → 几何挂点→炮口线
-          ctx.strokeStyle = '#A8A28C'
-          ctx.lineWidth = 1.5
-          mounts.forEach((b, i) => {
-            const sh = recoilPx(i, b.recoil) // v1.57 后座位移
-            const [mx, my] = P30(b.mount[0], b.mount[1])
-            const [zx, zy] = P30(b.muzzle[0], b.muzzle[1])
-            ctx.beginPath()
-            ctx.moveTo(mx, my + sh)
-            ctx.lineTo(zx, zy + sh)
-            ctx.stroke()
-          })
-        }
-      }
-      if (def.type === 'missile' && (def.art?.rack?.show ?? true)) drawPreviewRack(ctx, def, mounts, P30) // 挂载显示预览（满挂；无管也画弹架）；v1.81 改 P30 基准
-    }
-    if (barrelBelow) drawBarrels()
-    if (st.assets.turret) ctx.drawImage(st.assets.turret, ancX - st.assets.turret.width * F / 2, ancY - st.assets.turret.height * F / 2, st.assets.turret.width * F, st.assets.turret.height * F) // 原始尺寸，轴心居中
-    else { ctx.fillStyle = '#4A4740'; ctx.beginPath(); ctx.arc(ancX, ancY, Math.min(def.w, def.h) * cell * 0.2, 0, Math.PI * 2); ctx.fill() } // 无炮身贴图 → 几何圆座
-    if (!barrelBelow) drawBarrels()
-    ctx.imageSmoothingEnabled = true
-  } else { // 几何回退（与游戏内一致：色块底座 + 圆座 + 炮管线；底座「无」→ 跳过色块）
-    if (def.art?.baseAsset !== 'none') {
-      ctx.fillStyle = def.color
-      ctx.fillRect(tpx + 1, tpy + 1, def.w * cell - 2, def.h * cell - 2)
-    }
-    ctx.strokeStyle = '#A8A28C'
-    ctx.lineWidth = 1.5
-    mounts.forEach((b, i) => {
-      const sh = recoilPx(i, b.recoil) // v1.57 后座位移
-      const [mx, my] = P30(b.mount[0], b.mount[1])
-      const [zx, zy] = P30(b.muzzle[0], b.muzzle[1])
-      ctx.beginPath()
-      ctx.moveTo(mx, my + sh)
-      ctx.lineTo(zx, zy + sh)
-      ctx.stroke()
-    })
-    ctx.fillStyle = '#4A4740'
-    ctx.beginPath()
-    ctx.arc(ancX, ancY, Math.min(def.w, def.h) * cell * 0.2, 0, Math.PI * 2)
-    ctx.fill()
-  }
+  drawTurretPreviewCore(ctx, def, { x: tpx, y: tpy, cell }, { chargeProgress: chargeP, firing: contFiring, fireElapsed: fireEl })
   // 炮塔占格轮廓框
   ctx.strokeStyle = '#A8A28C'
   ctx.lineWidth = 1.5
@@ -847,6 +740,27 @@ function ArtPreview({ def }: { def: TurretDef }) {
   )
 }
 
+function HeatPreview({ def }: { def: TurretDef }) {
+  const fortress = FORTRESS_DEFS.find(f => f.id === getSelectedFortressId()) ?? DEFAULT_FORTRESS
+  const curve = simulateTurretHeat(def, fortress, 20, 0.1)
+  const cap = fortress.heatCap
+  const points = curve.map(p => `${(p.time / 20) * 180},${42 - (p.heat / cap) * 38}`).join(' ')
+  const firstOverheat = curve.find(p => p.overheated)?.time
+  const peak = Math.max(...curve.map(p => p.heat))
+  return (
+    <div className="border-2 border-black/40 bg-[#262420] p-1 mt-1" aria-label="热管理预览">
+      <div className="flex items-center justify-between text-[9px] font-bold text-[#EFEBD8]">
+        <span>热管理预览 · 单座持续射击 20s</span>
+        <span>{firstOverheat === undefined ? '稳定' : `${firstOverheat.toFixed(1)}s 过热`} · 峰值 {Math.round(peak)}/{cap}</span>
+      </div>
+      <svg viewBox="0 0 180 46" className="w-full h-12" role="img" aria-label="热量曲线">
+        <line x1="0" y1="23" x2="180" y2="23" stroke="#B3392E" strokeDasharray="3 2" opacity="0.55" />
+        <polyline points={points} fill="none" stroke="#D9762E" strokeWidth="2" />
+      </svg>
+    </div>
+  )
+}
+
 /** 美术配置表单（规范 §7.3/P3）：结构化字段即时生效 + ArtPreview 实时预览 + validateArt 校验 */
 function ArtEditor({ def, onApply }: { def: TurretDef; onApply: (art: TurretDef['art'] | null) => void }) {
   const art = def.art // v1.59：板块常驻显示，无折叠状态
@@ -1160,10 +1074,11 @@ function FortNumInput({ label, value, set, step }: { label: string; value: numbe
   )
 }
 
-function FieldNumInput({ v, step, clearable, onCommit, ph }: {
+function FieldNumInput({ v, step, clearable, disabled, onCommit, ph }: {
   v: unknown
   step?: number
   clearable?: boolean
+  disabled?: boolean
   onCommit: (n: number | undefined) => void
   ph?: string // 未配置时的占位提示（如模板/解析默认值）
 }) {
@@ -1177,6 +1092,7 @@ function FieldNumInput({ v, step, clearable, onCommit, ph }: {
       type="number"
       className="w-full min-w-0 px-1 py-0.5 text-[11px] font-comic border-2 border-black bg-[#EFEBD8]"
       step={step ?? 1}
+      disabled={disabled}
       value={display}
       placeholder={num === undefined ? (ph ?? '未配置') : undefined}
       onFocus={e => { setFocused(true); setText(e.target.value) }}
@@ -1203,15 +1119,18 @@ export default function DebugPanel({
   onRestart,
   onPatchGame,
   onEnterSceneEdit,
+  onExitSceneEdit,
 }: {
   onClose: () => void
   onDeleteDef: (defId: string) => void
-  /** 战场编辑器「应用并重开/恢复默认」：重置本局游戏 */
+  /** 关卡编辑器「应用并重开/恢复默认」：重置本局游戏 */
   onRestart: () => void
   /** 地形/物体数值改动同步进当前局 game state（可选） */
   onPatchGame?: (fn: (g: GameState) => void) => void
-  /** 进入场景编辑模式（地图上笔刷铺设） */
+  /** 打开关卡编辑工作区（地图上直接笔刷铺设） */
   onEnterSceneEdit: () => void
+  /** 离开关卡编辑页签时放弃草稿并恢复试玩关卡 */
+  onExitSceneEdit: () => void
 }) {
   const [, setRev] = useState(0)
   const [tab, setTab] = useState<'turret' | 'ammo' | 'assets' | 'world' | 'editor' | 'fortress' | 'module'>('turret')
@@ -1256,9 +1175,9 @@ export default function DebugPanel({
   const selDef = TURRET_DEFS.find(d => d.id === selectedId) ?? null // 右参数窗当前条目
 
   return (
-    <div className="absolute inset-0 z-40 bg-[#D8D2B8] flex items-stretch">
-      <div className="w-full bg-[#D8D2B8] border-l-4 border-black flex flex-col">
-        <div className="flex items-center gap-2 px-2 py-1.5 border-b-2 border-black bg-[#C9C29F]">
+    <div className={`absolute inset-0 z-40 flex items-stretch ${tab === 'editor' ? 'pointer-events-none bg-transparent' : 'bg-[#D8D2B8]'}`}>
+      <div className={`w-full flex flex-col ${tab === 'editor' ? 'pointer-events-none bg-transparent' : 'bg-[#D8D2B8] border-l-4 border-black'}`}>
+        <div className="pointer-events-auto flex items-center gap-2 px-2 py-1.5 border-b-2 border-black bg-[#C9C29F]">
           <Bug className="w-4 h-4" />
           <span className="font-comic text-sm font-black">DEBUG</span>
           <button
@@ -1278,20 +1197,28 @@ export default function DebugPanel({
           >
             <RotateCcw className="w-3 h-3" /> 重置
           </button>
-          <button className="comic-btn px-1.5 py-0.5" onClick={onClose} title="关闭">
+          <button className="comic-btn px-1.5 py-0.5" onClick={() => { if (tab === 'editor') onExitSceneEdit(); onClose() }} title="关闭">
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
 
         {/* 分页栏 */}
-        <div className="flex border-b-2 border-black bg-[#C9C29F]">
-          {([['turret', '炮塔'], ['ammo', '弹丸库'], ['assets', '素材库'], ['world', '地形/物体'], ['editor', '战场编辑器'], ['fortress', '堡垒'], ['module', '模块']] as const).map(([k, label]) => (
+        <div className="pointer-events-auto flex border-b-2 border-black bg-[#C9C29F]">
+          {([['turret', '炮塔'], ['ammo', '弹丸库'], ['assets', '素材库'], ['world', '地形/物体'], ['editor', '关卡编辑器'], ['fortress', '堡垒'], ['module', '模块']] as const).map(([k, label]) => (
             <button
               key={k}
               className={`flex-1 px-1 py-1 text-[11px] font-comic font-black border-r border-black/40 last:border-r-0 ${
                 tab === k ? 'bg-[#B3392E] text-[#EFEBD8]' : 'hover:bg-black/10'
               }`}
-              onClick={() => setTab(k)}
+              onClick={() => {
+                if (k === 'editor') {
+                  if (tab !== 'editor') onEnterSceneEdit()
+                  setTab('editor')
+                  return
+                }
+                if (tab === 'editor') onExitSceneEdit()
+                setTab(k)
+              }}
             >
               {label}
             </button>
@@ -1453,6 +1380,7 @@ export default function DebugPanel({
                         <TagEditor def={def} bump={bump} />{/* v2.49 索敌标签（常驻显示） */}
                       </div>
                       <div className="w-[380px] max-w-[46%] shrink-0 portrait:w-full portrait:max-w-none">
+                        <HeatPreview def={def} />
                         <ArtEditor
                           def={def}
                           onApply={art => {
@@ -1475,14 +1403,14 @@ export default function DebugPanel({
         {tab === 'ammo' && (<AmmoTab bump={bump} />)}
         {tab === 'assets' && (<AssetsTab bump={bump} />)}
         {tab === 'world' && (<WorldTab bump={bump} onPatchGame={onPatchGame} />)}
-        {tab === 'editor' && (<EditorTab bump={bump} onRestart={onRestart} onEnterSceneEdit={onEnterSceneEdit} />)}
+        {/* 关卡编辑内容由 GamePreview 的左侧列表与右侧画布承载；此处只保留固定 DEBUG 框架。 */}
         {tab === 'fortress' && (<FortressTab onRestart={onRestart} />)}
         {tab === 'module' && (<ModuleTab bump={bump} />)}
       </div>
 
       {/* 配置口令导出小窗 */}
       {exportText !== null && (
-        <div className="absolute inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+        <div className="pointer-events-auto absolute inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
           <div className="comic-card bg-[#EFEBD8] p-3 w-full max-w-sm space-y-2">
             <div className="font-comic font-black text-sm">配置口令（粘贴到另一台设备导入）</div>
             <textarea
@@ -1511,7 +1439,7 @@ export default function DebugPanel({
 
       {/* 配置口令导入小窗 */}
       {importOpen && (
-        <div className="absolute inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+        <div className="pointer-events-auto absolute inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
           <div className="comic-card bg-[#EFEBD8] p-3 w-full max-w-sm space-y-2">
             <div className="font-comic font-black text-sm">导入配置口令</div>
             <textarea
@@ -2334,7 +2262,7 @@ function WorldTab({ bump, onPatchGame }: { bump: () => void; onPatchGame?: (fn: 
   return (
     <div className="flex-1 overflow-y-auto px-2 py-1.5">
       <div className="text-[9px] font-bold text-black/50 mb-1">
-        减速系数/物体数值改动本局即时生效；位置/尺寸/增删在「战场编辑器 → 应用并重开」后生效
+        减速系数/物体数值改动本局即时生效；位置/尺寸/增删在「关卡编辑器 → 应用并重开」后生效
       </div>
 
       <div className="text-[10px] font-black text-black/70 mb-0.5">地形（贴地效果层，不挡弹道/移动）</div>
@@ -2448,18 +2376,28 @@ function WorldTab({ bump, onPatchGame }: { bump: () => void; onPatchGame?: (fn: 
   )
 }
 
-// ================= 战场编辑器 Tab =================
+// ================= 关卡编辑器旧表单（保留为迁移期兜底；主入口已切换到画布工作区） =================
 /** 模块级字段写入（编辑器语义即直接改写 LEVEL 单例），避免在渲染作用域内联突变 */
 function setField<T extends object, K extends keyof T>(obj: T, key: K, val: T[K]) {
   obj[key] = val
 }
 
-function EditorTab({ bump, onRestart, onEnterSceneEdit }: { bump: () => void; onRestart: () => void; onEnterSceneEdit: () => void }) {
+/** @deprecated 旧版精确表单，仅保留供历史配置迁移排查；产品入口不再渲染。 */
+export function EditorTab({ bump, onRestart, onEnterSceneEdit }: { bump: () => void; onRestart: () => void; onEnterSceneEdit: () => void }) {
   // 校验（应用时执行）
   const warnings: string[] = []
   const { core } = LEVEL
   const cellSet = new Set(LEVEL.buildCells)
-  if (LEVEL.buildCells.length === 0) warnings.push('基地格为空：请用场景编辑铺设基地格（边界自动成墙）')
+  const hasBaseDependants = !!core || LEVEL.buildings.length > 0 || LEVEL.initialTurrets.length > 0 || LEVEL.initialWalls.length > 0
+  if (LEVEL.buildCells.length === 0 && hasBaseDependants) warnings.push('已配置核心/建筑/初始炮塔或墙，但基地格为空：请用场景编辑铺设基地格')
+  const zoneInBounds = (z: { x: number; y: number; w: number; h: number }) =>
+    z.w >= 1 && z.h >= 1 && z.x >= 0 && z.y >= 0 && z.x + z.w <= LEVEL.cols && z.y + z.h <= LEVEL.rows
+  if (!zoneInBounds(LEVEL.startZone)) warnings.push('玩家起点区域须完整位于战场内，且尺寸至少为 1×1')
+  if (!zoneInBounds(LEVEL.finishZone)) warnings.push('关卡终点区域须完整位于战场内，且尺寸至少为 1×1')
+  for (const t of LEVEL.triggers) {
+    if (!zoneInBounds(t)) warnings.push(`伏击区域「${t.name}」须完整位于战场内`)
+    if (TRIGGER_ENEMY_KINDS.every(k => t.enemies[k] <= 0)) warnings.push(`伏击区域「${t.name}」未配置敌人`)
+  }
   if (core) {
     const coreOverlap = LEVEL.buildings.some(b =>
       core.x < b.x + b.w && core.x + CORE.w > b.x && core.y < b.y + b.h && core.y + CORE.h > b.y)
@@ -2498,15 +2436,175 @@ function EditorTab({ bump, onRestart, onEnterSceneEdit }: { bump: () => void; on
   return (
     <div className="flex-1 overflow-y-auto px-2 py-1.5">
       <div className="text-[9px] font-bold text-black/50 mb-1">
-        数值表单为精确微调；推荐「进入场景编辑」在地图上笔刷铺设。改动在「应用并重开」后生效
+        数值表单为精确微调；关卡编辑器主入口会直接打开地图工作区。改动在「应用并重开」后生效
       </div>
 
       <button
         className="comic-btn w-full px-2 py-1 text-[11px] font-black mb-1"
         onClick={onEnterSceneEdit}
       >
-        进入场景编辑（地图笔刷铺设）
+        打开关卡场景编辑
       </button>
+
+      <div className="mt-1 mb-0.5 text-[10px] font-black text-black/70">关卡模式与目标</div>
+      <div className="flex items-center gap-1 py-0.5 flex-wrap">
+        <span className="text-[9px] font-bold text-black/50">模式</span>
+        <select
+          className="px-1 py-0 text-[10px] font-comic border border-black bg-[#EFEBD8]"
+          value={LEVEL.mode}
+          onChange={e => {
+            if (e.target.value === 'advance') {
+              LEVEL.mode = 'advance'
+              LEVEL.objective = { type: 'reach' }
+            } else {
+              LEVEL.mode = 'defend'
+              LEVEL.objective = { type: 'defend', waves: 6, waveWait: true, restTime: DEFEND_REST_TIME_DEFAULT, overlapTime: DEFEND_OVERLAP_TIME_DEFAULT }
+            }
+            bump()
+          }}
+        >
+          <option value="defend">防守模式</option>
+          <option value="advance">推进模式</option>
+        </select>
+        <span className="text-[9px] font-bold text-black/50">类型</span>
+        {LEVEL.mode === 'advance' ? (
+          <span className="px-1 py-0 text-[10px] font-comic border border-black bg-[#D9A441]/20">抵达终点</span>
+        ) : (
+          <select
+            className="px-1 py-0 text-[10px] font-comic border border-black bg-[#EFEBD8]"
+            value={LEVEL.objective.type}
+            onChange={e => {
+              LEVEL.objective = e.target.value === 'survive'
+                ? { type: 'survive', duration: 180 }
+                : { type: 'defend', waves: 6, waveWait: true, restTime: DEFEND_REST_TIME_DEFAULT, overlapTime: DEFEND_OVERLAP_TIME_DEFAULT }
+              bump()
+            }}
+          >
+            <option value="defend">保卫波次</option>
+            <option value="survive">生存计时</option>
+          </select>
+        )}
+        {LEVEL.objective.type === 'defend' ? (
+          <>
+            <span className="text-[9px] font-bold text-black/50">总波数</span>
+            <span className="w-14 shrink-0">
+              <FieldNumInput v={LEVEL.objective.waves} step={1} onCommit={n => {
+                if (n === undefined || LEVEL.objective.type !== 'defend') return
+                LEVEL.objective.waves = Math.max(OBJECTIVE_WAVES_MIN, Math.min(OBJECTIVE_WAVES_MAX, Math.round(n)))
+                bump()
+              }} />
+            </span>
+            <span className="text-[9px] font-bold text-black/50">守完最后一波即胜利</span>
+            <span className="text-[9px] font-bold text-black/50">波次等待</span>
+            <select
+              className="px-1 py-0 text-[10px] font-comic border border-black bg-[#EFEBD8]"
+              value={(LEVEL.objective.waveWait ?? true) ? 'yes' : 'no'}
+              onChange={e => {
+                if (LEVEL.objective.type !== 'defend') return
+                LEVEL.objective.waveWait = e.target.value === 'yes'
+                bump()
+              }}
+            >
+              <option value="yes">是</option>
+              <option value="no">否</option>
+            </select>
+            <span className="text-[9px] font-bold text-black/50">休整(秒)</span>
+            <span className="w-16 shrink-0 opacity-100 has-[:disabled]:opacity-40">
+              <FieldNumInput v={LEVEL.objective.restTime ?? DEFEND_REST_TIME_DEFAULT} step={5} disabled={LEVEL.objective.waveWait === false} onCommit={n => {
+                if (n === undefined || LEVEL.objective.type !== 'defend') return
+                LEVEL.objective.restTime = Math.max(0, Math.min(DEFEND_TIME_MAX, n))
+                bump()
+              }} />
+            </span>
+            <span className="text-[9px] font-bold text-black/50">接踵(秒)</span>
+            <span className="w-16 shrink-0 opacity-100 has-[:disabled]:opacity-40">
+              <FieldNumInput v={LEVEL.objective.overlapTime ?? DEFEND_OVERLAP_TIME_DEFAULT} step={1} disabled={LEVEL.objective.waveWait !== false} onCommit={n => {
+                if (n === undefined || LEVEL.objective.type !== 'defend') return
+                LEVEL.objective.overlapTime = Math.max(0, Math.min(DEFEND_TIME_MAX, n))
+                bump()
+              }} />
+            </span>
+          </>
+        ) : LEVEL.objective.type === 'survive' ? (
+          <>
+            <span className="text-[9px] font-bold text-black/50">时长(秒)</span>
+            <span className="w-16 shrink-0">
+              <FieldNumInput v={LEVEL.objective.duration} step={10} onCommit={n => {
+                if (n === undefined || LEVEL.objective.type !== 'survive') return
+                LEVEL.objective.duration = Math.max(SURVIVE_SECONDS_MIN, Math.min(SURVIVE_SECONDS_MAX, Math.round(n)))
+                bump()
+              }} />
+            </span>
+            <span className="text-[9px] font-bold text-black/50">仅交战阶段计时，波间可整备</span>
+          </>
+        ) : <span className="text-[9px] font-bold text-black/50">开局直接交战，堡垒中心进入终点即胜利</span>}
+      </div>
+
+      {LEVEL.mode === 'advance' && (
+        <div className="mt-0.5 border-y border-black/20 py-0.5">
+          {([['玩家起点', LEVEL.startZone], ['关卡终点', LEVEL.finishZone]] as const).map(([label, z]) => (
+            <div key={label} className="flex items-center gap-1 py-0.5 flex-wrap">
+              <span className="w-12 text-[9px] font-black text-black/70">{label}</span>
+              <span className="text-[9px] font-bold text-black/50">x</span><NumInput v={z.x} w="w-8" set={n => { setField(z, 'x', Math.round(n)); bump() }} />
+              <span className="text-[9px] font-bold text-black/50">y</span><NumInput v={z.y} w="w-8" set={n => { setField(z, 'y', Math.round(n)); bump() }} />
+              <span className="text-[9px] font-bold text-black/50">w</span><NumInput v={z.w} w="w-8" set={n => { setField(z, 'w', Math.round(n)); bump() }} />
+              <span className="text-[9px] font-bold text-black/50">h</span><NumInput v={z.h} w="w-8" set={n => { setField(z, 'h', Math.round(n)); bump() }} />
+            </div>
+          ))}
+          <div className="text-[9px] font-bold text-black/45">可用场景编辑中的“玩家起点/关卡终点”笔刷快速移动区域</div>
+        </div>
+      )}
+
+      <div className="text-[10px] font-black text-black/70 mt-2 mb-0.5">区域伏击触发器（进入区域时触发，须离开后才可再次触发）</div>
+      {LEVEL.triggers.map((t, i) => (
+        <div
+          key={t.id}
+          className={`py-1 px-1 border-b border-black/20 cursor-pointer ${BRUSH_DEFAULTS.selectedTriggerId === t.id ? 'bg-[#B3392E]/10' : ''}`}
+          onClick={() => { BRUSH_DEFAULTS.selectedTriggerId = t.id; bump() }}
+        >
+          <div className="flex items-center gap-1 flex-wrap">
+            <label className="flex items-center gap-0.5 text-[9px] font-black text-black/60">
+              <input type="checkbox" className="w-3 h-3 accent-[#B3392E]" checked={t.enabled} onChange={e => { t.enabled = e.target.checked; bump() }} />启用
+            </label>
+            <input className="w-20 min-w-0 px-0.5 py-0 text-[10px] font-comic border border-black bg-[#EFEBD8]" value={t.name} onChange={e => { t.name = e.target.value; bump() }} />
+            {(['x', 'y', 'w', 'h'] as const).map(k => (
+              <span key={k} className="flex items-center gap-0.5">
+                <span className="text-[9px] font-bold text-black/50">{k}</span>
+                <NumInput v={t[k]} w="w-8" set={n => { t[k] = Math.round(n); bump() }} />
+              </span>
+            ))}
+            <button className="comic-btn px-1 py-0 text-[9px] ml-auto" onClick={e => {
+              e.stopPropagation()
+              LEVEL.triggers.splice(i, 1)
+              if (BRUSH_DEFAULTS.selectedTriggerId === t.id) BRUSH_DEFAULTS.selectedTriggerId = null
+              bump()
+            }}>删</button>
+          </div>
+          <div className="flex items-center gap-1 py-0.5 flex-wrap">
+            <span className="text-[9px] font-bold text-black/50">次数</span><NumInput v={t.activationLimit} w="w-8" set={n => { t.activationLimit = Math.max(1, Math.round(n)); bump() }} />
+            <span className="text-[9px] font-bold text-black/50">冷却(s)</span><NumInput v={t.cooldown} w="w-10" set={n => { t.cooldown = Math.max(0, n); bump() }} />
+            <span className="text-[9px] font-bold text-black/50">延迟(s)</span><NumInput v={t.delay} w="w-10" set={n => { t.delay = Math.max(0, n); bump() }} />
+            <span className="text-[9px] font-bold text-black/50">间隔(s)</span><NumInput v={t.interval} w="w-10" set={n => { t.interval = Math.max(0, n); bump() }} />
+          </div>
+          <div className="flex items-center gap-1 flex-wrap">
+            {TRIGGER_ENEMY_KINDS.map(k => (
+              <span key={k} className="flex items-center gap-0.5">
+                <span className="text-[9px] font-bold text-black/50">{ENEMY_DEFS[k].name}</span>
+                <NumInput v={t.enemies[k]} w="w-8" set={n => { t.enemies[k] = Math.max(0, Math.round(n)); bump() }} />
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
+      <button className="comic-btn px-1.5 py-0.5 text-[10px] flex items-center gap-0.5 mt-1" onClick={() => {
+        const id = Math.max(0, ...LEVEL.triggers.map(t => t.id)) + 1
+        const enemies = emptyTriggerEnemies()
+        enemies.walker = 4
+        enemies.runner = 2
+        LEVEL.triggers.push({ id, name: `伏击 ${id}`, enabled: true, x: Math.max(0, Math.floor(LEVEL.cols / 2) - 4), y: Math.max(0, LEVEL.rows - 12), w: 8, h: 6, activationLimit: 1, cooldown: 10, delay: 0.5, interval: 0.35, enemies, actions: [{ type: 'wait', seconds: 0.5 }, { type: 'spawn', enemies: structuredClone(enemies), interval: 0.35 }] })
+        BRUSH_DEFAULTS.selectedTriggerId = id
+        bump()
+      }}><Plus className="w-3 h-3" /> 新增伏击区域</button>
 
       <div className="flex items-center gap-1 py-0.5">
         <span className="text-[10px] font-black text-black/70">宽度(格)</span>
@@ -2592,16 +2690,6 @@ function EditorTab({ bump, onRestart, onEnterSceneEdit }: { bump: () => void; on
           >删</button>
         </div>
       ))}
-      <button
-        className="comic-btn px-1.5 py-0.5 text-[10px] flex items-center gap-0.5 mt-1"
-        onClick={() => {
-          const id = Math.max(999, ...LEVEL.buildings.map(b => b.id)) + 1
-          LEVEL.buildings.push({ id, name: '新建筑', x: 4, y: 24, w: 2, h: 1, color: '#8A8272' })
-          bump()
-        }}
-      >
-        <Plus className="w-3 h-3" /> 新增建筑
-      </button>
 
       <div className="text-[10px] font-black text-black/70 mt-2 mb-0.5">初始炮塔（开局免费）</div>
       {LEVEL.initialTurrets.map((t, i) => (
@@ -2625,12 +2713,6 @@ function EditorTab({ bump, onRestart, onEnterSceneEdit }: { bump: () => void; on
           >删</button>
         </div>
       ))}
-      <button
-        className="comic-btn px-1.5 py-0.5 text-[10px] flex items-center gap-0.5 mt-1"
-        onClick={() => { LEVEL.initialTurrets.push({ defId: TURRET_DEFS[0]?.id ?? 'mg', x: 5, y: 22 }); bump() }}
-      >
-        <Plus className="w-3 h-3" /> 新增初始炮塔
-      </button>
 
       <div className="text-[10px] font-black text-black/70 mt-2 mb-0.5">笔刷默认值（场景编辑用）</div>
       <div className="flex items-center gap-1 py-0.5 flex-wrap">
@@ -2726,7 +2808,9 @@ const MODULE_BONUS_FIELDS: [keyof ModuleDef, string, number, string][] = [ // [�
   ['ammoRegen', '弹药(/s)', 0.5, '弹药回复 +发/s'], ['ammoCap', '弹药上限', 5, '弹药储存上限 +'],
   ['cooling', '散热(/s)', 1, '堡垒散热 +点/s（全额叠加不摊薄）'], ['hpBoost', '血量+', 50, '船体血量上限加成'],
   ['speedBoost', '移速+', 0.05, '移动速度加成（格/s，可负）'], ['turnBoost', '转向+', 5, '转向速度加成（度/s，可负）'],
-  ['repair', '维修/s', 1, '修复功率池 hp/s（均摊到受损炮塔）'], ['rangeBoost', '射程+', 0.05, '射程增益池（比例，0.5=+50%，均摊）'],
+  ['repair', '维修/s', 1, '修复功率池 hp/s（结构、装甲面与受损炮塔共同均摊）'], ['rangeBoost', '射程+', 0.05, '射程增益池（比例，0.5=+50%，均摊）'],
+  ['shieldMax', '护盾上限', 10, '护盾容量加成；无发生器时不生效'], ['shieldRegen', '护盾回复', 1, '护盾回复 +点/s；无发生器时不生效'],
+  ['shieldEnergyPerPoint', '回复耗电', 0.05, '发生器每回复 1 点护盾消耗的电量'],
 ]
 const ALLY_KIND_NAME: Record<AllyKind, string> = { soldier: '士兵', tank: '坦克', plane: '战斗机' }
 
@@ -2738,7 +2822,10 @@ function ModuleTab({ bump }: { bump: () => void }) {
     if (!md.id.trim() || MODULE_DEFS.some(d => d !== md && d.id === md.id)) errs.push('id 为空或与其他模块重复')
     if (!(md.w >= 1) || !(md.h >= 1)) errs.push('占格 w/h 须 ≥ 1')
     if (!(md.cost >= 0)) errs.push('造价须 ≥ 0')
+    if (md.maxCount !== undefined && (!Number.isInteger(md.maxCount) || md.maxCount < 1)) errs.push('数量上限须为 ≥1 的整数，或留空表示不限')
     if (md.produce && (!(md.produce.interval > 0) || !(md.produce.cap >= 1))) errs.push('生产周期须 >0 且存活上限 ≥ 1')
+    if ((md.shieldMax ?? 0) < 0 || (md.shieldRegen ?? 0) < 0 || (md.shieldEnergyPerPoint ?? 0) < 0) errs.push('护盾上限/回复/耗电不得为负')
+    if (md.shieldGenerator && (!(md.shieldMax! > 0) || !(md.shieldRegen! > 0))) errs.push('护盾发生器须配置正数的护盾上限与回复速度')
   }
   // v2.32：id 全自动（唯一兜底），编辑器不再提供 id 输入框
   const genId = (base: string) => {
@@ -2845,7 +2932,7 @@ function ModuleTab({ bump }: { bump: () => void }) {
             className={`px-1 py-0.5 text-left text-[10px] font-comic border border-black/30 ${d.id === selectedId ? 'bg-[#B3392E] text-[#EFEBD8]' : 'hover:bg-black/10'}`}
           >
             <span className="inline-block w-2.5 h-2.5 mr-1 border border-black/40 align-middle" style={{ background: d.color }} />
-            {d.name}<span className="block text-[8px] opacity-60">{d.id} · {d.w}×{d.h}</span>
+            {d.name}<span className="block text-[8px] opacity-60">{d.id} · {d.w}×{d.h}{d.maxCount !== undefined ? ` · 上限${d.maxCount}` : ''}</span>
           </button>
         ))}
         <div className="flex gap-1 mt-1">
@@ -2869,6 +2956,15 @@ function ModuleTab({ bump }: { bump: () => void }) {
                 <input value={md.name} onChange={e => { md.name = e.target.value; bump() }} className="w-28 px-1 py-0.5 text-[10px] font-comic border-2 border-black bg-[#EFEBD8]" />
               </label>
               {req('造价', 'cost', 10)}
+              <label className="flex items-center gap-1">
+                <TipLabel text="数量上限" tip="同一种模块最多可装多少个；留空表示不限" className="text-[9px] font-bold text-black/60 w-12 shrink-0" />
+                <FieldNumInput v={md.maxCount} step={1} clearable onCommit={n => {
+                  // 模块编辑器沿用可变注册表；保存/导出时再统一快照。
+                  // eslint-disable-next-line react-hooks/immutability
+                  md.maxCount = n === undefined ? undefined : Math.max(1, Math.floor(n))
+                  bump()
+                }} />
+              </label>
               <span className="text-[9px] text-black/55 self-center">包围盒 {md.w}×{md.h}（铺格自动）</span>
               <label className="flex items-center gap-1">
                 <TipLabel text="颜色" tip="无贴图时的色块颜色（建造卡片也用）" className="text-[9px] font-bold text-black/60 w-12 shrink-0" />
@@ -2916,10 +3012,27 @@ function ModuleTab({ bump }: { bump: () => void }) {
                 {shapeConnWarn && <span className="text-[9px] font-bold text-[#B3392E]">{'\u26a0'}{shapeConnWarn}</span>}
                 {GRID > GRID5 && <span className="text-[9px] font-bold text-[#B3392E]">{'\u26a0'}遗留模块超出 5×5 底格，点击挖格收缩后自动恢复 5×5</span>}
               </div>
+              {(() => {
+                const fortress = FORTRESS_DEFS.find(f => f.id === getSelectedFortressId()) ?? DEFAULT_FORTRESS
+                const fits = modulePlanningFits(fortress, md)
+                const cells = md.shape?.length ?? md.w * md.h
+                return <div className="mt-1 p-1 border border-black/30 bg-[#EFEBD8] text-[9px] font-bold text-black/60" aria-label="模块规划参考">
+                  规划参考 · 当前出战「{fortress.name}」内部 {fortressInteriorSet(fortress).size} 格 · 本模块占 {cells} 格 · 可放起点：0° {fits.normal} 个 / 90° {fits.rotated} 个
+                </div>
+              })()}
             </div>
             {/* 加成字段（留空=无此加成） */}
             <div className="border-t border-black/15 pt-1">
               <div className="text-[9px] font-bold text-black/50 mb-0.5">加成（留空 = 无此项）：</div>
+              <label className="flex items-center gap-1 mb-1 text-[9px] font-bold text-black/60">
+                <input type="checkbox" checked={md.shieldGenerator ?? false} onChange={e => {
+                  // 模块编辑器沿用可变注册表；保存/导出时再统一快照。
+                  // eslint-disable-next-line react-hooks/immutability
+                  md.shieldGenerator = e.target.checked || undefined
+                  bump()
+                }} className="w-3 h-3 accent-[#B3392E]" />
+                护盾发生器（勾选后启用全部护盾加成；数量由上方通用上限控制）
+              </label>
               <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
                 {MODULE_BONUS_FIELDS.map(([key, label, step, tip]) => (
                   <label className="flex items-center gap-1" key={key}>
@@ -2990,6 +3103,7 @@ function FortressTab({ onRestart }: { onRestart: () => void }) {
   // 贴图原始尺寸缓存：预览按原比例 1:1 显示（1 贴图像素 = 1 预览像素），中心对准底格中心
   const [spriteDims, setSpriteDims] = useState<Record<string, { w: number; h: number }>>({})
   const [msg, setMsg] = useState('')
+  const [decalPick, setDecalPick] = useState('')
 
   const customs = listCustomFortresses()
   const baseDef = FORTRESS_DEFS.find(f => f.id === selectedId) ?? FORTRESS_DEFS[0]
@@ -3000,8 +3114,13 @@ function FortressTab({ onRestart }: { onRestart: () => void }) {
   const errors = draft ? validateFortressDef(draft) : []
   const shapeSet = fortressShapeSet(cur)
   const iSet = fortressInteriorSet(cur)
+  const decalAssets = filterAssets('decal')
+  const fortressBaseAssets = filterAssets('fortressBase')
+  const fortressBodyAssets = filterAssets('fortressBody')
+  const trackAssets = filterAssets('wheel')
+  const wheelAssets = filterAssets('wheel')
 
-  const select = (id: string) => { setSelectedId(id); setDraft(null); setHpSel(null); setMsg(''); resetHist() }
+  const select = (id: string) => { setSelectedId(id); setDraft(null); setHpSel(null); setDecalPick(''); setMsg(''); resetHist() }
 
   // v2.29 撤销/重做：历史栈（cap 50）——mutate 压栈，800ms 内连续编辑（打字/连点）合并为一步；切换/保存/新建/复制/删除清空
   const histRef = useRef<{ stack: FortressDef[]; idx: number; lastPush: number }>({ stack: [], idx: -1, lastPush: 0 })
@@ -3080,6 +3199,14 @@ function FortressTab({ onRestart }: { onRestart: () => void }) {
     d.interiorCells = srcDef.interiorCells ? [...srcDef.interiorCells] : undefined
     d.interiorSpecials = srcDef.interiorSpecials ? structuredClone(srcDef.interiorSpecials) : undefined
     d.effects = srcDef.effects ? structuredClone(srcDef.effects) : undefined
+    d.paint = srcDef.paint ? structuredClone(srcDef.paint) : undefined
+    d.decals = srcDef.decals ? structuredClone(srcDef.decals) : undefined
+    d.spriteBase = srcDef.spriteBase
+    d.spriteBody = srcDef.spriteBody
+    d.chassis = srcDef.chassis
+    d.tracks = srcDef.tracks ? structuredClone(srcDef.tracks) : undefined
+    d.wheels = srcDef.wheels ? structuredClone(srcDef.wheels) : undefined
+    d.armor = srcDef.armor ? structuredClone(srcDef.armor) : undefined
     d.hp = srcDef.hp; d.speed = srcDef.speed; d.turnSpeed = srcDef.turnSpeed; d.accel = srcDef.accel
     d.heatCap = srcDef.heatCap; d.heatDissipation = srcDef.heatDissipation
     d.hardpoints = structuredClone(srcDef.hardpoints)
@@ -3113,31 +3240,6 @@ function FortressTab({ onRestart }: { onRestart: () => void }) {
     bump()
     setMsg(restart ? '已设为出战并重开' : '已设为出战（下一局生效）')
     if (restart) onRestart()
-  }
-
-  const onUpload = (which: 'spriteBase' | 'spriteBody', f: File | undefined) => {
-    if (!f) return
-    const r = new FileReader()
-    r.onload = () => {
-      const img = new Image()
-      img.onload = () => {
-        const MAX = 384 // 贴图最长边上限：压缩 dataURL 体积，避免 localStorage 超配额
-        const scale = Math.min(1, MAX / Math.max(img.width, img.height, 1))
-        const cv = document.createElement('canvas')
-        cv.width = Math.max(1, Math.round(img.width * scale))
-        cv.height = Math.max(1, Math.round(img.height * scale))
-        const cx = cv.getContext('2d')
-        if (!cx) { setMsg('\u26a0贴图处理失败'); return }
-        cx.drawImage(img, 0, 0, cv.width, cv.height)
-        const url = cv.toDataURL('image/png')
-        mutate(d => { d[which] = url })
-        setMsg(`贴图已压缩为 ${cv.width}\u00d7${cv.height} 写入草稿（记得点保存）`)
-      }
-      img.onerror = () => setMsg('\u26a0图片读取失败')
-      img.src = String(r.result)
-    }
-    r.onerror = () => setMsg('\u26a0文件读取失败')
-    r.readAsDataURL(f)
   }
 
   // 画布点击：按当前模式/子工具分发
@@ -3248,7 +3350,8 @@ function FortressTab({ onRestart }: { onRestart: () => void }) {
   const FX_COLOR: Record<FortressEffectKind, string> = { smoke: '#888880', flame: '#D87828', dust: '#96825F', spark: '#F0DC78' }
   useEffect(() => {
     const trackSrcs = (cur.tracks ?? []).map(t => getAsset(t.tile)?.src ?? t.tile) // v1.87：履带瓦片也进尺寸缓存（预览用）
-    for (let src of [cur.spriteBase, cur.spriteBody, ...trackSrcs]) {
+    const wheelSrcs = (cur.wheels ?? []).map(w => resolveAssetSrc(w.sprite)).filter((src): src is string => !!src)
+    for (let src of [resolveAssetSrc(cur.spriteBase), resolveAssetSrc(cur.spriteBody), ...trackSrcs, ...wheelSrcs]) {
       if (!src) continue
       src = resCompatUrl(src) // v2.5 兼容旧 /sprites/ 路径
       if (spriteDims[src]) continue
@@ -3259,6 +3362,7 @@ function FortressTab({ onRestart }: { onRestart: () => void }) {
   })
   /** 贴图预览元素：原尺寸 1:1，中心对准底格（包围盒）中心 */
   const spriteImg = (src: string | undefined, key: string) => {
+    src = resolveAssetSrc(src)
     if (!src) return null
     src = resCompatUrl(src) // v2.5 兼容旧 /sprites/ 路径
     const dm = spriteDims[src]
@@ -3332,6 +3436,10 @@ function FortressTab({ onRestart }: { onRestart: () => void }) {
           />
         </label>
         {numInput('耐久', cur.hp, v => mutate(d => { d.hp = v }), 100)}
+        {numInput('前装甲', cur.armor?.front ?? 0, v => mutate(d => { d.armor = { ...(d.armor ?? { front: 0, rear: 0, left: 0, right: 0 }), front: Math.max(0, v) } }), 1)}
+        {numInput('后装甲', cur.armor?.rear ?? 0, v => mutate(d => { d.armor = { ...(d.armor ?? { front: 0, rear: 0, left: 0, right: 0 }), rear: Math.max(0, v) } }), 1)}
+        {numInput('左装甲', cur.armor?.left ?? 0, v => mutate(d => { d.armor = { ...(d.armor ?? { front: 0, rear: 0, left: 0, right: 0 }), left: Math.max(0, v) } }), 1)}
+        {numInput('右装甲', cur.armor?.right ?? 0, v => mutate(d => { d.armor = { ...(d.armor ?? { front: 0, rear: 0, left: 0, right: 0 }), right: Math.max(0, v) } }), 1)}
         {numInput('移动速度', cur.speed, v => mutate(d => { d.speed = v }), 0.1)}
         {numInput('加速度', cur.accel, v => mutate(d => { d.accel = v }), 0.5)}
         {numInput('刹停惯性', cur.brakeInertia ?? 5, v => mutate(d => { d.brakeInertia = v }), 1)}
@@ -3369,20 +3477,63 @@ function FortressTab({ onRestart }: { onRestart: () => void }) {
 
       {/* 贴图板块（属性右侧）：底座贴图 / 主体贴图 */}
       <div className="border-2 border-black bg-[#D2CCA9] p-1.5 shrink-0 flex flex-col gap-1.5">
-        {(['spriteBase', 'spriteBody'] as const).map(which => (
-          <div key={which} className="flex items-center gap-1.5">
-            <span className="text-[10px] font-comic text-black/70">{which === 'spriteBase' ? '底座贴图' : '主体贴图'}</span>
-            {cur[which] && <img src={cur[which]} alt="" className="w-10 h-10 object-contain border border-black/40 bg-black/10" />}
-            <label className="comic-btn px-1.5 py-0.5 text-[10px] cursor-pointer">
-              上传
-              <input type="file" accept="image/*" className="hidden" onChange={e => { onUpload(which, e.target.files?.[0]); e.target.value = '' }} />
-            </label>
-            {cur[which] && <button className="comic-btn px-1.5 py-0.5 text-[10px]" onClick={() => mutate(d => { delete d[which] })}>清除</button>}
-            <span className="text-[9px] text-black/50">仅视觉 · 原尺寸居中不缩放（超过 384px 会压缩）</span>
+        {(['spriteBase', 'spriteBody'] as const).map(which => {
+          const assets = which === 'spriteBase' ? fortressBaseAssets : fortressBodyAssets
+          const current = assets.find(a => a.id === cur[which] || a.src === cur[which])
+          const legacy = cur[which] && !current ? cur[which] : ''
+          return <div key={which} className="flex items-center gap-1.5">
+            <span className="text-[10px] font-comic text-black/70">{which === 'spriteBase' ? '底座素材' : '主体素材'}</span>
+            {cur[which] && <img src={resolveAssetSrc(cur[which])} alt="" className="w-10 h-10 object-contain border border-black/40 bg-black/10" />}
+            <select
+              aria-label={which === 'spriteBase' ? '堡垒底座素材' : '堡垒主体素材'}
+              className="min-w-40 px-1 py-0.5 text-[10px] font-comic border-2 border-black bg-[#EFEBD8]"
+              value={current?.id ?? legacy}
+              onChange={e => mutate(d => { if (e.target.value) d[which] = e.target.value; else delete d[which] })}
+            >
+              <option value="">无（程序化回退）</option>
+              {legacy && <option value={legacy}>旧内嵌贴图（保留）</option>}
+              <optgroup label="内置">{assets.filter(a => a.builtin).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</optgroup>
+              <optgroup label="已上传">{assets.filter(a => !a.builtin).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</optgroup>
+            </select>
+            <span className="text-[9px] text-black/50">请在素材库上传并归类 · 仅视觉 · 原尺寸居中</span>
           </div>
-        ))}
+        })}
       </div>
       </div>
+
+      {view === 'exterior' && (
+        <div className="border-2 border-black bg-[#D2CCA9] p-1.5 flex flex-col gap-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[10px] font-black text-black/70">涂装与徽记</span>
+            <label className="flex items-center gap-1 text-[10px] font-comic">主体色
+              <input type="color" value={cur.paint?.base ?? cur.color} onChange={e => mutate(d => { d.paint = { base: e.target.value, accent: d.paint?.accent ?? '#C8B568' } })} className="w-8 h-6 border-2 border-black" />
+            </label>
+            <label className="flex items-center gap-1 text-[10px] font-comic">强调色
+              <input type="color" value={cur.paint?.accent ?? '#C8B568'} onChange={e => mutate(d => { d.paint = { base: d.paint?.base ?? d.color, accent: e.target.value } })} className="w-8 h-6 border-2 border-black" />
+            </label>
+            {cur.paint && <button className="comic-btn px-1.5 py-0.5 text-[10px]" onClick={() => mutate(d => { delete d.paint })}>清除涂装</button>}
+            <select aria-label="待添加徽记素材" value={decalPick} onChange={e => setDecalPick(e.target.value)} className="max-w-44 px-1 py-0.5 text-[10px] font-comic border-2 border-black bg-[#EFEBD8]">
+              <option value="">选择素材库徽记</option>
+              <optgroup label="内置">{decalAssets.filter(a => a.builtin).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</optgroup>
+              <optgroup label="已上传">{decalAssets.filter(a => !a.builtin).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</optgroup>
+            </select>
+            <button className="comic-btn px-1.5 py-0.5 text-[10px]" disabled={!decalPick} onClick={() => mutate(d => { d.decals = [...(d.decals ?? []), { id: `decal-${Date.now()}`, asset: decalPick, x: d.w / 2, y: d.h / 2, size: 1, angle: 0 }] })}>＋徽记</button>
+          </div>
+          {(cur.decals ?? []).map(decal => (
+            <div key={decal.id} className="flex flex-wrap items-center gap-1 border border-black/30 p-1">
+              <select value={decal.asset} onChange={e => mutate(d => { d.decals!.find(x => x.id === decal.id)!.asset = e.target.value })} className="max-w-36 px-1 text-[10px] font-comic border border-black bg-[#EFEBD8]">
+                {decalAssets.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+              {numInput('x', decal.x, v => mutate(d => { d.decals!.find(x => x.id === decal.id)!.x = v }), 0.1)}
+              {numInput('y', decal.y, v => mutate(d => { d.decals!.find(x => x.id === decal.id)!.y = v }), 0.1)}
+              {numInput('尺寸', decal.size, v => mutate(d => { d.decals!.find(x => x.id === decal.id)!.size = Math.max(0.1, v) }), 0.1)}
+              {numInput('角度', decal.angle ?? 0, v => mutate(d => { d.decals!.find(x => x.id === decal.id)!.angle = v }), 5)}
+              <button className="text-[#B3392E] font-black" onClick={() => mutate(d => { d.decals = d.decals?.filter(x => x.id !== decal.id); if (d.decals?.length === 0) delete d.decals })}>×</button>
+            </div>
+          ))}
+          {(cur.decals ?? []).length === 0 && <span className="text-[9px] text-black/45">请先在素材库上传并分类为“徽记”，再从上方选择添加。</span>}
+        </div>
+      )}
 
       {/* 编辑区：PC 端预览置左 + 参数置右，移动端纵向堆叠 */}
       <div className="flex flex-col lg:flex-row gap-1.5 items-start">
@@ -3418,6 +3569,13 @@ function FortressTab({ onRestart }: { onRestart: () => void }) {
           </>)}
         </div>
         <svg width={gridCols * px} height={gridRows * px} className="block mx-auto border border-black/30 bg-[#EFEBD8] touch-none select-none">
+          <defs>
+            <filter id="fortress-paint-preview" colorInterpolationFilters="sRGB">
+              <feFlood floodColor={cur.paint?.base ?? cur.color} result="paint" />
+              <feBlend in="SourceGraphic" in2="paint" mode="multiply" result="colored" />
+              <feComposite in="colored" in2="SourceAlpha" operator="in" />
+            </filter>
+          </defs>
           {view === 'interior' && spriteImg(cur.spriteBase, 'base-i') /* 内部模式：底座贴图垫底参照（原尺寸，主体不显示） */}
           {Array.from({ length: gridCols * gridRows }, (_, i) => {
             const gx = i % gridCols // 画布格（渲染位置）
@@ -3468,28 +3626,41 @@ function FortressTab({ onRestart }: { onRestart: () => void }) {
             }
             return <g key={t.id}>{els}</g>
           })}
-          {view === 'exterior' && (cur.wheels ?? []).map(wd => { // v2.51：预览按当前设置渲染轮子（δ=0 静态；转向轮画红色轮毂参考线）
-            const wpx51 = (wd.x + offX) * px
-            const wpy51 = (wd.y + offY) * px
-            const rpx51 = Math.max(1.5, wd.r * px)
+          {view === 'exterior' && (cur.wheels ?? []).map(wd => { // 原尺寸轮胎；pair 与战场共用中心线镜像展开
             const src51 = wd.sprite ? (getAsset(wd.sprite)?.src ?? wd.sprite) : null
             const dm51 = src51 ? spriteDims[src51] : undefined
-            const twW = rpx51 * 1.1, thH = rpx51 * 2
+            const sizeScale = px / BASE_CELL
+            const twW = (dm51?.w ?? 11) * sizeScale
+            const thH = (dm51?.h ?? 20) * sizeScale
             return (
               <g key={wd.id} pointerEvents="none">
-                {src51 && dm51 ? (
-                  <image href={src51} x={wpx51 - (dm51.w / dm51.h) * thH / 2} y={wpy51 - thH / 2}
-                    width={(dm51.w / dm51.h) * thH} height={thH} preserveAspectRatio="none" />
-                ) : (
-                  <rect x={wpx51 - twW / 2} y={wpy51 - thH / 2} width={twW} height={thH} rx={twW * 0.35}
-                    fill="#2A2A28" stroke="#1A1A18" strokeWidth={0.8} />
-                )}
-                <line x1={wpx51} y1={wpy51 - thH * 0.28} x2={wpx51} y2={wpy51 + thH * 0.28}
-                  stroke={wd.steered ? '#B3392E' : '#8C8878'} strokeWidth={0.8} />
+                {wheelPlacements(cur, wd).map(p => {
+                  const wpx51 = (p.x + offX) * px
+                  const wpy51 = (p.y + offY) * px
+                  return <g key={p.mirror ? 'mirror' : 'single'}>
+                    {src51 && dm51 ? (
+                      <image href={src51} x={wpx51 - twW / 2} y={wpy51 - thH / 2} width={twW} height={thH} />
+                    ) : (
+                      <rect x={wpx51 - twW / 2} y={wpy51 - thH / 2} width={twW} height={thH} rx={twW * 0.35}
+                        fill="#2A2A28" stroke="#1A1A18" strokeWidth={0.8} />
+                    )}
+                    <ellipse cx={wpx51} cy={wpy51} rx={twW / 2} ry={thH / 2} fill="none" stroke="#B3392E" strokeWidth={0.8} strokeOpacity={0.5} />
+                    <line x1={wpx51} y1={wpy51 - thH * 0.28} x2={wpx51} y2={wpy51 + thH * 0.28}
+                      stroke={wd.steered ? '#B3392E' : '#8C8878'} strokeWidth={0.8} />
+                  </g>
+                })}
               </g>
             )
           })}
-          {view === 'exterior' && spriteImg(cur.spriteBody, 'body-e') /* 主体贴图：原尺寸居中，盖在底座之上 */}
+          {view === 'exterior' && <g filter={cur.paint?.base ? 'url(#fortress-paint-preview)' : undefined}>{spriteImg(cur.spriteBody, 'body-e')}</g> /* 主体贴图：原尺寸居中，乘法染色 */}
+          {view === 'exterior' && (cur.decals ?? []).map(decal => {
+            const a = getAsset(decal.asset)
+            if (!a) return null
+            const sz = Math.max(0.1, decal.size) * px
+            const dm = spriteDims[a.src]
+            const ratio = dm ? dm.w / Math.max(1, dm.h) : 1
+            return <image key={decal.id} href={a.src} x={(decal.x + offX) * px - sz * ratio / 2} y={(decal.y + offY) * px - sz / 2} width={sz * ratio} height={sz} transform={`rotate(${decal.angle ?? 0} ${(decal.x + offX) * px} ${(decal.y + offY) * px})`} pointerEvents="none" />
+          })}
           {view === 'exterior' && (() => {
             // 选中炮位的视界范围（相对船头 0=上 顺时针，支持跨 0°；半径取画布对角线，超出部分由 svg 自动裁切）
             const hp = cur.hardpoints.find(h => h.id === hpSel)
@@ -3601,16 +3772,11 @@ function FortressTab({ onRestart }: { onRestart: () => void }) {
               <div key={t.id} className="border border-black/40 p-1">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                   <span className="text-[10px] font-comic text-black/70">{t.id}</span>
-                  <label className="comic-btn px-1 py-0 text-[10px] cursor-pointer" title="上传履带瓦片（入素材库底座类并引用；瓦片尺寸取原图）">
-                    上传
-                    <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={e => {
-                      const f = e.target.files?.[0]; e.target.value = ''
-                      if (!f) return
-                      const rd = new FileReader()
-                      rd.onload = () => { const a = addAsset(f.name.replace(/\.[^.]+$/, ''), String(rd.result), 'base'); mutate(d => { d.tracks!.find(x => x.id === t.id)!.tile = a.id }); setMsg(`履带瓦片已入素材库：${a.name}`) }
-                      rd.readAsDataURL(f)
-                    }} />
-                  </label>
+                  <select aria-label={`${t.id} 履带素材`} value={t.tile} onChange={e => mutate(d => { d.tracks!.find(x => x.id === t.id)!.tile = e.target.value })} className="max-w-40 px-1 py-0 text-[10px] font-comic border border-black bg-[#EFEBD8]">
+                    {!trackAssets.some(a => a.id === t.tile) && <option value={t.tile}>当前旧引用</option>}
+                    <optgroup label="内置">{trackAssets.filter(a => a.builtin).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</optgroup>
+                    <optgroup label="已上传">{trackAssets.filter(a => !a.builtin).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</optgroup>
+                  </select>
                   {numInput('前轮x', t.x1, v => mutate(d => { d.tracks!.find(x => x.id === t.id)!.x1 = v }), 0.1)}
                   {numInput('前轮y', t.y1, v => mutate(d => { d.tracks!.find(x => x.id === t.id)!.y1 = v }), 0.1)}
                   {numInput('后轮x', t.x2, v => mutate(d => { d.tracks!.find(x => x.id === t.id)!.x2 = v }), 0.1)}
@@ -3633,32 +3799,46 @@ function FortressTab({ onRestart }: { onRestart: () => void }) {
             <span className="text-[10px] font-black text-black/70">轮子：</span>
             <button className="comic-btn px-1.5 py-0.5 text-[10px] flex items-center gap-0.5" onClick={() => mutate(d => {
               const nid = `wheel${(d.wheels ?? []).length + 1}-${Date.now() % 1000}`
-              const front = (d.wheels ?? []).length < 2 // 默认前两个为转向轮（前轮）
-              d.wheels = [...(d.wheels ?? []), { id: nid, x: d.w / 2, y: front ? 1 : d.h - 1, r: 0.4, steered: front }]
+              const front = (d.wheels ?? []).length === 0 // 成对定义：第一对为前轮，其后默认后轮
+              d.wheels = [...(d.wheels ?? []), { id: nid, x: 0.5, y: front ? 1 : d.h - 1, unit: 'pair', sprite: 'builtin:library/track01', steered: front }]
             })}><Plus className="w-3 h-3" />添加</button>
-            <span className="text-[9px] text-black/50">转向轮随方向盘偏转；未配贴图 = 几何轮胎；落印 = 轮心压痕（沿用履带瓦片）</span>
+            <span className="text-[9px] text-black/50">原图尺寸显示与落印；单位选“对”时，x 为定义侧，另一侧按堡垒中心线镜像</span>
           </div>
           <div className="flex flex-col gap-1.5">
             {(cur.wheels ?? []).map(wd => (
               <div key={wd.id} className="border border-black/40 p-1">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                   <span className="text-[10px] font-comic text-black/70">{wd.id}</span>
-                  <label className="comic-btn px-1 py-0 text-[10px] cursor-pointer" title="上传轮子贴图（入素材库底座类并引用；原比例按 2×半径 定高）">
-                    上传
-                    <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={e => {
-                      const f = e.target.files?.[0]; e.target.value = ''
-                      if (!f) return
-                      const rd = new FileReader()
-                      rd.onload = () => { const a = addAsset(f.name.replace(/\.[^.]+$/, ''), String(rd.result), 'base'); mutate(d => { d.wheels!.find(x => x.id === wd.id)!.sprite = a.id }); setMsg(`轮子贴图已入素材库：${a.name}`) }
-                      rd.readAsDataURL(f)
-                    }} />
+                  <select
+                    aria-label={`${wd.id} 轮胎素材`}
+                    value={wd.sprite ?? ''}
+                    onChange={e => mutate(d => {
+                      const wheel = d.wheels!.find(x => x.id === wd.id)!
+                      if (e.target.value) wheel.sprite = e.target.value
+                      else delete wheel.sprite
+                    })}
+                    className="max-w-40 px-1 py-0 text-[10px] font-comic border border-black bg-[#EFEBD8]"
+                    title="从素材库选择轮胎；按素材原始像素尺寸显示"
+                  >
+                    <option value="">无（几何轮胎）</option>
+                    {wd.sprite && !wheelAssets.some(a => a.id === wd.sprite) && <option value={wd.sprite}>当前旧引用</option>}
+                    <optgroup label="内置">{wheelAssets.filter(a => a.builtin).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</optgroup>
+                    <optgroup label="已上传">{wheelAssets.filter(a => !a.builtin).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</optgroup>
+                  </select>
+                  <label className="flex items-center gap-0.5 text-[10px] font-comic">单位
+                    <select aria-label={`${wd.id} 轮胎单位`} value={wd.unit ?? 'single'} onChange={e => mutate(d => { d.wheels!.find(x => x.id === wd.id)!.unit = e.target.value as 'single' | 'pair' })} className="px-1 py-0 text-[10px] font-comic border border-black bg-[#EFEBD8]">
+                      <option value="single">个</option>
+                      <option value="pair">对（左右镜像）</option>
+                    </select>
                   </label>
                   {numInput('x', wd.x, v => mutate(d => { d.wheels!.find(x => x.id === wd.id)!.x = v }), 0.1)}
                   {numInput('y', wd.y, v => mutate(d => { d.wheels!.find(x => x.id === wd.id)!.y = v }), 0.1)}
-                  {numInput('半径', wd.r, v => mutate(d => { d.wheels!.find(x => x.id === wd.id)!.r = v }), 0.05)}
-                  <label className="flex items-center gap-0.5 text-[10px] font-comic" title="转向轮：随前轮转角 δ 偏转（前轮勾上，后轮不勾）">
-                    <input type="checkbox" checked={wd.steered ?? false} onChange={e => mutate(d => { d.wheels!.find(x => x.id === wd.id)!.steered = e.target.checked })} className="w-3 h-3 accent-[#B3392E]" />
-                    转向
+                  <label className="flex items-center gap-0.5 text-[10px] font-comic" title="选择“是”后，轮胎按轴距与车辆实际转弯半径计算偏转角；选择“否”始终与车身平行">
+                    旋转
+                    <select aria-label={`${wd.id} 轮胎旋转`} value={wd.steered ? 'yes' : 'no'} onChange={e => mutate(d => { d.wheels!.find(x => x.id === wd.id)!.steered = e.target.value === 'yes' })} className="px-1 py-0 text-[10px] font-comic border border-black bg-[#EFEBD8]">
+                      <option value="no">否</option>
+                      <option value="yes">是（随转弯半径）</option>
+                    </select>
                   </label>
                   <button className="text-[#B3392E] font-black" onClick={() => mutate(d => { d.wheels = (d.wheels ?? []).filter(x => x.id !== wd.id); if (d.wheels.length === 0) d.wheels = undefined })}>×</button>
                 </div>
