@@ -17,7 +17,7 @@ function run(label, entry, args = []) {
 run('TypeScript 类型检查', 'node_modules/typescript/bin/tsc', ['--noEmit', '-p', 'tsconfig.app.json'])
 run('模拟回归', 'scripts/run-sim.mjs')
 run('TypeScript 项目构建', 'node_modules/typescript/bin/tsc', ['-b'])
-run('Vite 生产构建', 'node_modules/vite/bin/vite.js', ['build'])
+run('Vite 生产构建', 'node_modules/vite/bin/vite.js', ['build', '--configLoader', 'runner'])
 run('同步 public 素材', 'scripts/copy-public.mjs')
 
 console.log('\n✓ VERIFY PASSED')

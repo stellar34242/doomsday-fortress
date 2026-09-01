@@ -1,7 +1,7 @@
 /** 弹丸效果预览（v1.69）：弹丸库「飞行/命中/爆炸」播放的纯逻辑部分（发射+推进），
  *  与战斗渲染同一套粒子系统（particles.ts）与参数解析（art.ts resolve*Fx）。
  *  纯函数可 sim；DebugPanel 的 AmmoPreview 组件持池按 rAF 驱动绘制。 */
-import { createPool, spawnBurst, spawnTrail, stepParticles, type ParticlePool } from './particles'
+import { createPool, projectileTrailVelocity, rearOnlyTrailVelocity, spawnBurst, spawnTrail, stepParticles, type ParticlePool } from './particles'
 import { beamArtConfigOf, resolveExplosionFx, resolveImpactFx, resolveTrailFx } from './art'
 import { M_PER_CELL, type ProjectileArtDef } from './config'
 import { BEAM_FADE, BEAM_ON_SPEED } from './engine' // v2.38：发射伸展/停火消退与实战同一常量源（无循环依赖）
@@ -9,9 +9,9 @@ import { BEAM_FADE, BEAM_ON_SPEED } from './engine' // v2.38：发射伸展/停�
 export type AmmoFxMode = 'trail' | 'impact' | 'explosion' | 'seq' // v2.34：seq=全程（左→右飞行→右端命中/爆炸，循环）
 export const AMMO_FX_MODE_NAME: Record<AmmoFxMode, string> = { trail: '飞行', impact: '命中', explosion: '爆炸', seq: '全程' }
 
-/** 播放状态（组件/sim 共用）：t=累计时间；acc=尾焰发射累加器；burstAt=上次爆发时刻；seed=爆发种子；px=弹体世界 x（格）；v2.10 absorbAcc/scatterAcc/smokeAcc=光束三组粒子累加器；v2.34 phase=seq 阶段（0=飞行 1=爆发/循环等待） */
-export interface AmmoFxState { t: number; acc: number; burstAt: number; seed: number; px: number; absorbAcc: number; scatterAcc: number; smokeAcc: number; phase: number }
-export function createFxState(): AmmoFxState { return { t: 0, acc: 0, burstAt: -10, seed: 0, px: 0.5, absorbAcc: 0, scatterAcc: 0, smokeAcc: 0, phase: 0 } }
+/** 播放状态（组件/sim 共用）：flightT/speedMps 用于按实战参数推进弹丸；其余字段为特效累积与循环状态。 */
+export interface AmmoFxState { t: number; flightT: number; speedMps?: number; acc: number; burstAt: number; seed: number; px: number; absorbAcc: number; scatterAcc: number; smokeAcc: number; phase: number }
+export function createFxState(): AmmoFxState { return { t: 0, flightT: 0, speedMps: undefined, acc: 0, burstAt: -10, seed: 0, px: 0.5, absorbAcc: 0, scatterAcc: 0, smokeAcc: 0, phase: 0 } }
 
 /** 该模式是否可播放（未配置对应效果 → 按钮禁用）；
  *  v2.9：射线（ray）特殊口径——「飞行」播放光束发射（恒可播）、无爆炸（恒不可播）
@@ -25,14 +25,38 @@ export function canPlay(pa: ProjectileArtDef, mode: AmmoFxMode): boolean {
 /** v2.34：seq 命中点 = 右端留 2 格余量（爆炸半径参考 1.2 格 + 冲击环余量） */
 export const FX_SEQ_HIT_X = (worldW: number) => worldW - 2
 
-// 预览常量：弹速（格/s，向右平飞）、爆炸参考半径（格）、循环间隔
-export const FX_PREVIEW_SPEED = 3.5
+// 预览常量：爆炸参考半径（格）、循环间隔。弹丸速度不再固定，统一读取弹丸库实际配置。
 export const FX_PREVIEW_RADIUS = 1.2
 const EXPLOSION_PERIOD = 1.6
 const IMPACT_PERIOD = 0.9
 
+/** 按实战口径推进预览弹速，并返回格/秒。实弹/抛射读取 speed；导弹读取初速、延迟减速、加速度、极速与燃烧时间。 */
+export function advancePreviewProjectileSpeed(pa: ProjectileArtDef, st: AmmoFxState, dt: number): number {
+  if (pa.kind !== 'missile') {
+    st.flightT += dt
+    st.speedMps = Math.max(1, pa.speed ?? 32)
+    return st.speedMps / M_PER_CELL
+  }
+  if (st.speedMps === undefined) st.speedMps = Math.max(0, pa.missileInitSpeed ?? 0)
+  const delayed = !!pa.guided && st.flightT < Math.max(0, pa.guideDelay ?? 0)
+  if (delayed && (pa.guideDecel ?? 0) > 0) {
+    st.speedMps = Math.max(0, st.speedMps - Math.max(0, pa.guideDecel ?? 0) * dt)
+  } else if (pa.burnTime === undefined || st.flightT < pa.burnTime) {
+    const maxSpeed = Math.max(1, pa.missileMaxSpeed ?? 100)
+    st.speedMps = Math.min(maxSpeed, st.speedMps + Math.max(0, pa.missileAccel ?? 40) * dt)
+  }
+  st.flightT += dt
+  return st.speedMps / M_PER_CELL
+}
+
+function resetPreviewProjectile(st: AmmoFxState, x: number) {
+  st.px = x
+  st.flightT = 0
+  st.speedMps = undefined
+}
+
 /** 尾焰/烟尾发射（trail 与 v2.34 seq 飞行段共用；弹体 px 推进由调用方负责） */
-function trailEmit(tf: NonNullable<ReturnType<typeof resolveTrailFx>>, pool: ParticlePool, st: AmmoFxState, dt: number, midY: number, tailOff: number, boost: boolean) {
+function trailEmit(tf: NonNullable<ReturnType<typeof resolveTrailFx>>, pool: ParticlePool, st: AmmoFxState, dt: number, midY: number, tailOff: number, boost: boolean, projectileSpeed: number) {
   let rate = tf.rate
   if (tf.template === 'pulse') rate *= 1 + 0.6 * Math.sin(2 * Math.PI * 1.2 * st.t) // 火焰脉冲 1.2Hz（同战斗）
   // v2.44：预览大力喷射补弹种门控（同战斗 render b24 仅导弹生效——此前预览所有弹种都吃 ×3 爆发，与实战不一致）
@@ -44,10 +68,10 @@ function trailEmit(tf: NonNullable<ReturnType<typeof resolveTrailFx>>, pool: Par
   const heading = Math.PI / 2 // 向右（dirX=sin=1）
   for (let i = 0; i < n; i++) {
     const ang = heading + (Math.random() * 2 - 1) * tf.spread
-    const back = 1.5 * (1 - tf.inherit) // 反向余速：惯性越高反向越弱（同战斗）
+    const velocity = projectileTrailVelocity(projectileSpeed, 0, ang, tf.inherit)
     spawnTrail(pool, st.px - tailOff, midY, { // 尾部 = 贴图底部中间（向右飞行旋转 90° 后为左端）
-      vx: FX_PREVIEW_SPEED * tf.inherit - Math.sin(ang) * back,
-      vy: Math.cos(ang) * back, // −dirY(ang)=cos(ang)：反向余速朝弹尾（左）
+      vx: velocity.vx,
+      vy: velocity.vy,
       life: tf.life,
       size: tf.size * (1 + 0.6 * b24) * (tf.template === 'pulse' ? 0.85 + Math.random() * 0.3 : 1), // 脉冲尺寸闪烁；v2.24 大力喷射尺寸 ×1.6 线性回落 ×1（同战斗）
       color: tf.color, drag: tf.drag, grow: tf.grow, colorEnd: tf.colorEnd, fadeIn: tf.fadeIn,
@@ -59,9 +83,14 @@ function trailEmit(tf: NonNullable<ReturnType<typeof resolveTrailFx>>, pool: Par
     const sn = Math.floor(st.smokeAcc)
     st.smokeAcc -= sn
     for (let i = 0; i < sn; i++) {
+      const smokeVelocity = rearOnlyTrailVelocity(
+        projectileSpeed * 0.15 + (Math.random() * 2 - 1) * 0.3,
+        (Math.random() * 2 - 1) * 0.3,
+        heading,
+      )
       spawnTrail(pool, st.px - tailOff, midY, {
-        vx: FX_PREVIEW_SPEED * 0.15 + (Math.random() * 2 - 1) * 0.3, // 少量惯性 + 横向弥散（同战场）
-        vy: (Math.random() * 2 - 1) * 0.3,
+        vx: smokeVelocity.vx,
+        vy: smokeVelocity.vy,
         life: tf.smoke.life,
         size: tf.size * 1.6,
         color: tf.smoke.color,
@@ -165,26 +194,34 @@ export function fxTick(pa: ProjectileArtDef, mode: AmmoFxMode, pool: ParticlePoo
     }
     const tf = resolveTrailFx(pa)
     if (!tf) return
-    st.px += FX_PREVIEW_SPEED * dt
-    if (st.px > worldW + 0.5) st.px = -0.5 // 飞出右侧回卷
-    trailEmit(tf, pool, st, dt, midY, tailOff, pa.kind === 'missile')
+    const speed = advancePreviewProjectileSpeed(pa, st, dt)
+    st.px += speed * dt
+    trailEmit(tf, pool, st, dt, midY, tailOff, pa.kind === 'missile', speed)
+    if (st.px > worldW + 0.5) { // 飞出右侧后按一次新的发射重新计算初速/加速过程
+      resetPreviewProjectile(st, -0.5)
+      st.t = 0
+      st.acc = 0
+      st.smokeAcc = 0
+    }
   } else if (mode === 'seq') { // v2.34 全程：飞行段（喷尾焰）→ 命中点爆发（命中碎屑+爆炸按配置同时触发）→ 爆发结束+停顿后循环
     const hitX = FX_SEQ_HIT_X(worldW)
     if (st.phase === 0) {
-      st.px += FX_PREVIEW_SPEED * dt
+      const speed = advancePreviewProjectileSpeed(pa, st, dt)
+      st.px += speed * dt
       const tf = resolveTrailFx(pa)
-      if (tf) trailEmit(tf, pool, st, dt, midY, tailOff, pa.kind === 'missile')
+      if (tf) trailEmit(tf, pool, st, dt, midY, tailOff, pa.kind === 'missile', speed)
       if (st.px >= hitX) {
         st.px = hitX
         st.phase = 1
         st.burstAt = st.t
         st.seed++
         const inf = resolveImpactFx(pa)
-        if (inf) spawnBurst(pool, { x: hitX, y: midY, count: inf.spikes, speed: 3, life: 0.25, size: 0.04, color: inf.color, drag: 6, seed: st.seed * 2 + 7 })
+        if (inf) spawnBurst(pool, { x: hitX, y: midY, count: inf.spikes, speed: inf.speed, life: inf.life, size: inf.size, color: inf.color, drag: inf.drag, seed: st.seed * 2 + 7, streak: inf.streak === 1, dirX: -1, dirY: 0, bias: inf.bias, spread: inf.angle * Math.PI / 180 })
         const ef = resolveExplosionFx(pa)
         if (ef) {
-          spawnBurst(pool, { x: hitX, y: midY, count: ef.sparks, speed: FX_PREVIEW_RADIUS * 6, life: 0.5, size: 0.05, color: ef.color, drag: 4, seed: st.seed * 2, speedJitter: ef.speedJitter, lifeJitter: ef.lifeJitter, streak: ef.streak === 1 }) // v2.54 拉丝同步战场
-          spawnBurst(pool, { x: hitX, y: midY, count: ef.smoke, speed: FX_PREVIEW_RADIUS * 1.5, life: 0.9, size: 0.1, color: '#3A3632', drag: 1.5, seed: st.seed * 2 + 1, grow: 2, turb: ef.turbulence, speedJitter: ef.speedJitter, lifeJitter: ef.lifeJitter })
+          const visualR = FX_PREVIEW_RADIUS * ef.visualScale
+          spawnBurst(pool, { x: hitX, y: midY, count: ef.sparks, speed: visualR * 6, life: 0.5, size: 0.05 * ef.visualScale, color: ef.color, drag: 4, seed: st.seed * 2, speedJitter: ef.speedJitter, lifeJitter: ef.lifeJitter, streak: ef.streak === 1 })
+          spawnBurst(pool, { x: hitX, y: midY, count: ef.smoke, speed: visualR * 1.5, life: 0.9, size: 0.1 * ef.visualScale, color: '#3A3632', drag: 1.5, seed: st.seed * 2 + 1, grow: 2, turb: ef.turbulence, speedJitter: ef.speedJitter, lifeJitter: ef.lifeJitter })
         }
       }
     } else {
@@ -193,7 +230,7 @@ export function fxTick(pa: ProjectileArtDef, mode: AmmoFxMode, pool: ParticlePoo
       const wait = Math.max(ef?.duration ?? 0, inf?.duration ?? 0, 0.2) + 0.9 // 爆发结束 + 停顿再循环
       if (st.t - st.burstAt >= wait) { // 循环重置：t 归零 = 重新点火（b24 大力喷射/烟尾持续窗口按新一轮起算）
         st.phase = 0
-        st.px = -0.5
+        resetPreviewProjectile(st, -0.5)
         st.t = 0
         st.burstAt = -10
         st.acc = 0
@@ -209,8 +246,9 @@ export function fxTick(pa: ProjectileArtDef, mode: AmmoFxMode, pool: ParticlePoo
       st.burstAt = st.t
       st.seed++
       const cx = worldW / 2
-      spawnBurst(pool, { x: cx, y: midY, count: ef.sparks, speed: FX_PREVIEW_RADIUS * 6, life: 0.5, size: 0.05, color: ef.color, drag: 4, seed: st.seed * 2, speedJitter: ef.speedJitter, lifeJitter: ef.lifeJitter, streak: ef.streak === 1 }) // v2.54 拉丝同步战场
-      spawnBurst(pool, { x: cx, y: midY, count: ef.smoke, speed: FX_PREVIEW_RADIUS * 1.5, life: 0.9, size: 0.1, color: '#3A3632', drag: 1.5, seed: st.seed * 2 + 1, grow: 2, turb: ef.turbulence, speedJitter: ef.speedJitter, lifeJitter: ef.lifeJitter })
+      const visualR = FX_PREVIEW_RADIUS * ef.visualScale
+      spawnBurst(pool, { x: cx, y: midY, count: ef.sparks, speed: visualR * 6, life: 0.5, size: 0.05 * ef.visualScale, color: ef.color, drag: 4, seed: st.seed * 2, speedJitter: ef.speedJitter, lifeJitter: ef.lifeJitter, streak: ef.streak === 1 })
+      spawnBurst(pool, { x: cx, y: midY, count: ef.smoke, speed: visualR * 1.5, life: 0.9, size: 0.1 * ef.visualScale, color: '#3A3632', drag: 1.5, seed: st.seed * 2 + 1, grow: 2, turb: ef.turbulence, speedJitter: ef.speedJitter, lifeJitter: ef.lifeJitter })
     }
   } else { // 命中：周期触发碎屑飞溅（中心亮点由绘制层推演）
     const inf = resolveImpactFx(pa)
@@ -218,7 +256,7 @@ export function fxTick(pa: ProjectileArtDef, mode: AmmoFxMode, pool: ParticlePoo
     if (st.t - st.burstAt >= IMPACT_PERIOD) {
       st.burstAt = st.t
       st.seed++
-      spawnBurst(pool, { x: worldW / 2, y: midY, count: inf.spikes, speed: 3, life: 0.25, size: 0.04, color: inf.color, drag: 6, seed: st.seed * 2 + 7 })
+      spawnBurst(pool, { x: worldW / 2, y: midY, count: inf.spikes, speed: inf.speed, life: inf.life, size: inf.size, color: inf.color, drag: inf.drag, seed: st.seed * 2 + 7, streak: inf.streak === 1, dirX: -1, dirY: 0, bias: inf.bias, spread: inf.angle * Math.PI / 180 })
     }
   }
   stepParticles(pool, dt)

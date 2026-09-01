@@ -1,5 +1,5 @@
 // 复现：摇杆松手后转向是否立刻归零
-import { initialState, tick, fortressSpeed } from '../src/game/engine'
+import { initialState, tick } from '../src/game/engine'
 
 const DEG = Math.PI / 180
 let s = initialState()

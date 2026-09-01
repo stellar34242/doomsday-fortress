@@ -1,18 +1,15 @@
 import { assetImage, getAsset } from './assetlib'
-import { PROJECTILE_ARTS, PROJECTILE_KIND_COLOR } from './config'
+import { PROJECTILE_ARTS, PROJECTILE_KIND_COLOR, VERTICAL_LAUNCH_FRAMES, verticalLaunchDuration } from './config'
 import type { ProjectileArtDef, TurretDef } from './config'
 
-// 炮塔贴图加载器（规范 §3/§6）：/res/turrets/{turretId}/{base,turret,barrel,flash,glow}.png
-// 逐层降级：base/turret/barrel 各层 ready 即贴图渲染该层，缺失层按几何补绘；
-// 三层全部缺失 → 整体几何回退（未配置素材的默认炮塔视觉不变）；flash/glow/charge 可选。
-// 缓存按 turretId；加载中/失败 → fallback；加载完成下一帧自动切换贴图渲染。
-// sim/node 环境无 DOM（Image 不存在）→ 静默 fallback，不发起加载。
+// 炮塔四个可见层（base/turret/barrel/flash）只绘制显式选择且加载成功的素材。
+// 缺省、none、遗留 geo、引用失效都视为不绘制，不再补画程序化几何图形。
 
 export interface TurretArtAssets {
-  base?: HTMLImageElement // 可选：缺失时该层几何补绘（逐层降级）
-  turret?: HTMLImageElement // 可选：缺失时该层几何补绘
-  barrel?: HTMLImageElement // 可选：barrelAsset='none' 时无炮管层（无管发射井/能量塔造型）
-  flash?: HTMLImageElement // 可选：开火效果（未选库条目且文件夹无 flash.png → 无火光，不影响 ready）
+  base?: HTMLImageElement
+  turret?: HTMLImageElement
+  barrel?: HTMLImageElement
+  flash?: HTMLImageElement
   glow?: HTMLImageElement
   charge?: HTMLImageElement // 可选：充能动画帧条（缺失仅无充能动画，不影响 ready 判定）
 }
@@ -24,7 +21,7 @@ export interface ArtEntry {
   assets?: TurretArtAssets
 }
 
-/** art 配置校验（规范 §7.3/P3）：errors = 硬性错误（不应用）；warnings = 提示（如挂点数≠炮管数，§7.1） */
+/** art 配置校验：errors = 硬性错误；warnings = 可自动兼容的旧配置提示。 */
 export interface ArtValidation {
   ok: boolean
   errors: string[]
@@ -43,6 +40,9 @@ export function validateArt(def: TurretDef): ArtValidation {
   if (art.recoil !== undefined && (typeof art.recoil !== 'number' || !Number.isFinite(art.recoil) || art.recoil < 0)) {
     errors.push('recoil（统一后坐）须为 ≥0 数值') // v1.58
   }
+  if (art.flipEvenBarrels !== undefined && typeof art.flipEvenBarrels !== 'boolean') {
+    errors.push('flipEvenBarrels（翻转偶数炮管）须为布尔值')
+  }
   if (art.barrels !== undefined) {
     if (!Array.isArray(art.barrels) || art.barrels.length === 0) errors.push('barrels 挂点表须为非空数组（或删除该字段）')
     else art.barrels.forEach((b, i) => {
@@ -54,8 +54,8 @@ export function validateArt(def: TurretDef): ArtValidation {
     })
     if (errors.length === 0 && Array.isArray(art.barrels) && art.barrels.length > 0) {
       const n = Math.max(1, Math.floor(def.barrels ?? 1))
-      if (art.barrels.length !== n) { // §7.1：渲染/出生点以挂点表为准
-        warnings.push(`挂点表数量(${art.barrels.length}) ≠ 逻辑炮管数(${n})：渲染/出生点以挂点表为准`)
+      if (art.barrels.length !== n) {
+        warnings.push(`挂点表数量(${art.barrels.length}) ≠ 炮管数(${n})：多余项会忽略，缺少项会自动生成`)
       }
     }
   }
@@ -116,33 +116,28 @@ function validateBeamGroup(b: NonNullable<ProjectileArtDef['beam']>, errors: str
   if (b.scatter?.angle !== undefined && (typeof b.scatter.angle !== 'number' || !Number.isFinite(b.scatter.angle) || b.scatter.angle < 0 || b.scatter.angle > 360)) errors.push('beam.scatter.angle 须为 0~360 数值（度）')
 }
 
-const FALLBACK: ArtEntry = { status: 'fallback' }
-
 /** 查询炮塔贴图加载状态（首次调用触发异步加载；结果随加载完成自动翻转，无需重启） */
 /** 素材目录解析（§约定俗成法）：art.spriteSet 覆盖 → 通用集；缺省按炮塔 id。缓存 key = 实际文件夹名（多炮塔共享同一通用集缓存条目） */
 export function resolveSpriteFolder(def: TurretDef): string {
   return def.art?.spriteSet ?? def.id
 }
 
-// ---- 炮塔贴图（分层合成）：每层独立解析 素材库引用 ?? spriteSet 文件夹 ?? id 文件夹 ----
+// ---- 炮塔贴图（分层合成）：四个可见层只解析显式素材库引用 ----
 
 export type LayerPart = 'base' | 'turret' | 'barrel' | 'flash'
 
-/** 分层素材源解析（纯函数，按优先级返回候选列表）：素材库引用 → spriteSet(遗留) ?? id 文件夹。
- *  'none' → [null]（显式无）；引用不存在 → [null]（该层缺失）。第一个加载成功的候选生效；无素材 → 几何绘制（通用素材已废止）。 */
+/** 分层素材源解析（纯函数）：素材库引用 → src；缺省/none/遗留 geo/失效引用 → [null]。 */
 export function turretLayerSrcs(def: TurretDef): Record<LayerPart, (string | null)[]> {
-  const folder = resolveSpriteFolder(def) // 遗留 spriteSet ?? id
   const art = def.art
-  const pick = (assetId: string | undefined, part: LayerPart): (string | null)[] => {
-    if (assetId === 'none' || assetId === 'geo') return [null] // none=显式不绘制该层；geo=强制几何绘制（不走文件夹贴图）
-    if (assetId) return [getAsset(assetId)?.src ?? null]
-    return [`/res/turrets/${folder}/${part}.png`] // 无通用兜底：无素材即几何绘制
+  const pick = (assetId: string | undefined): (string | null)[] => {
+    if (!assetId || assetId === 'none' || assetId === 'geo') return [null]
+    return [getAsset(assetId)?.src ?? null]
   }
   return {
-    base: pick(art?.baseAsset, 'base'),
-    turret: pick(art?.turretAsset, 'turret'),
-    barrel: pick(art?.barrelAsset, 'barrel'),
-    flash: pick(art?.flashAsset, 'flash'),
+    base: pick(art?.baseAsset),
+    turret: pick(art?.turretAsset),
+    barrel: pick(art?.barrelAsset),
+    flash: pick(art?.flashAsset),
   }
 }
 
@@ -192,33 +187,47 @@ export function chargeFrameRect(imgW: number, imgH: number, frames: number, prog
   return { sx: fi * sw, sw, sh: imgH }
 }
 
-/** 查询炮塔贴图加载状态（每次调用按各层缓存动态合成，加载完成自动翻转）：
- *  就绪规则（逐层降级）：base/turret/barrel 任一层 ready 即贴图渲染——ready 层画贴图、缺失层几何补绘；
- *  有层仍在加载 → loading（等全部落定，预览重试机制依赖该态）；三层全部 error → 整体几何回退。
- *  flash/glow/charge 可选——缺失仅无对应效果，不影响 ready 判定。 */
+/**
+ * 垂发素材横向自动切帧：0=全垂直，末帧=正常飞行，中间帧按时间顺序转向。
+ * 规格固定为 7 帧，编辑器不开放帧数，避免不同弹丸产生不兼容协议。
+ */
+export function verticalLaunchFrameRect(imgW: number, imgH: number, progress: number): { index: number; sx: number; sw: number; sh: number } {
+  const frames = VERTICAL_LAUNCH_FRAMES
+  const clamped = Math.max(0, Math.min(1, progress))
+  const index = Math.min(frames - 1, Math.floor(clamped * frames))
+  const sw = imgW / frames
+  return { index, sx: index * sw, sw, sh: imgH }
+}
+
+/**
+ * 弹丸本体统一取帧：普通弹丸使用整张图；垂发导弹把当前 projectileAsset 视为固定 7 帧横向帧条。
+ * elapsed 缺省时取末帧（正常飞行姿态），传 0 时取首帧（待发/全垂直姿态）。
+ */
+export function projectileBodyFrameRect(entry: ProjectileArtDef, imgW: number, imgH: number, elapsed?: number): { index: number; sx: number; sw: number; sh: number } {
+  if (entry.kind !== 'missile' || entry.verticalLaunch?.enabled !== true) return { index: 0, sx: 0, sw: imgW, sh: imgH }
+  const progress = elapsed === undefined ? 1 : elapsed / verticalLaunchDuration(entry)
+  return verticalLaunchFrameRect(imgW, imgH, progress)
+}
+
+/** 查询炮塔贴图加载状态：显式素材加载中返回 loading；其余情况均可进入 ready，缺失层保持透明。 */
 export function turretArtState(def: TurretDef): ArtEntry {
-  const srcs = turretLayerSrcs(def)
   const folder = resolveSpriteFolder(def)
   const art = def.art
-  // 库引用层优先经 assetImage（按条目 id 缓存）；文件夹/路径层经 srcCache（按 src 缓存）
-  const layer = (part: LayerPart, assetId: string | undefined): SrcImgEntry => {
-    if (assetId && assetId !== 'none') return assetImage(assetId) // 库引用（不存在 → error → 该层缺失）
-    return srcImageChain(srcs[part]) // 文件夹候选链：spriteSet(遗留) ?? id → 通用集
+  const layer = (assetId: string | undefined): SrcImgEntry | null => {
+    if (!assetId || assetId === 'none' || assetId === 'geo') return null
+    return assetImage(assetId)
   }
-  const noBase = art?.baseAsset === 'none' // 底座可选配「无」：不绘制底座层（默认，塔体直接落地）
-  const b = noBase ? null : layer('base', art?.baseAsset)
-  const t = layer('turret', art?.turretAsset)
-  const noBarrel = art?.barrelAsset === 'none' // 炮管可选配「无」：不绘制炮管层（无管发射井/能量塔造型）
-  const r = noBarrel ? null : layer('barrel', art?.barrelAsset)
-  const triple: SrcImgEntry[] = [b, t, r].filter((e): e is SrcImgEntry => e !== null)
-  if (triple.some(e => e.status === 'loading')) return { status: 'loading' } // 等全部层落定
-  if (!triple.some(e => e.status === 'ready')) return FALLBACK // 三层全部缺失：未配置素材 → 整体几何回退
-  const f = layer('flash', art?.flashAsset)
-  const assets: TurretArtAssets = {} // 逐层降级：仅放入 ready 层，缺失层由渲染侧几何补绘
+  const b = layer(art?.baseAsset)
+  const t = layer(art?.turretAsset)
+  const r = layer(art?.barrelAsset)
+  const f = layer(art?.flashAsset)
+  const layers = [b, t, r, f].filter((e): e is SrcImgEntry => e !== null)
+  if (layers.some(e => e.status === 'loading')) return { status: 'loading' }
+  const assets: TurretArtAssets = {}
   if (b?.img) assets.base = b.img
-  if (t.img) assets.turret = t.img
+  if (t?.img) assets.turret = t.img
   if (r?.img) assets.barrel = r.img
-  if (f.status === 'ready' && f.img) assets.flash = f.img
+  if (f?.status === 'ready' && f.img) assets.flash = f.img
   const g = srcImage(`${'/res/turrets/' + folder}/glow.png`) // 可选（暂不进素材库选配）
   if (g.status === 'ready' && g.img) assets.glow = g.img
   // v1.75：充能素材可选配（charge 分类库引用；'none' = 不播放；缺省 = 文件夹 charge.png 回退）
@@ -316,13 +325,27 @@ export function ammoProjectileSrc(entry: ProjectileArtDef): (string | null)[] {
 
 // ---- 程序化特效参数（默认填充纯函数；配置了对应段即程序化生成，无素材需求）----
 export type TrailTemplate = 'standard' | 'inertia' | 'pulse' | 'smoke'
+export type ExplosionTemplate = 'small' | 'medium' | 'large'
+export type ImpactTemplate = 'bullet' | 'armorPiercing' | 'heavyArmorPiercing'
 
 /** 模板默认（覆盖顺序：模板默认 < 用户显式参数） */
 const TRAIL_TEMPLATES: Record<TrailTemplate, { rate: number; life: number; size: number; inherit: number; spread: number; grow: number; fadeIn: number; drag: number; color?: string }> = {
-  standard: { rate: 60, life: 0.35, size: 0.06, inherit: 0.2, spread: 0.6, grow: 0, fadeIn: 0, drag: 3 }, // 标准拖尾（现状行为）
-  inertia: { rate: 60, life: 0.5, size: 0.06, inherit: 0.9, spread: 0.6, grow: 0, fadeIn: 0, drag: 4 }, // 惯性甩尾：随弹甩出弯曲尾迹
-  pulse: { rate: 60, life: 0.35, size: 0.06, inherit: 0.2, spread: 0.6, grow: 0, fadeIn: 0, drag: 3 }, // 火焰脉冲：速率 1.2Hz 振荡 + 尺寸/alpha 闪烁
-  smoke: { rate: 20, life: 1.2, size: 0.15, inherit: 0.1, spread: 0.6, grow: 2, fadeIn: 0, drag: 1.5, color: '#6B6560' }, // 烟雾弥漫：rate 1/3、size×2.5、grow 2、暗灰
+  standard: { rate: 54, life: 0.32, size: 0.055, inherit: 0.18, spread: 0.5, grow: -0.15, fadeIn: 0, drag: 3.2 }, // 标准尾焰：短、清晰，适合常规火箭/导弹
+  inertia: { rate: 64, life: 0.55, size: 0.06, inherit: 0.9, spread: 0.42, grow: -0.08, fadeIn: 0, drag: 4 }, // 惯性尾焰：明显保留弹体侧向速度，转弯时形成弧形甩尾
+  pulse: { rate: 72, life: 0.38, size: 0.065, inherit: 0.22, spread: 0.55, grow: -0.1, fadeIn: 0.02, drag: 3 }, // 脉冲尾焰：速率 1.2Hz 振荡 + 尺寸/alpha 闪烁
+  smoke: { rate: 22, life: 1.35, size: 0.15, inherit: 0.1, spread: 0.75, grow: 1.8, fadeIn: 0.08, drag: 1.5, color: '#6B6560' }, // 烟雾尾迹：低速率、长寿命、持续膨胀
+}
+
+const EXPLOSION_TEMPLATES: Record<ExplosionTemplate, Omit<ExplosionFxParams, 'template' | 'color'>> = {
+  small: { duration: 0.28, visualScale: 0.72, sparks: 7, smoke: 3, speedJitter: 0.3, lifeJitter: 0.2, turbulence: 0.35, rings: 1, ringSpeed: 1.25, ringWidth: 1.5, bias: 0.05, inherit: 0.08, fireball: 0.7, shock: 0.55, flash: 0.25, streak: 0 },
+  medium: { duration: 0.4, visualScale: 1, sparks: 14, smoke: 7, speedJitter: 0.45, lifeJitter: 0.32, turbulence: 0.65, rings: 2, ringSpeed: 1, ringWidth: 2.5, bias: 0.1, inherit: 0.12, fireball: 1, shock: 1, flash: 0.55, streak: 1 },
+  large: { duration: 0.58, visualScale: 1.38, sparks: 28, smoke: 16, speedJitter: 0.65, lifeJitter: 0.48, turbulence: 1.1, rings: 3, ringSpeed: 0.9, ringWidth: 4, bias: 0.15, inherit: 0.2, fireball: 1.35, shock: 1.45, flash: 0.95, streak: 1 },
+}
+
+const IMPACT_TEMPLATES: Record<ImpactTemplate, Omit<ImpactFxParams, 'template' | 'color'>> = {
+  bullet: { duration: 0.12, spikes: 4, speed: 2.6, life: 0.18, size: 0.028, drag: 7, streak: 0, angle: 150, bias: 0.55 },
+  armorPiercing: { duration: 0.18, spikes: 8, speed: 4.2, life: 0.28, size: 0.04, drag: 5.5, streak: 1, angle: 110, bias: 0.72 },
+  heavyArmorPiercing: { duration: 0.26, spikes: 15, speed: 5.8, life: 0.4, size: 0.06, drag: 4.5, streak: 1, angle: 135, bias: 0.82 },
 }
 
 export interface TrailFxParams {
@@ -372,8 +395,10 @@ export function resolveTrailFx(e: ProjectileArtDef): TrailFxParams | null {
   }
 }
 export interface ExplosionFxParams {
+  template: ExplosionTemplate
   color: string
   duration: number
+  visualScale: number
   sparks: number
   smoke: number
   speedJitter: number // 0–1
@@ -389,34 +414,69 @@ export interface ExplosionFxParams {
   flash: number // v2.54：0–1 瞬时照明强度（0=关闭）
   streak: number // v2.54：0|1 火花拉丝
 }
+
+/**
+ * 取得弹丸爆炸模板的完整表现参数。单位摧毁、战场弹丸和弹丸预览共用此入口，
+ * 避免各自复制一套火球、冲击环和粒子数量后产生画面差异。
+ */
+export function explosionTemplateFx(template: ExplosionTemplate, color: string): ExplosionFxParams {
+  return { template, color, ...EXPLOSION_TEMPLATES[template] }
+}
+
 export function resolveExplosionFx(e: ProjectileArtDef): ExplosionFxParams | null {
   if (!e.explosion) return null
+  const t = e.explosion.template ?? 'medium'
+  const d = explosionTemplateFx(t, e.explosion.color ?? PROJECTILE_KIND_COLOR[e.kind])
   return {
-    color: e.explosion.color ?? PROJECTILE_KIND_COLOR[e.kind],
-    duration: e.explosion.duration ?? 0.4,
-    sparks: e.explosion.sparks ?? 10,
-    smoke: e.explosion.smoke ?? 6,
-    speedJitter: Math.min(1, Math.max(0, e.explosion.speedJitter ?? 0.4)),
-    lifeJitter: Math.min(1, Math.max(0, e.explosion.lifeJitter ?? 0.3)),
-    turbulence: Math.min(2, Math.max(0, e.explosion.turbulence ?? 0.6)),
-    rings: Math.min(4, Math.max(1, Math.round(e.explosion.rings ?? 1))),
-    ringSpeed: e.explosion.ringSpeed ?? 1,
-    ringWidth: e.explosion.ringWidth ?? 2,
-    bias: Math.min(1, Math.max(0, e.explosion.bias ?? 0)),
-    inherit: Math.min(1, Math.max(0, e.explosion.inherit ?? 0)),
-    fireball: Math.min(2, Math.max(0, e.explosion.fireball ?? 1)), // v2.54
-    shock: Math.min(2, Math.max(0, e.explosion.shock ?? 1)),
-    flash: Math.min(1, Math.max(0, e.explosion.flash ?? 0.5)),
-    streak: e.explosion.streak === 0 ? 0 : 1,
+    template: t,
+    color: e.explosion.color ?? d.color,
+    duration: e.explosion.duration ?? d.duration,
+    visualScale: Math.min(3, Math.max(0.1, e.explosion.visualScale ?? d.visualScale)),
+    sparks: e.explosion.sparks ?? d.sparks,
+    smoke: e.explosion.smoke ?? d.smoke,
+    speedJitter: Math.min(1, Math.max(0, e.explosion.speedJitter ?? d.speedJitter)),
+    lifeJitter: Math.min(1, Math.max(0, e.explosion.lifeJitter ?? d.lifeJitter)),
+    turbulence: Math.min(2, Math.max(0, e.explosion.turbulence ?? d.turbulence)),
+    rings: Math.min(4, Math.max(1, Math.round(e.explosion.rings ?? d.rings))),
+    ringSpeed: e.explosion.ringSpeed ?? d.ringSpeed,
+    ringWidth: e.explosion.ringWidth ?? d.ringWidth,
+    bias: Math.min(1, Math.max(0, e.explosion.bias ?? d.bias)),
+    inherit: Math.min(1, Math.max(0, e.explosion.inherit ?? d.inherit)),
+    fireball: Math.min(2, Math.max(0, e.explosion.fireball ?? d.fireball)),
+    shock: Math.min(2, Math.max(0, e.explosion.shock ?? d.shock)),
+    flash: Math.min(1, Math.max(0, e.explosion.flash ?? d.flash)),
+    streak: (e.explosion.streak ?? d.streak) === 0 ? 0 : 1,
   }
 }
-export interface ImpactFxParams { color: string; duration: number; spikes: number }
+export interface ImpactFxParams {
+  template: ImpactTemplate
+  color: string
+  duration: number
+  spikes: number
+  speed: number
+  life: number
+  size: number
+  drag: number
+  streak: number
+  angle: number
+  bias: number
+}
 export function resolveImpactFx(e: ProjectileArtDef): ImpactFxParams | null {
   if (!e.impact) return null
+  const t = e.impact.template ?? 'bullet'
+  const d = IMPACT_TEMPLATES[t]
   return {
+    template: t,
     color: e.impact.color ?? PROJECTILE_KIND_COLOR[e.kind],
-    duration: e.impact.duration ?? 0.15,
-    spikes: e.impact.spikes ?? 5,
+    duration: Math.min(5, Math.max(0.01, e.impact.duration ?? d.duration)),
+    spikes: Math.min(100, Math.max(0, Math.round(e.impact.spikes ?? d.spikes))),
+    speed: Math.min(50, Math.max(0, e.impact.speed ?? d.speed)),
+    life: Math.min(5, Math.max(0.01, e.impact.life ?? d.life)),
+    size: Math.min(2, Math.max(0.005, e.impact.size ?? d.size)),
+    drag: Math.min(30, Math.max(0, e.impact.drag ?? d.drag)),
+    streak: (e.impact.streak ?? d.streak) === 1 ? 1 : 0,
+    angle: Math.min(360, Math.max(0, e.impact.angle ?? d.angle)),
+    bias: Math.min(1, Math.max(0, e.impact.bias ?? d.bias)),
   }
 }
 

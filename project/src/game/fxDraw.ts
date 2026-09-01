@@ -4,6 +4,8 @@
  *  坐标约定：X/Y 为世界格 → 画布像素的换算函数（战场含视口变换；预览为 ×cell 恒等变换）。 */
 import { gradientColorKey, type Particle, type ParticlePool } from './particles'
 import { srcImage } from './art'
+import { BASE_CELL } from './config'
+import { assetImage, findAssetByName } from './assetlib'
 import { LEVEL } from './level'
 import { ringProgress } from './particles'
 
@@ -71,6 +73,16 @@ function particleColor(pt: Particle, k: number, a: number): { fill: string; alph
   return { fill: pt.color, alpha: a }
 }
 
+export const WRECKAGE_EFFECT_ASSET_NAME = 'fx_Wreckage'
+
+/** 通用残骸素材固定按 2×2 等分，索引顺序为左上、右上、左下、右下。 */
+export function wreckageFrameRect(imgWidth: number, imgHeight: number, frameIndex: number) {
+  const sw = Math.max(1, Math.floor(imgWidth / 2))
+  const sh = Math.max(1, Math.floor(imgHeight / 2))
+  const index = ((Math.floor(frameIndex) % 4) + 4) % 4
+  return { sx: index % 2 * sw, sy: Math.floor(index / 2) * sh, sw, sh }
+}
+
 /** 粒子池绘制（战场地面层/空中层 + 编辑器预览共用）——贴图化软粒子：particlealpha32 预着色缓存；
  *  烟尘（grow>0）走 smoke32 且不加光；未加载/无 DOM 回退 arc；streak 拉丝 0.09s/0.8r（v2.54）；离屏跳过 */
 export function drawParticlePool(ctx: CanvasRenderingContext2D, pool: ParticlePool, X: (x: number) => number, Y: (y: number) => number, cell: number, nowFx: number) {
@@ -78,6 +90,9 @@ export function drawParticlePool(ctx: CanvasRenderingContext2D, pool: ParticlePo
   const fxSmoke = srcImage('/res/fx/smoke32.png') // v2.6：烟尘粒子专用贴图（grow>0）
   const fxPImg = fxP.status === 'ready' ? fxP.img : undefined
   const fxSmokeImg = fxSmoke.status === 'ready' ? fxSmoke.img : undefined
+  const wreckageAsset = findAssetByName(WRECKAGE_EFFECT_ASSET_NAME, 'flash')
+  const wreckageEntry = wreckageAsset ? assetImage(wreckageAsset.id) : undefined
+  const wreckageImg = wreckageEntry?.status === 'ready' ? wreckageEntry.img : undefined
   for (const pt of pool.parts) {
     if (pt.x < -1 || pt.x > LEVEL.cols + 1 || pt.y < -1 || pt.y > LEVEL.rows + 1) continue
     const k = Math.max(0, pt.life / pt.maxLife) // 1 → 0
@@ -87,45 +102,105 @@ export function drawParticlePool(ctx: CanvasRenderingContext2D, pool: ParticlePo
     if (a <= 0.01) continue
     const r = Math.max(0.5, pt.size * cell) // 尺寸已由 stepParticles 积分 grow
     ctx.globalCompositeOperation = pt.grow > 0 ? 'source-over' : 'lighter' // 烟尘不加光
-    if (pt.shape === 'shieldShard') { // v2.71：同一护盾色生成三类能量玻璃碎片，无需额外贴图
+    if (pt.shape === 'shieldCrystal') { // 冰晶层：细小、高亮、无描边的锐角薄片
       const pc = particleColor(pt, k, a)
       const variant = Math.floor(((pt.phase ?? 0) / (Math.PI * 2)) * 3) % 3
       ctx.save()
       ctx.translate(X(pt.x), Y(pt.y))
       ctx.rotate(pt.rotation ?? 0)
+      ctx.globalCompositeOperation = 'lighter'
+      ctx.globalAlpha = pc.alpha * (0.72 + Math.sin(nowFx * 25 + (pt.phase ?? 0)) * 0.16)
+      ctx.fillStyle = variant === 0 ? '#F1FFFF' : variant === 1 ? '#C8F7FA' : '#A9EAF0'
+      ctx.beginPath()
+      if (variant === 0) {
+        ctx.moveTo(0, -r); ctx.lineTo(r * 0.22, -r * 0.08); ctx.lineTo(0, r); ctx.lineTo(-r * 0.22, r * 0.08)
+      } else if (variant === 1) {
+        ctx.moveTo(-r * 0.85, -r * 0.12); ctx.lineTo(r, -r * 0.28); ctx.lineTo(r * 0.42, r * 0.22)
+      } else {
+        ctx.moveTo(-r * 0.7, -r * 0.28); ctx.lineTo(r * 0.88, 0); ctx.lineTo(-r * 0.55, r * 0.32)
+      }
+      ctx.closePath(); ctx.fill(); ctx.restore()
+      continue
+    }
+    if (pt.shape === 'shieldShard') { // 主碎片：五类无描边能量薄片；六边形只属于受击波纹
+      const pc = particleColor(pt, k, a)
+      const variant = Math.floor(((pt.phase ?? 0) / (Math.PI * 2)) * 5) % 5
+      const skew = 0.72 + (((pt.phase ?? 0) / (Math.PI * 2)) % 1) * 0.28
+      ctx.save()
+      ctx.translate(X(pt.x), Y(pt.y))
+      ctx.rotate(pt.rotation ?? 0)
+      ctx.fillStyle = variant === 0 ? '#B5EEF1' : variant === 3 ? '#5EAEB9' : pc.fill
+      ctx.beginPath()
+      if (variant === 0) {
+        ctx.moveTo(-r * 0.92, -r * 0.28)
+        ctx.lineTo(r * 0.86, -r * 0.62 * skew)
+        ctx.lineTo(r * 0.18, r * 0.88)
+      } else if (variant === 1) {
+        ctx.moveTo(-r, -r * 0.18)
+        ctx.lineTo(-r * 0.18, -r * 0.72)
+        ctx.lineTo(r * 0.94, r * 0.08)
+        ctx.lineTo(-r * 0.34, r * 0.68 * skew)
+      } else if (variant === 2) {
+        ctx.moveTo(-r * 0.88, -r * 0.52 * skew)
+        ctx.lineTo(r * 0.72, -r * 0.32)
+        ctx.lineTo(r * 0.96, r * 0.26)
+        ctx.lineTo(-r * 0.58, r * 0.62)
+      } else if (variant === 3) {
+        ctx.moveTo(-r, -r * 0.16); ctx.lineTo(r * 0.96, -r * 0.34); ctx.lineTo(r * 0.62, r * 0.24); ctx.lineTo(-r * 0.82, r * 0.3)
+      } else {
+        ctx.moveTo(-r * 0.66, -r * 0.42); ctx.lineTo(r, -r * 0.08); ctx.lineTo(-r * 0.32, r * 0.74)
+      }
+      ctx.closePath()
+      // 只绘制半透明能量薄片，不画外轮廓线，避免呈现硬质玻璃或六边形瓦片感。
+      ctx.globalCompositeOperation = 'lighter'
+      const briefCrest = variant === 4 ? Math.max(0, 1 - (1 - k) * 5) * 0.18 : 0
+      ctx.globalAlpha = pc.alpha * (0.38 + briefCrest)
+      ctx.fill()
+      ctx.restore()
+      continue
+    }
+    if (pt.shape === 'debris') { // 单位残骸：不发光的焦黑/锈褐实体碎块，带自转与短暂飞散
+      const pc = particleColor(pt, k, a)
+      const phaseRatio = ((pt.phase ?? 0) / (Math.PI * 2)) % 1
+      const atlasVariant = Math.floor(phaseRatio * 4) % 4
+      ctx.save()
+      ctx.translate(X(pt.x), Y(pt.y))
+      ctx.rotate(pt.rotation ?? 0)
+      ctx.globalCompositeOperation = 'source-over'
+      ctx.globalAlpha = pc.alpha * 0.92
+      if (wreckageImg) {
+        const frame = wreckageFrameRect(wreckageImg.width, wreckageImg.height, atlasVariant)
+        // 32px 单帧按战场原生比例显示；单位摧毁模板提供固定档位缩放。
+        const assetScale = Math.max(0.05, pt.spriteScale ?? 1)
+        const drawW = frame.sw * cell / BASE_CELL * assetScale
+        const drawH = frame.sh * cell / BASE_CELL * assetScale
+        ctx.drawImage(wreckageImg, frame.sx, frame.sy, frame.sw, frame.sh, -drawW / 2, -drawH / 2, drawW, drawH)
+        ctx.restore()
+        continue
+      }
+      const variant = Math.floor(phaseRatio * 3) % 3
       ctx.fillStyle = pc.fill
-      ctx.strokeStyle = '#DDF8FA'
+      ctx.strokeStyle = '#171513'
       ctx.lineWidth = Math.max(0.7, r * 0.16)
       ctx.beginPath()
       if (variant === 0) {
-        for (let i = 0; i < 6; i++) {
-          const ang = -Math.PI / 2 + i * Math.PI / 3
-          const px = Math.cos(ang) * r, py = Math.sin(ang) * r
-          if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py)
-        }
+        ctx.moveTo(-r, -r * 0.38); ctx.lineTo(r * 0.78, -r * 0.55); ctx.lineTo(r, r * 0.28); ctx.lineTo(-r * 0.65, r * 0.62)
       } else if (variant === 1) {
-        ctx.moveTo(-r * 0.85, -r * 0.55); ctx.lineTo(r, 0); ctx.lineTo(-r * 0.85, r * 0.55)
+        ctx.moveTo(-r * 0.72, -r); ctx.lineTo(r * 0.5, -r * 0.54); ctx.lineTo(r * 0.82, r * 0.76); ctx.lineTo(-r * 0.44, r * 0.48)
       } else {
-        ctx.moveTo(-r, -r * 0.25); ctx.lineTo(r * 0.85, -r * 0.55); ctx.lineTo(r * 0.45, r * 0.55); ctx.lineTo(-r * 0.7, r * 0.35)
+        ctx.moveTo(-r, -r * 0.18); ctx.lineTo(-r * 0.12, -r * 0.74); ctx.lineTo(r, r * 0.12); ctx.lineTo(r * 0.18, r * 0.68)
       }
-      ctx.closePath()
-      // 碎片保持足够尺寸，但主体像薄能量玻璃而非实心白块；亮度集中在断裂边缘。
-      ctx.globalCompositeOperation = 'source-over'
-      ctx.globalAlpha = pc.alpha * 0.2
-      ctx.fill()
-      ctx.globalCompositeOperation = 'lighter'
-      ctx.globalAlpha = pc.alpha * 0.68
-      ctx.stroke()
-      ctx.restore()
+      ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore()
       continue
     }
     if (pt.streak) { // v2.15 电焊式拖尾（v2.54 加长 0.09s、加粗 0.8r）；速度反向亮线（加法发光，颜色随渐变）
       const sk = pt.colorEnd ? gradientColorKey(pt.color, pt.colorEnd, 1 - k) : pt.color
+      const streakTime = pt.streakTime ?? 0.09
       ctx.globalAlpha = a
       ctx.strokeStyle = sk
-      ctx.lineWidth = Math.max(1.5, r * 0.8)
+      ctx.lineWidth = Math.max(1.5, r * 0.8) * (pt.streakWidthScale ?? 1)
       ctx.beginPath()
-      ctx.moveTo(X(pt.x - pt.vx * 0.09), Y(pt.y - pt.vy * 0.09))
+      ctx.moveTo(X(pt.x - pt.vx * streakTime), Y(pt.y - pt.vy * streakTime))
       ctx.lineTo(X(pt.x), Y(pt.y))
       ctx.stroke()
     }
@@ -156,11 +231,11 @@ export function drawParticlePool(ctx: CanvasRenderingContext2D, pool: ParticlePo
 export function drawExplosionLayers(
   ctx: CanvasRenderingContext2D, X: (x: number) => number, Y: (y: number) => number, cell: number,
   ex: { x: number; y: number; r: number }, k: number,
-  p: { color: string; rings: number; ringSpeed: number; ringWidth: number; fireball: number; shock: number; flash: number },
+  p: { color: string; rings: number; ringSpeed: number; ringWidth: number; fireball: number; shock: number; flash: number; visualScale?: number },
   el: number,
 ) {
   if (k >= 1) return
-  const rMax = Math.max(4, ex.r * cell)
+  const rMax = Math.max(4, ex.r * cell * (p.visualScale ?? 1))
   const cx = X(ex.x)
   const cy = Y(ex.y)
   ctx.save()

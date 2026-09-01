@@ -12,9 +12,9 @@ export const CRATER_CAP = 120
 export const CRATER_LIFE = 45
 export const CRATER_FADE = 15
 
-/** 爆炸半径映射为视觉坑径；落地实弹使用固定小坑，堡垒主爆自然得到最大坑。 */
-export function craterRadius(ex: Pick<ExplosionFx, 'r' | 'kind'>): number {
-  if (ex.kind === 'groundImpact') return 0.2
+/** 爆炸半径映射为视觉坑径；非爆炸落地坑直径 = 弹丸贴图/几何显示直径。 */
+export function craterRadius(ex: Pick<ExplosionFx, 'r' | 'kind' | 'projectileSize'>, visualProjectileSize?: number): number {
+  if (ex.kind === 'groundImpact') return Math.max(0.005, (visualProjectileSize ?? ex.projectileSize ?? 0.4) / 2)
   return Math.max(0.24, Math.min(2.8, ex.r * 0.75))
 }
 
@@ -29,6 +29,7 @@ export function updateCraters(
   seen: Set<number>,
   explosions: readonly ExplosionFx[],
   now: number,
+  projectileVisualSize?: (ex: ExplosionFx) => number | undefined,
 ): void {
   for (let i = craters.length - 1; i >= 0; i--) {
     if (now - craters[i].born > CRATER_LIFE) craters.splice(i, 1)
@@ -39,7 +40,8 @@ export function updateCraters(
     live.add(ex.id)
     if (seen.has(ex.id)) continue
     seen.add(ex.id)
-    craters.push({ x: ex.x, y: ex.y, r: craterRadius(ex), born: now, seed: ex.id })
+    if (ex.leavesCrater === false) continue
+    craters.push({ x: ex.x, y: ex.y, r: craterRadius(ex, projectileVisualSize?.(ex)), born: now, seed: ex.id })
   }
   for (const id of [...seen]) if (!live.has(id)) seen.delete(id)
 

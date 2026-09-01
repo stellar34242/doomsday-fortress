@@ -6,6 +6,16 @@ node_modules/
 dist/
 coverage/
 *.tsbuildinfo
+project/artifacts/
+project/output/
+project/.tmp/
+
+# 仓库根目录的试听/波形中间产物；正式运行音频位于 project/public/res/audio。
+/artninja_mech_footsteps_preview.mp3
+/artninja_mech_waveform.png
+/helicopter_rotor_loop.ogg
+/helicopter_rotor_loop_hq.mp3
+/mech_footstep_01.ogg
 
 # 本地环境与编辑器
 .env

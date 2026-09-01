@@ -1,5 +1,44 @@
 /** 轻量粒子系统（渲染端纯视觉，不进逻辑判定；纯函数可 sim）。
  *  尾焰/爆炸/命中特效的粒子发射与逐帧运动；render.ts 持池按 wall-clock dt step + 绘制。 */
+
+/** 剔除尾迹粒子沿弹丸航向向前的速度分量；角度约定与战斗一致：0=-Y、顺时针为正。 */
+export function rearOnlyTrailVelocity(vx: number, vy: number, heading: number): { vx: number; vy: number } {
+  const forwardX = Math.sin(heading)
+  const forwardY = -Math.cos(heading)
+  const forwardSpeed = vx * forwardX + vy * forwardY
+  if (forwardSpeed <= 0) return { vx, vy }
+  return { vx: vx - forwardX * forwardSpeed, vy: vy - forwardY * forwardSpeed }
+}
+
+/** 所有弹丸共用的尾焰初速：惯性可保留侧向运动，但绝不向弹头前方喷射。 */
+export function projectileTrailVelocity(
+  projectileVx: number,
+  projectileVy: number,
+  exhaustHeading: number,
+  inherit: number,
+  tailProjection = 1,
+): { vx: number; vy: number } {
+  const projection = Math.max(0, Math.min(1, tailProjection))
+  const back = 1.5 * (1 - inherit)
+  return rearOnlyTrailVelocity(
+    (projectileVx * inherit - Math.sin(exhaustHeading) * back) * projection,
+    (projectileVy * inherit + Math.cos(exhaustHeading) * back) * projection,
+    exhaustHeading,
+  )
+}
+
+/** 所有贴图弹丸共用：从弹体航向后端发射尾迹；垂发首帧的平面投影为 0。 */
+export function projectileTailEmitter(
+  x: number,
+  y: number,
+  heading: number,
+  bodyLength: number,
+  tailProjection = 1,
+): { x: number; y: number } {
+  const offset = Math.max(0, bodyLength) * 0.5 * Math.max(0, Math.min(1, tailProjection))
+  return { x: x - Math.sin(heading) * offset, y: y + Math.cos(heading) * offset }
+}
+
 export interface Particle {
   x: number // 世界坐标（格）
   y: number
@@ -18,7 +57,11 @@ export interface Particle {
   turb?: number // 湍流强度（烟尘漂移抖动；step 叠加正交噪声速度）
   phase?: number // 噪声相位（seeded，逐粒不同）
   streak?: boolean // v2.15 电焊式拖尾：绘制时沿速度反向拉 0.05s 亮线（散发飞溅粒子）
-  shape?: 'shieldShard' // v2.71 护盾破裂：程序绘制的六边形碎片（不依赖额外贴图）
+  streakTime?: number // 单粒拖尾的速度采样时长；缺省沿用通用 0.09s
+  streakWidthScale?: number // 单粒拖尾宽度倍率；缺省 1
+  shape?: 'shieldShard' | 'shieldCrystal' | 'debris' // 护盾薄片/冰晶；单位摧毁时的实体残骸碎块
+  /** 贴图型粒子的独立显示缩放；不参与运动、碰撞或程序化回退尺寸。 */
+  spriteScale?: number
   rotation?: number // 碎片当前旋角（rad）
   spin?: number // 碎片自转速度（rad/s）
 }
@@ -70,6 +113,8 @@ export interface BurstOpts {
   seed: number // 事件 id（角度/抖动 seeded 稳定）
   grow?: number
   streak?: boolean // v2.54：爆发粒子拉丝（沿速度反向拉 0.05s 亮线，复用 v2.15 电焊拖尾画法）
+  streakTime?: number
+  streakWidthScale?: number
   speedJitter?: number // 初速随机幅度 0–1（每粒 ×(1±jitter)，默认 0.5）
   lifeJitter?: number // 寿命随机幅度 0–1（默认 0.4）
   sizeJitter?: number // 尺寸随机幅度 0–1（每粒 ×(1±jitter)，默认 0）
@@ -77,9 +122,11 @@ export interface BurstOpts {
   dirX?: number // 命中方向单位向量（bias>0 时角度向其收束）
   dirY?: number
   bias?: number // 方向偏置 0–1：0=全周均匀，1=完全沿命中方向锥形爆发
+  spread?: number // 方向锥全角（弧度）；与 dir+bias 配合，缺省沿用旧偏置算法
   inheritVx?: number // 速度继承分量（调用方算好：弹速×inherit）
   inheritVy?: number
-  shape?: 'shieldShard'
+  shape?: 'shieldShard' | 'shieldCrystal' | 'debris'
+  spriteScale?: number
 }
 
 /** 爆发发射（爆炸火花/烟尘、命中碎屑）：方向向外全周随机；速度/寿命 jitter 均 seeded 确定性 */
@@ -92,10 +139,22 @@ export function spawnBurst(pool: ParticlePool, o: BurstOpts) {
   const dirAng = hasDir ? Math.atan2(o.dirY!, o.dirX!) : 0
   for (let i = 0; i < o.count; i++) {
     const randAng = hash01(o.seed * 31 + i * 7) * Math.PI * 2
-    const ang = hasDir ? dirAng + (randAng - dirAng) * (1 - bias) : randAng // bias 越大越向命中方向收束
-    const spd = o.speed * (1 + (hash01(o.seed * 13 + i) * 2 - 1) * sj)
-    const life = o.life * (1 + (hash01(o.seed * 7 + i * 3) * 2 - 1) * lj)
-    const size = o.size * (1 + (hash01(o.seed * 41 + i * 17) * 2 - 1) * zj)
+    let ang = randAng
+    if (hasDir) {
+      if (o.spread !== undefined) {
+        const spread = Math.min(Math.PI * 2, Math.max(0, o.spread))
+        const coneAng = dirAng + (hash01(o.seed * 47 + i * 13) - 0.5) * spread
+        const delta = Math.atan2(Math.sin(coneAng - randAng), Math.cos(coneAng - randAng))
+        ang = randAng + delta * bias
+      } else ang = dirAng + (randAng - dirAng) * (1 - bias) // 兼容既有爆发的偏置形态
+    }
+    let spd = o.speed * (1 + (hash01(o.seed * 13 + i) * 2 - 1) * sj)
+    let life = o.life * (1 + (hash01(o.seed * 7 + i * 3) * 2 - 1) * lj)
+    let size = o.size * (1 + (hash01(o.seed * 41 + i * 17) * 2 - 1) * zj)
+    const shardClass = o.shape === 'shieldShard' ? hash01(o.seed * 53 + i * 31) : 0.5
+    // 主碎片分层：30% 大而缓、50% 标准、20% 狭长高速；总粒子数不因此增加。
+    if (o.shape === 'shieldShard' && shardClass < 0.3) { spd *= 0.72; life *= 1.22; size *= 1.2 }
+    else if (o.shape === 'shieldShard' && shardClass >= 0.8) { spd *= 1.38; life *= 0.68; size *= 0.62 }
     push(pool, {
       x: o.x, y: o.y,
       vx: Math.cos(ang) * spd + (o.inheritVx ?? 0), // 速度继承：沿弹道方向甩出
@@ -103,9 +162,12 @@ export function spawnBurst(pool: ParticlePool, o: BurstOpts) {
       life, maxLife: life,
       size, color: o.color, drag: o.drag, grow: o.grow ?? 0,
       streak: o.streak, // v2.54 透传
+      streakTime: o.streakTime,
+      streakWidthScale: o.streakWidthScale,
       shape: o.shape,
+      spriteScale: o.spriteScale,
       rotation: o.shape ? hash01(o.seed * 17 + i * 19) * Math.PI * 2 : undefined,
-      spin: o.shape ? (hash01(o.seed * 23 + i * 29) * 2 - 1) * 11 : undefined,
+      spin: o.shape ? (hash01(o.seed * 23 + i * 29) * 2 - 1) * (o.shape === 'shieldCrystal' ? 17 : shardClass < 0.3 ? 5 : shardClass >= 0.8 ? 15 : 10) : undefined,
       turb: o.turb ?? 0, phase: hash01(o.seed * 5 + i * 11) * Math.PI * 2,
     })
   }
@@ -124,13 +186,16 @@ export interface TrailSpawnOpts {
   fadeIn?: number
   flicker?: number
   streak?: boolean // v2.15 电焊式拖尾（散发飞溅）
+  streakTime?: number
+  streakWidthScale?: number
 }
 
 /** 尾焰单粒发射 */
 export function spawnTrail(pool: ParticlePool, x: number, y: number, o: TrailSpawnOpts) {
   push(pool, {
     x, y, vx: o.vx, vy: o.vy, life: o.life, maxLife: o.life, size: o.size, color: o.color,
-    drag: o.drag, grow: o.grow ?? 0, growUntil: o.growUntil, colorEnd: o.colorEnd, fadeIn: o.fadeIn, flicker: o.flicker, streak: o.streak,
+    drag: o.drag, grow: o.grow ?? 0, growUntil: o.growUntil, colorEnd: o.colorEnd, fadeIn: o.fadeIn, flicker: o.flicker,
+    streak: o.streak, streakTime: o.streakTime, streakWidthScale: o.streakWidthScale,
   })
 }
 

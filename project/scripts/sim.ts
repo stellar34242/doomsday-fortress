@@ -1,36 +1,61 @@
 // 无头模拟验证脚本：esbuild 打包后用 node 运行。
 // 覆盖两份设计文档的关键验收口径。
 import {
-  ALLY_DEFS, AMMO, applyMountFoot, BARREL_HP, COLS, ROWS, buildWave, CORE, DEFAULT_FORTRESS, ENEMY_DEFS, ENERGY, FORTRESS_DEFS, FORTRESS_INTERIOR, M_PER_CELL, MOUNT_FOOT, RUINS_HP, SPECIAL_MULT, START_GOLD, TURRET_DEFS, WALL_BUILD_COST,
+  ALLY_DEFS, AMMO, BARREL_HP, BASE_CELL, COLS, buildWave, CORE, DEFAULT_FORTRESS, ENEMY_DEFS, ENERGY, FORTRESS_DEFS, FORTRESS_INTERIOR, M_PER_CELL, RUINS_HP, SPECIAL_MULT, TURRET_DEFS, VEHICLE_PLACEHOLDER_COLOR, VERTICAL_LAUNCH_FRAMES, WALL_BUILD_COST,
   WALL_HP, PROJECTILE_ARTS, FLASH_DURATION, MODULE_DEFS,
+  hardpointBelowVehicleBody, moduleAssemblyPoints, resolveUnitDestructionEffect, turretAmmoExchangeRate, turretAssemblyPoints,
 } from '../src/game/config'
 import type { BattleObject, EnemyKind, FortressDef, TurretDef, TurretTag } from '../src/game/config'
 import { trackPlacements,
-  allySpawnPoint, artMounts, blockerAt, turretRenderKey, buildModule, canMountTurret, canPlaceModule, computePathField, demolishAt, demolishModule, dirX, dirY, wrapAngle,
-  damageFortress, eventRandom, fortressArmorSideAt, fortressCells, fortressReachedFinish, fortressRect, initialState,
-  fortressCooling, fortressDef, fortressMaxHp, fortressSpeed, fortressTurnSpeed, hardpointArcContains, hardpointWorldPos, moduleBonuses, moduleCells, moduleDefOf, moduleFoot, moduleSpecialMult, mountTurret, muzzlePos, placeBaseCellAt, placeTurret, resourceCaps,
-  syncDerivedWalls, tick,
+  allySpawnPoint, artMounts, blockerAt, turretRenderKey, buildModule, canMountTurret, canPlaceModule, computePathField, demolishAt, demolishModule, dirX, dirY, wrapAngle, fortressCenter,
+  damageAlly, damageEnemy, damageFortress, defenseWaveCountdown, defenseWaveSpawnPoint, destroyObjectiveProgress, enemyVehicleArmorSideAt, eventRandom, fortressArmorSideAt, fortressCells, fortressReachedFinish, fortressRect, initialState,
+  fortressAssemblyAllowed, fortressCooling, fortressDef, fortressInAssemblyZone, fortressInStartZone, fortressMaxHp, fortressSpeed, fortressSupplyStatus, fortressTurnSpeed, hardpointArcContains, hardpointWorldPos, levelServiceZones, moduleBonuses, moduleCells, moduleDefOf, moduleFoot, moduleSpecialMult, mountTurret, muzzlePos, placeBaseCellAt, placeTurret, resourceCaps,
+  syncDerivedWalls, tick, startWave, isTerminalPhase, interactWithObjectAt, interactWithUnitAt, interactionBubbles, primaryObjectiveStatus, resolveEventChoice, completeEventAssembly, secondaryObjectiveStatuses, settlementObjectiveStatuses, setTurretAutoFire,
   turretRangeBonus, unmountTurret,
   RACK_RELOAD_ANIM, rackMissilePos, validateFortressDef, validateTemplateClosed,
-  beamMarch, beamLength, BEAM_ON_SPEED, BEAM_FADE, fortressMarkColumns, modulePlanningFits, simulateTurretHeat, wheelPlacements, wheelVisualSteerAngle,
+  beamMarch, beamLength, BEAM_ON_SPEED, BEAM_FADE, fortressMarkColumns, modulePlanningFits, simulateTurretHeat, wheelFrameCount, wheelPlacements, wheelRollFrame, wheelVisualSteerAngle,
   shieldStats, enemyProjectileFortressHit, fortressDamageLocalPoint, fortressDistanceToPoint, fortressPenetrationChance, FORTRESS_DAMAGE_MARK_CAP,
+  GEOMETRIC_BULLET_VISUAL_SIZE, UNIT_BODY_DAMAGE_VISUALS_ENABLED, UNIT_BODY_DECALS_ENABLED, UNIT_FOLLOW_GAP,
+  EXPLOSION_COVER_REDUCTION, objectBlocksEnvironmentShot, shellArcVisual, UNIT_RETALIATION_MEMORY_SECONDS,
+  fortressLocalCenter, fortressShapeOrigin, selectSiegeTarget, applyFortressRamming, applyFortressVehicleCollisions, moveEnemyVehicleToward, moveGroundUnitWithBlockers, moveUnitAircraftToward, moveUnitVehicleToward, resolveUnitCollisions, fortressRamWeight, fortressRamWeightFactor, ensureUnitVehicleTurrets,
+  advanceWalkerAnimation, hoverVelocityStep, walkerMotionStep,
+  RAM_MIN_SPEED, VEHICLE_COLLISION_COOLDOWN,
+  pointInsideUnitShape, segmentUnitShapeEntry, coolUnitVehicleHeat, factionsHostile, factionsShareVision, playerTeamCanSeePoint, playerTeamVisionSources,
+  advanceUnitAircraftCrash, beginUnitAircraftCrash, constrainedHardpointBodyHeading, currentUnitAltitude, projectileAltitudeAtTravel, ROTORCRAFT_AUDIO_FULL_SPEED_RATIO, ROTORCRAFT_AUDIO_MIN_GAIN, rotorcraftMovementAudioGain, setUnitAircraftTargetAltitude, unitAircraftMovementAudioGain, updateUnitAircraftAltitude,
+  applyMissileInterceptionDamage, interceptableMissileTargets, missileCurveAmplitudeScale, missileEjectOffsetDeg, segmentCircleEntry, applyCombatLoadout,
+  applyPlayerUnitCombatLoadout, playerUnitCombatLoadout, playerUnitLoadoutChangeCost,
+  playerUnitResourceDetails, playerTurretResourceCaps, nonCombatNavigationStats,
 } from '../src/game/engine'
-import { LEVEL, normalizeObjective, parseLevel, templateWallCells } from '../src/game/level'
-import { simAmmoFx, simAmmoSeq, canPlay, fxTick, createFxState, FX_PREVIEW_SPEED, FX_SEQ_HIT_X, FX_RAY_SEQ_ON, fxRaySeqFade, fxRaySeqLen } from '../src/game/ammoFxPreview'
-import { createPool } from '../src/game/particles'
-import { chargeFrameRect, resCompatUrl, validateArt, projectileArtDef, projectileArtState, resolveSpriteFolder, resolveAmmoFolder, turretArtState, turretLayerSrcs, ammoProjectileSrc, resolveTrailFx, resolveExplosionFx, resolveImpactFx, beamArtConfig, beamArtConfigOf, smokeDuration } from '../src/game/art'
-import { migrateModuleDefs, parseProjectileArts, parseTurretDefs, serializeProjectileArts, serializeTurretDefs } from '../src/game/persist'
-import { deleteCustomFortress, fortressPersistFailed, getSelectedFortressId, isBuiltinFortressOverridden, resetPersistedToDefaults, saveCustomFortress, setSelectedFortressId } from '../src/game/persist'
+import { defaultStage, normalizeObjective, parseLevel, templateWallCells } from '../src/game/level'
+import { simAmmoFx, simAmmoSeq, canPlay, fxTick, createFxState, FX_SEQ_HIT_X, FX_RAY_SEQ_ON, fxRaySeqFade, fxRaySeqLen } from '../src/game/ammoFxPreview'
+import { chargeFrameRect, resCompatUrl, validateArt, projectileArtDef, projectileArtState, projectileBodyFrameRect, resolveSpriteFolder, resolveAmmoFolder, turretArtState, turretLayerSrcs, ammoProjectileSrc, resolveTrailFx, resolveExplosionFx, resolveImpactFx, beamArtConfig, beamArtConfigOf, smokeDuration, verticalLaunchFrameRect } from '../src/game/art'
+import { migrateBeamTurretSounds, migrateLegacyProjectileMetrics, migrateLegacyTurretArt, migrateLegacyTurretMetrics, migrateModuleDefs, migrateProjectileInterception, migrateRetiredRayTurret, migrateRetiredStandardMissileAsset, migrateRetiredTurretFields, migrateTurretLayerDefaults, migrateTurretResourceCapacity, migrateVerticalLaunchProjectileAsset, parseProjectileArts, parseTurretDefs, serializeProjectileArts, serializeTurretDefs } from '../src/game/persist'
+import { deleteCustomFortress, deleteCustomVehicleDefinition, fortressPersistFailed, getSelectedFortressId, isBuiltinFortressOverridden, isSupportedFortressLibVersion, migrateLegacyCustomVehicleUnits, resetPersistedToDefaults, saveCustomFortress, saveVehicleUnitDefinition, setSelectedFortressId } from '../src/game/persist'
 import { applyConfig, applyConfigSmart, encodeBase64, exportConfig, exportConfigJson, parseConfig, parseConfigSmart } from '../src/game/config_transfer'
-import { addAsset, filterAssets, getAsset, importUploads, listAssets, removeAsset, resolveAssetSrc, uploadsForExport, ASSET_CATEGORY_NAME } from '../src/game/assetlib'
-import { createPool, glowFlicker, gradientColorKey, ringProgress, spawnBurst, spawnTrail, stepParticles } from '../src/game/particles'
+import { addAsset, filterAssets, getAsset, importUploads, independentTileIndicesFromPixels, isAutotileAsset, listAssets, removeAsset, resolveAssetSrc, tileSheetForDimensions, uploadsForExport, weightedIndependentTileIndex, ASSET_CATEGORY_NAME } from '../src/game/assetlib'
+import { BEAM_CONTINUOUS_AUDIO_DELAY, GLOBAL_CUE_LABELS, UI_BUTTON_CLICK_PRESET_ID, audioProjectConfig, autoSoundPreset, resolveCue } from '../src/game/audioConfig'
+import { DISPLAY_RESOLUTION_PRESETS, normalizeDisplayConfig, resolveDisplayViewport } from '../src/game/displayConfig'
+import { gameParameters, setBattleVisionEnabled, setEntityShadowsVisible, setHitFxVisibility, setNaturalHeatDissipation, setPlayerVisionMeters, setUnitDestructionWreckageScalePercent, setUnitHealthBarsVisible } from '../src/game/gameParameters'
+import { createPool, glowFlicker, gradientColorKey, projectileTailEmitter, projectileTrailVelocity, rearOnlyTrailVelocity, ringProgress, spawnBurst, spawnTrail, stepParticles } from '../src/game/particles'
 import { effectParams, effectWorldPos, emitFortressEffects, trackMarkStep, updateTrackMarks, TRACK_MARK_CAP, TRACK_MARK_LIFE, type TrackMark, type TrackMarkState } from '../src/game/fortressFx'
 import { craterOpacity, craterRadius, updateCraters, CRATER_CAP, CRATER_LIFE, type Crater } from '../src/game/craters'
-import { clampViewY, edgeBandView, wallFaceInfo, wallVertexInfo, classifyWallTile, fortressDamageStage, shieldCornerRadius, shieldEdgePulse, shieldHexLayout, shieldHexRipple, shieldPerimeterSamples, shieldUnfoldProgress, shieldUnfoldScale, shieldBreakEnvelope, shieldFieldMotion, shieldShardSize } from '../src/game/render'
-import { canPlaceBaseCell, COLS_MIN, defaultLevel, defaultLevelLibrary, invalidateWallInfo, isBaseCell, isInnerCell, isWallSegment, LEVEL, LEVEL_LIBRARY, levelLibraryForExport, mergeBaseCells, parseLevelLibrary, reanchorCols, reanchorRows, resetLevel, saveLevelLibrary } from '../src/game/level'
+import { airUnitShadowTransform, beamFadeSpan, clampViewX, clampViewY, compareSceneRenderItems, groundEntityShadowTransform, wallFaceInfo, wallVertexInfo, classifyWallTile, fortressDamageStage, missileEngineGlowLayout, ricochetVisualScale, shieldCornerRadius, shieldEdgeFlowGain, shieldEdgePulse, shieldHexLayout, shieldHexRipple, shieldPerimeterSamples, shieldUnfoldProgress, shieldUnfoldScale, shieldBreakEnvelope, shieldFieldMotion, shieldShardSize, shouldFlipEvenBarrel, trackMarkVisibleOnScreen, unboundedCenteredView, unitDamageMarkVisible, unitDestructionVisualParams, vehicleDamageBrightness, vehicleDamageSmokeSourceCount, verticalLaunchTailProjection, walkerFrameCount, walkerFrameIndex } from '../src/game/render'
+import { ACHIEVEMENT_SHOP_ITEMS, availableMedalCount, awardLevelProgress, canPlaceBaseCell, COLS_MIN, defaultLevel, defaultLevelLibrary, deployableFortressIdsOf, equipmentUnlockId, globalVariableValues, hasLevelMedal, invalidateWallInfo, isBaseCell, isEquipmentUnlocked, isInnerCell, isLevelUnlocked, isWallSegment, LEVEL, LEVEL_LIBRARY, levelLibraryForExport, mergeBaseCells, missionBriefingOf, normalizeEventActions, parseLevelLibrary, purchaseEquipment, reanchorCols, reanchorRows, removeUnitDefinitionReferences, resetLevel, saveLevelLibrary } from '../src/game/level'
+import type { LevelProgress } from '../src/game/level'
+import { eraseTileCellsInRect, fillTileCellsInRect, gridCellSelectionRect, levelCenterCell, pruneVisualLayersOutsideBounds, validateLevelReferences } from '../src/game/levelEditor'
+import type { LevelTileCell } from '../src/game/levelEditor'
 import { rmxpAutotileIndex, rmxpQuarterSrc, RMXP_SUBTILES } from '../src/game/autotile'
 import { clearFortressBodyAlpha, registerFortressBodyAlpha } from '../src/game/fortressBodyMask'
-import type { Enemy, ExplosionFx, GameState, Turret } from '../src/game/engine'
+import { bodyCollisionCells, bodyCollisionFromPixels } from '../src/game/fortressCollision'
+import { dilateShieldMask, sampleShieldMaskInterior, traceShieldMaskContours } from '../src/game/shieldMask'
+import { wreckageFrameRect } from '../src/game/fxDraw'
+import { aiRangeDecision, computeAIStandingRange, deleteCustomUnitDef, enemyUnitDef, SIEGE_TARGETS, allyUnitId, enemyUnitId, fortressUnitId, importUnitLibrary, migrateLegacyTargetKind, normalizeKamikazeConfig, normalizeUnitAI, playableVehicleDefs, rotorPlacements, saveCustomUnitDef, targetingAllowsTarget, unitAltitude, unitDefById, unitFootprint, unitLibrary, unitLibraryForExport, unitShadowScale, unitTypeConfig, validateUnitDef } from '../src/game/unit'
+import { unitUsesGroundApproachPath } from '../src/game/ai/vehicleCombatAI'
+import type { Enemy, EnemyProjectile, ExplosionFx, GameState, Turret } from '../src/game/engine'
+import { centeredRect, geometryCenter, rectGeometryCenter } from '../src/game/geometry'
+import { deleteObjectType, deleteTerrainType, newObjectType, newTerrainType, objectTypeById, objectTypeLibrary, restoreWorldTypeLibrary, saveObjectType, saveTerrainType, snapshotWorldTypeLibrary, terrainTypeById, terrainTypeLibrary } from '../src/game/worlddef'
+import { firstLoadoutModulePlacement, normalizeCombatVehicleLoadout, normalizeVehicleLoadout, vehicleLoadoutAssemblyPoints, vehicleLoadoutStats } from '../src/game/loadout'
+import type { VehicleLoadoutPreset } from '../src/game/loadout'
 
 // ---------- 确定性随机 ----------
 let seed = 42
@@ -40,6 +65,8 @@ Math.random = () => {
 }
 // 精度散布归零（r=0 => 命中点=瞄准点），需要散布时单独恢复
 const zeroRandom = () => 0
+// 旧配置以 25m/格编写；现在统一为 3.2m/格。测试中的历史米制参数按格距等比迁移。
+const legacyMeters = (value: number) => value * M_PER_CELL / 25
 
 // ---------- 测试框架 ----------
 let failures = 0
@@ -59,6 +86,7 @@ function mkEnemy(s: GameState, kind: EnemyKind, x: number, y: number, hp = 10000
   }
   const e: Enemy = {
     id: s.nextId++, kind, x, y, hp, maxHp: hp,
+    controller: 'static',
     mode: 'attack', targetKind: 'object', targetId: pin.id, // 钉住：攻击假物体不移动
     goalX: x, goalY: y, hasGoal: true, pathVersion: 0,
     attackedBy: [], dots: [], hitFlash: 0,
@@ -109,6 +137,13 @@ const restoreLevel = () => {
   Object.assign(LEVEL, structuredClone(LEVEL_DEFAULT))
   invalidateWallInfo()
 }
+const configureObjective = <T extends typeof LEVEL>(level: T, objective: unknown) => {
+  const normalized = normalizeObjective(objective, (objective as { type?: unknown } | null)?.type === 'reach' ? 'advance' : 'defend', level.rows, level.cols)
+  level.objective = structuredClone(normalized)
+  const stage = defaultStage(structuredClone(normalized))
+  level.stages = [stage]
+  level.startStageId = stage.id
+}
 
 function arena(): GameState {
   const s = initialState()
@@ -147,70 +182,78 @@ function run(s: GameState, seconds: number, dt = 0.05, perTick?: (s: GameState) 
 const byId = <T extends { id: number }>(arr: T[], id: number) => arr.find(x => x.id === id)
 
 // ================================================================
-// --- 内置堡垒出厂贴图守卫（v1.32）：standard 携带底座/主体贴图路径 ---
+// --- 内置载具出厂贴图守卫：仅保留统一载具素材 ---
 {
   const std = FORTRESS_DEFS.find(f => f.id === 'standard')!
-  check('内置堡垒出厂带底座/主体贴图（/res/fortresses 路径）',
-    std.spriteBase === '/res/fortresses/fort_1_02.png' && std.spriteBody === '/res/fortresses/fort_1_01.png'
-    && DEFAULT_FORTRESS.spriteBase === std.spriteBase,
-    `base=${std.spriteBase} body=${std.spriteBody}`)
+  check('内置载具出厂只配置载具素材（/res/fortresses 路径）',
+    std.spriteBase === undefined && std.spriteBody === '/res/fortresses/fort_1_01.png'
+    && DEFAULT_FORTRESS.spriteBase === undefined && DEFAULT_FORTRESS.spriteBody === std.spriteBody,
+    `legacyBase=${std.spriteBase} vehicle=${std.spriteBody}`)
 }
 
 console.log('== 炮塔验收 ==')
+{
+  check('受限炮位车体协同：固定前向炮位在侧向目标时要求机体转向，全视角炮位不干预车体',
+    Math.abs(wrapAngle((constrainedHardpointBodyHeading(0, Math.PI / 2, { fixed: 0 }, 10) ?? 0) - Math.PI / 2)) < 1e-9
+      && constrainedHardpointBodyHeading(0, Math.PI / 2, {}, 10) === null)
+  const arcAssistHeading = constrainedHardpointBodyHeading(0, Math.PI / 2, { arc: { start: -30, end: 30 } }, 10)
+  check('受限炮位车体协同：目标在视界外时转入边界内侧并保留防抖余量',
+    arcAssistHeading !== null
+      && hardpointArcContains({ start: -30, end: 30 }, wrapAngle(Math.PI / 2 - arcAssistHeading!)))
+}
 
 console.log('== v1.72 口令覆盖出厂配置验收 ==')
 {
   const mgD = TURRET_DEFS.find(d => d.id === 'mg')!
-  check('口令覆盖：mg 双管轮流/6连发/不产热/弹速400/无穿透/DualGun素材/实弹引用（v2.45 口令(5)：伤害5/射速2/精度12）',
+  check('口令覆盖：mg 双管轮流/6连发/不产热/弹速51.2m/s/无穿透/DualGun素材/实弹引用',
     mgD.barrels === 2 && mgD.barrelMode === 'sequential' && mgD.burst === 6 && mgD.heatPerShot === 0
-    && mgD.projectileSpeed === 400 && mgD.pierce?.count === 0 && mgD.fireRate === 2 && mgD.damage === 5 && mgD.accuracy === 12
+    && mgD.projectileSpeed === legacyMeters(400) && mgD.pierce?.count === 0 && mgD.fireRate === 2 && mgD.damage === 5
+    && Math.abs(mgD.accuracy - legacyMeters(12)) < 1e-9
     && mgD.art?.turretAsset === 'builtin:library/dualgun_s1' && mgD.art?.barrelAsset === 'builtin:library/dualgun_s2'
     && mgD.art?.baseAsset === 'none' && mgD.art?.projectile === 'bullet_std' && (mgD.art?.barrels?.length ?? 0) === 2,
     JSON.stringify({ barrels: mgD.barrels, mode: mgD.barrelMode, burst: mgD.burst, heat: mgD.heatPerShot, spd: mgD.projectileSpeed }))
   const paB = projectileArtDef('bullet_std')
   const paR = projectileArtDef('rocket_std')
   const paRay = projectileArtDef('ray_std')
-  check('口令覆盖：弹丸库 6 条（实弹=贴图+命中 / 火箭=upload-1+惯性尾焰+爆炸 / 射线=命中 / v2.19 集束导弹=missile2_s / v2.45 炮弹=shell_m）',
-    PROJECTILE_ARTS.length === 6
+  check('弹丸库包含 8 条当前内置载荷（标准脉冲射线已删除）',
+    PROJECTILE_ARTS.length === 8 && !projectileArtDef('pulse_std')
     && paB?.projectileAsset === 'builtin:library/shell_s' && paB?.impact !== undefined
-    && paR?.projectileAsset === 'upload-1' && paR?.trail?.template === 'inertia' && paR?.explosion !== undefined
+    && paR?.projectileAsset === 'builtin:library/missile2_s' && paR?.trail?.template === 'inertia' && paR?.explosion !== undefined
     && paRay?.impact !== undefined
     && projectileArtDef('custom_ammo_1')?.projectileAsset === 'builtin:library/missile2_s'
     && projectileArtDef('custom_ammo_1')?.trail?.template === 'inertia'
     && projectileArtDef('custom_ammo_2')?.projectileAsset === 'builtin:library/shell_m'
-    && projectileArtDef('custom_ammo_2')?.kind === 'bullet',
+    && projectileArtDef('custom_ammo_2')?.kind === 'bullet'
+    && projectileArtDef('custom_ammo_3')?.projectileAsset === 'builtin:library/shell_m',
     JSON.stringify(PROJECTILE_ARTS.map(p => [p.id, p.projectileAsset])))
   const fd0 = DEFAULT_FORTRESS
-  check('口令覆盖：堡垒 11 炮位（无隐藏内置、2 个导弹限定）+ 内部空间 18 格',
-    fd0.hardpoints.length === 11 && !fd0.hardpoints.some(h => h.hidden || h.builtIn)
+  check('口令覆盖：堡垒 11 炮位（无隐藏炮塔素材、2 个导弹限定）+ 内部空间 18 格',
+    fd0.hardpoints.length === 11 && !fd0.hardpoints.some(h => h.hideTurretArt || h.hidden || h.builtIn)
     && (fd0.interiorCells?.length ?? 0) === 18
     && fd0.hardpoints.filter(h => h.types?.includes('missile')).length === 2
     && fd0.hardpoints.some(h => h.id === 'hpL1' && h.size === 'L'),
     `hps=${fd0.hardpoints.length} cells=${fd0.interiorCells?.length}`)
-  const up1 = getAsset('upload-1')
-  check('口令覆盖：出厂上传播种 upload-1（missile_s/弹丸/非内置；内置 41 件）',
-    !!up1 && up1.name === 'missile_s' && up1.category === 'projectile' && !up1.builtin
-    && listAssets().filter(a => a.builtin).length === 41, // v1.85：+track01；v2.11：15 光束；v2.15：+3 特效；v2.17：+2；v2.71：+3 护盾；v2.72：+堡垒底座/主体
-    JSON.stringify(up1 ? { id: up1.id, name: up1.name, cat: up1.category } : null))
+  check('标准导弹旧 upload-1/missile_s 已删除，内置素材数量保持稳定',
+    getAsset('upload-1') === undefined && listAssets().filter(a => a.builtin).length === 38,
+    JSON.stringify(getAsset('upload-1')))
+  importUploads([{ id: 'upload-1', name: 'missile_s', src: 'data:image/png;base64,legacy', category: 'projectile' }])
+  check('旧口令不会重新导入已退役的标准导弹固定尾焰贴图', getAsset('upload-1') === undefined)
 }
-console.log('== v1.76 炮塔型号（S/M/L）决定占格验收 ==')
+console.log('== 炮塔型号占格取消验收 ==')
 {
-  check('v1.76：型号占格映射 S=1×1 / M=1×2 / L=2×2',
-    MOUNT_FOOT.S.w === 1 && MOUNT_FOOT.S.h === 1 && MOUNT_FOOT.M.w === 1 && MOUNT_FOOT.M.h === 2
-    && MOUNT_FOOT.L.w === 2 && MOUNT_FOOT.L.h === 2, JSON.stringify(MOUNT_FOOT))
-  check('v1.76：全部炮塔占格与型号一致（beam L→2×2 / pulse M→1×2 已同步）',
-    TURRET_DEFS.every(d => d.w === MOUNT_FOOT[d.mount].w && d.h === MOUNT_FOOT[d.mount].h),
-    TURRET_DEFS.map(d => `${d.id}:${d.mount}${d.w}x${d.h}`).join(' '))
+  check('炮塔定义保留 S/M/L 槽位型号，w/h 仅作为美术坐标范围',
+    TURRET_DEFS.every(d => ['S', 'M', 'L'].includes(d.mount) && d.w > 0 && d.h > 0),
+    TURRET_DEFS.map(d => `${d.id}:${d.mount}/${d.w}x${d.h}`).join(' '))
   // v2.14：磁轨光束塔口令沉淀为出厂默认（含 ray_std 光束表现组）
   const beam14 = TURRET_DEFS.find(d => d.id === 'beam')!
   const ray14 = PROJECTILE_ARTS.find(a => a.id === 'ray_std')!
-  check('v2.19：磁轨光束塔出厂值 = 口令(4)内容（参数/型号 M=1×2/美术分层/充能 2s/充能 6 帧偏移 [0,0.2]）',
-    beam14.cost === 20 && beam14.rotateSpeed === 100 && beam14.aimCone === 5 && beam14.rangeMax === 250 // v2.45 口令(5)：rotateSpeed 90→100
-    && beam14.beamWidth === 10 && beam14.dot?.damage === 15 && beam14.dot?.interval === 0.5
-    && beam14.reload === 0.5 && beam14.mount === 'M' && beam14.w === 1 && beam14.h === 2
-    && beam14.chargeTime === 2 && beam14.art?.turretAsset === 'builtin:library/laser_m'
+  check('磁轨光束塔保留战斗参数，退役炮身与充能贴图后使用无素材回退',
+    beam14.cost === 20 && beam14.rotateSpeed === 100 && beam14.aimCone === 5 && beam14.rangeMax === legacyMeters(250) // v2.45 口令(5)：rotateSpeed 90→100
+    && beam14.beamWidth === legacyMeters(10) && beam14.dot?.damage === 15 && beam14.dot?.interval === 0.5
+    && beam14.fireRate === 4.545 && beam14.mount === 'M' && beam14.w === 1 && beam14.h === 2
+    && beam14.chargeTime === 2 && beam14.art?.turretAsset === 'none'
     && beam14.art?.baseAsset === 'none' && beam14.art?.barrelAsset === 'none' && beam14.art?.flashAsset === 'none'
-    && beam14.art?.projectile === 'ray_std' && beam14.art?.charge?.asset === 'builtin:library/charge_laser_m'
+    && beam14.art?.projectile === 'ray_std' && beam14.art?.charge?.asset === 'none'
     && beam14.art?.charge?.frames === 6 && beam14.art?.charge?.offset?.[0] === 0 && beam14.art?.charge?.offset?.[1] === 0.2
     && beam14.art?.barrels?.[0]?.muzzle[1] === 0.7,
     `cost=${beam14.cost} mount=${beam14.mount} charge=${beam14.chargeTime} art=${JSON.stringify(beam14.art?.turretAsset)}`)
@@ -220,9 +263,6 @@ console.log('== v1.76 炮塔型号（S/M/L）决定占格验收 ==')
     && ray14.beam?.absorb?.rate === 26 && ray14.beam?.absorb?.size === 0.05
     && ray14.beam?.scatter?.rate === 34 && ray14.beam?.scatter?.size === 0.05 && ray14.beam?.scatter?.angle === 90,
     JSON.stringify(ray14.beam))
-  const tmp = { mount: 'M' as const, w: 9, h: 9 }
-  applyMountFoot(tmp)
-  check('v1.76：applyMountFoot 归一化（加载/导入/重置时调用）', tmp.w === 1 && tmp.h === 2, JSON.stringify(tmp))
 }
 // v2.14：出厂 beam 现带 chargeTime:3，历史光束用例均假设立即起射——统一关闭（后续充能用例自行覆盖/恢复，互不影响）
 TURRET_DEFS.find(d => d.id === 'beam')!.chargeTime = 0
@@ -231,9 +271,9 @@ console.log('== v1.75 五项优化验收 ==')
   const mg75 = TURRET_DEFS.find(d => d.id === 'mg')!
   const b1 = mg75.art?.barrels?.[0]
   const b2 = mg75.art?.barrels?.[1]
-  check('v1.75/1.77：mg 炮管1 挂点(-0.1,0.25) 炮口(-0.1,0.65) / 炮管2 挂点(0.1,0.25) 炮口(0.1,0.65)',
-    !!b1 && b1.mount[0] === -0.1 && b1.mount[1] === 0.25 && b1.muzzle[0] === -0.1 && b1.muzzle[1] === 0.65
-    && !!b2 && b2.mount[0] === 0.1 && b2.mount[1] === 0.25 && b2.muzzle[0] === 0.1 && b2.muzzle[1] === 0.65,
+  check('全局32px基准：mg 炮口按12px炮管长度对准管尖',
+    !!b1 && b1.mount[0] === -0.1 && b1.mount[1] === 0.25 && b1.muzzle[0] === -0.1 && b1.muzzle[1] === 0.625
+    && !!b2 && b2.mount[0] === 0.1 && b2.mount[1] === 0.25 && b2.muzzle[0] === 0.1 && b2.muzzle[1] === 0.625,
     JSON.stringify(mg75.art?.barrels))
   const pb75 = projectileArtDef('bullet_std')
   check('v1.83：标准实弹尾焰参数（standard 模板；v1.75 原值 0.05/0.02 亚像素不可见已修正）',
@@ -242,12 +282,12 @@ console.log('== v1.75 五项优化验收 ==')
     JSON.stringify(pb75?.trail))
   // 充能素材字段：口令导出→解析往返不丢失（charge.asset 进入 TurretDef.art 序列化；仅解析不应用，避免注册表被替换）
   const mgC = TURRET_DEFS.find(d => d.id === 'mg')!
-  mgC.art!.charge = { offset: [0, 0.3], frames: 4, asset: 'builtin:library/charge_laser_m' }
+  mgC.art!.charge = { offset: [0, 0.3], frames: 4, asset: 'none' }
   const tok75 = exportConfig()
   const parsed75 = parseConfig(tok75)
   const rt = parsed75.ok ? parsed75.bundle.turretDefs.find(d => d.id === 'mg')?.art?.charge : undefined
   check('v1.75：充能素材选择字段随口令往返（charge.asset 保留）',
-    parsed75.ok && rt?.asset === 'builtin:library/charge_laser_m' && rt.frames === 4,
+    parsed75.ok && rt?.asset === 'none' && rt.frames === 4,
     JSON.stringify(rt))
   delete mgC.art!.charge // 还原出厂（mg 默认无充能动画）
   const lv75 = defaultLevel()
@@ -275,22 +315,19 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   check('v1.74：dualgun_s1.png == 口令 upload-2（20×20 新贴图）',
     rd('dualgun_s1.png').equals(tk['upload-2']), 'bytes=' + rd('dualgun_s1.png').length)
   check('v1.74：dualgun_s2.png == 口令 upload-3', rd('dualgun_s2.png').equals(tk['upload-3']), 'bytes=' + rd('dualgun_s2.png').length)
-  // v2.16：fx_fire_s 贴图已被用户新素材替换（同 6×18），不再等于口令 upload-4；改查 PNG 魔数+尺寸+字节数
+  // v2.16：这些内置贴图允许用户替换；PNG 重编码会改变文件字节数，因此只校验格式与运行时依赖的像素尺寸。
   const pngDim = (b: Buffer) => ({ w: b.readUInt32BE(16), h: b.readUInt32BE(20), magic: b.readUInt32BE(0) === 0x89504e47 })
-  const fxB = rd('fx_fire_s.png'), lmB = rd('laser_m.png'), clmB = rd('charge_laser_m.png')
-  const fxD = pngDim(fxB), lmD = pngDim(lmB), clmD = pngDim(clmB)
-  check('v2.16：fx_fire_s/laser_m/charge_laser_m 三贴图已替换为新素材（PNG 魔数+尺寸+字节数）',
-    fxD.magic && fxD.w === 6 && fxD.h === 18 && fxB.length === 1280 &&
-    lmD.magic && lmD.w === 32 && lmD.h === 42 && lmB.length === 4096 &&
-    clmD.magic && clmD.w === 14 && clmD.h === 21 && clmB.length === 1096,
-    `fx=${fxD.w}x${fxD.h}/${fxB.length} lm=${lmD.w}x${lmD.h}/${lmB.length} clm=${clmD.w}x${clmD.h}/${clmB.length}`)
-  // v2.17：两张新内置贴图文件（魔数+尺寸+字节数）
-  const ml2B = rd('missilelauncher2_s.png'), m2B = rd('missile2_s.png')
-  const ml2D = pngDim(ml2B), m2D = pngDim(m2B)
-  check('v2.17：missilelauncher2_s/missile2_s 贴图落位（PNG 魔数+尺寸+字节数）',
-    ml2D.magic && ml2D.w === 26 && ml2D.h === 28 && ml2B.length === 3026 &&
-    m2D.magic && m2D.w === 3 && m2D.h === 12 && m2B.length === 1162,
-    `ml2=${ml2D.w}x${ml2D.h}/${ml2B.length} m2=${m2D.w}x${m2D.h}/${m2B.length}`)
+  const fxB = rd('fx_fire_s.png')
+  const fxD = pngDim(fxB)
+  check('v2.16：fx_fire_s 贴图格式与像素尺寸正确',
+    fxD.magic && fxD.w === 6 && fxD.h === 18,
+    `fx=${fxD.w}x${fxD.h}/${fxB.length}`)
+  // v2.17：missile2_s 内置贴图允许替换，只锁定格式与尺寸，不锁定 PNG 压缩后的字节数。
+  const m2B = rd('missile2_s.png')
+  const m2D = pngDim(m2B)
+  check('v2.17：missile2_s 贴图格式与像素尺寸正确',
+    m2D.magic && m2D.w === 3 && m2D.h === 12,
+    `m2=${m2D.w}x${m2D.h}/${m2B.length}`)
   // 口令的底座分类素材未残留为出厂上传（"转移"语义：不留副本）
   check('v1.74：upload-2/3/4 不作为出厂上传播种（已转为内置）',
     !getAsset('upload-2') && !getAsset('upload-3') && !getAsset('upload-4'), '')
@@ -306,10 +343,10 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   const lib77 = getAsset('builtin:library/fx_fire_s')
   check('v1.77：fx_fire_s 素材库条目存在且分类为开火效果',
     !!lib77 && lib77.category === 'flash' && lib77.builtin === true)
-  // 炮口对准炮管尖：muzzle.x === mount.x，muzzle.y === mount.y + 管高(12px)/30
+  // 炮口对准炮管尖：muzzle.x === mount.x，muzzle.y === mount.y + 管高(12px)/BASE_CELL
   const bars = mg77.art!.barrels!
-  check('v1.77：炮口与挂点横向对齐且位于管尖（12px 管 → +0.4 格）',
-    bars.every(b => b.muzzle[0] === b.mount[0] && Math.abs(b.muzzle[1] - (b.mount[1] + 0.4)) < 1e-9),
+  check('v1.77：炮口与挂点横向对齐且位于管尖（12px 管 → +0.375 格）',
+    bars.every(b => b.muzzle[0] === b.mount[0] && Math.abs(b.muzzle[1] - (b.mount[1] + 12 / BASE_CELL)) < 1e-9),
     JSON.stringify(bars.map(b => b.muzzle)))
   // 弹丸出生点 = 炮口：挂载炮塔实际出生坐标（artPoint 链路验证）
   let st77 = initialState()
@@ -319,8 +356,8 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   const ctr = { x: tur.x + tur.w / 2, y: tur.y + tur.h / 2 }
   const dFwd = (mp77.x - ctr.x) * dirX(tur.angle) + (mp77.y - ctr.y) * dirY(tur.angle)
   const dLat = (mp77.x - ctr.x) * -dirY(tur.angle) + (mp77.y - ctr.y) * dirX(tur.angle)
-  check('v1.77：弹丸出生点世界坐标 = 锚点前伸0.65格/横偏-0.1格（炮管尖）',
-    Math.abs(dFwd - 0.65) < 1e-6 && Math.abs(dLat - (-0.1)) < 1e-6, `fwd=${dFwd.toFixed(3)} lat=${dLat.toFixed(3)}`)
+  check('v1.77：弹丸出生点世界坐标 = 锚点前伸0.625格/横偏-0.1格（炮管尖）',
+    Math.abs(dFwd - 0.625) < 1e-6 && Math.abs(dLat - (-0.1)) < 1e-6, `fwd=${dFwd.toFixed(3)} lat=${dLat.toFixed(3)}`)
 }
 
 // --- v1.79 高速弹丸出生帧位置验收 ---
@@ -339,7 +376,7 @@ console.log('== v1.74 口令素材沉淀验收 ==')
     if (p) first = { x: p.x, y: p.y, traveled: p.traveled }
   }
   const mz = muzzlePos(byId(s.turrets, t.id)!, mg, 0)
-  check('v1.79：高速弹丸首个可见帧恰在炮口（400m/s 不再偏移 v·dt）',
+  check('v1.79：高速弹丸首个可见帧恰在炮口（51.2m/s 不再偏移 v·dt）',
     !!first && Math.abs(first.x - mz.x) < 0.01 && Math.abs(first.y - mz.y) < 0.01,
     first ? `first=(${first.x.toFixed(2)},${first.y.toFixed(2)}) muzzle=(${mz.x.toFixed(2)},${mz.y.toFixed(2)})` : '未击发')
   check('v1.79：射程口径不变（首 tick 后 traveled=0）',
@@ -349,10 +386,10 @@ console.log('== v1.74 口令素材沉淀验收 ==')
 
 // --- v1.85 履带瓦片循环验收 ---
 {
-  const t85 = DEFAULT_FORTRESS.tracks![0] // trackL：x1=x2=0.43, y1=0.83, y2=7.37, R=0.5
-  const tileLen85 = 8 / 30 // v1.87：板长取瓦片原图高（Track01 = 8px → 0.267 格）
-  const step85 = tileLen85 - t85.overlapPx / 30
-  const Lc85 = t85.y2 - t85.y1
+  const t85 = DEFAULT_FORTRESS.tracks![0] // trackL：几何原点坐标 x=-2.07，y1=3.17（前），y2=-3.37（后）
+  const tileLen85 = 8 / BASE_CELL // 板长取瓦片原图高并按全局格像素换算
+  const step85 = tileLen85 - t85.overlapPx / BASE_CELL
+  const Lc85 = Math.hypot(t85.x2 - t85.x1, t85.y2 - t85.y1)
   const pl = trackPlacements(t85, 0, tileLen85)
   const straight = pl.filter(q => q.scaleY === 1)
   const roll = pl.filter(q => q.scaleY < 1)
@@ -374,17 +411,18 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   const pl2 = trackPlacements(t85, step85, tileLen85)
   check('v1.85：相位 + 一个步长 → 排布相同（无缝循环）',
     pl.length === pl2.length && pl.every((q, i) => Math.abs(q.x - pl2[i].x) < 1e-9 && Math.abs(q.y - pl2[i].y) < 1e-9 && q.scaleY === pl2[i].scaleY), '')
-  // 相位 + 半步 → 同一格点瓦片向船尾平移半步（按格点对齐：pl 相位0 首枚端点瓦片 scale<0.05 被跳过，
-  // 数组下标比格点编号小 1 → pl3[i] 对齐 pl[i-1]；只比双直线段瓦片）
-  const pl3 = trackPlacements(t85, step85 / 2, tileLen85)
-  let shiftMatched = 0, shiftOk = true
-  for (let i = 1; i < pl3.length; i++) {
-    const p3 = pl3[i], p1 = pl[i - 1]
-    if (p1.scaleY !== 1 || p3.scaleY !== 1) continue
-    if (Math.abs(p3.y - p1.y - step85 / 2) > 1e-9) { shiftOk = false; break }
-    shiftMatched++
-  }
-  check('v1.85：相位 + 半步 → 瓦片向船尾平移半步', shiftOk && shiftMatched > 10, `matched=${shiftMatched}`)
+  // 正相位代表前进。路径坐标 s 的正方向为船头→船尾，因此可见纹理应取反，向船头滚动。
+  // 使用 1/4 步（而非对称的半步）检查相位符号，避免正反方向得到相同循环排布。
+  const pl3 = trackPlacements(t85, step85 / 4, tileLen85)
+  const ux85 = (t85.x2 - t85.x1) / Lc85, uy85 = (t85.y2 - t85.y1) / Lc85
+  const axis85 = (q: { x: number; y: number }) => (q.x - t85.x1) * ux85 + (q.y - t85.y1) * uy85
+  const straight0 = pl.find(q => q.scaleY === 1 && axis85(q) > step85 && axis85(q) < Lc85 - step85)
+  const straight3 = pl3.find(q => q.scaleY === 1 && axis85(q) > step85 && axis85(q) < Lc85 - step85)
+  const baseRemainder = straight0 ? ((axis85(straight0) % step85) + step85) % step85 : -1
+  const phaseRemainder = straight3 ? ((axis85(straight3) % step85) + step85) % step85 : -1
+  const expectedRemainder = ((baseRemainder - step85 / 4) + step85) % step85
+  check('履带方向：前进正相位时可见纹理向船头滚动', !!straight0 && !!straight3 && Math.abs(phaseRemainder - expectedRemainder) < 1e-9,
+    `remainder=${phaseRemainder.toFixed(6)} expected=${expectedRemainder.toFixed(6)}`)
   // v1.89：弧长参数化后全程无缝隙——多相位扫描，任意相邻瓦片（含翻滚区）投影间距 ≤ 两者平均压缩高 + 0.005 格
   {
     let maxGap89 = -1
@@ -398,7 +436,7 @@ console.log('== v1.74 口令素材沉淀验收 ==')
         if (gap > maxGap89) maxGap89 = gap
       }
     }
-    check('v1.89：履带全程无缝隙（相邻瓦片间距 ≤ 平均压缩高 +0.005格，含翻滚区）', maxGap89 < 0.005, `maxGap=${(maxGap89 * 30).toFixed(2)}px`)
+    check('v1.89：履带全程无缝隙（相邻瓦片间距 ≤ 平均压缩高 +0.005格，含翻滚区）', maxGap89 < 0.005, `maxGap=${(maxGap89 * BASE_CELL).toFixed(2)}px`)
   }
   // 引擎相位：前进累加（双履带同向）
   let st = arena()
@@ -442,8 +480,8 @@ console.log('== v1.74 口令素材沉淀验收 ==')
 // --- v1.82 炮塔渲染层级验收 ---
 {
   let s82 = initialState()
-  s82.gold = 10000 // 层级测试与金币无关：补足金币避免 mountTurret 因余额不足空转
-  // 乱序挂载：L(hpL1) 先于 S(hpS1) 先于 M(hpM1?)——取默认堡垒实际炮位
+  s82.gold = 10000 // 层级测试与资源无关：补足资源避免 mountTurret 因余额不足空转
+  // 使用旧 S/M/L 字段不同的三个炮位；型号不再影响挂载或绘制顺序。
   const fd82 = DEFAULT_FORTRESS
   const hpS = fd82.hardpoints.find(h => h.size === 'S' && !h.hidden)!
   const hpM = fd82.hardpoints.find(h => h.size === 'M' && !h.hidden)!
@@ -459,10 +497,10 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   const mgId = s82.turrets.find(t => t.defId === 'mg')!.id
   const lobId = s82.turrets.find(t => t.defId === 'lob')!.id
   const cruiseId = s82.turrets.find(t => t.defId === 'cruise')!.id
-  check('v1.82：尺寸越小层级越低（绘制顺序 S→M→L，与放置顺序无关）',
+  check('炮塔槽位型号保留：绘制顺序 S→M→L，与放置顺序无关',
     sorted.join(',') === [mgId, lobId, cruiseId].join(','),
     `sorted=${sorted} 原始=${ids}`)
-  // 同尺寸：zLevel 大者层级高（在上）；缺省 = 1
+  // zLevel 大者层级高（在上）；缺省 = 1
   fd82.hardpoints.find(h => h.id === hpS.id)!.zLevel = 5
   const hpS2 = fd82.hardpoints.filter(h => h.size === 'S' && !h.hidden && h.id !== hpS.id)[0]
   if (hpS2) {
@@ -483,6 +521,10 @@ console.log('== v1.74 口令素材沉淀验收 ==')
     '')
   check('v1.82：默认堡垒炮位 zLevel 缺省合法（校验通过项不增）',
     !validateFortressDef(fd82).some(e => e.includes('层级')), '')
+  check('炮位车体遮挡：层级 -1 及更低绘制在载具主体下方',
+    hardpointBelowVehicleBody({ zLevel: -1 }) && hardpointBelowVehicleBody({ zLevel: -3 }), '')
+  check('炮位车体遮挡：缺省、0 与大于0层级保持在载具主体上方',
+    !hardpointBelowVehicleBody() && !hardpointBelowVehicleBody({ zLevel: 0 }) && !hardpointBelowVehicleBody({ zLevel: 2 }), '')
 }
 
 
@@ -553,13 +595,28 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   check('仅对地不攻击空中目标', byId(s.enemies, e.id)!.hp === 100000 && s.projectiles.length === 0)
 }
 
+// --- 战斗 HUD：每座玩家炮塔可独立关闭/恢复自动开火 ---
+{
+  Math.random = zeroRandom
+  let s = arena()
+  const turret = mkTurret(s, 'mg', 6, 20)
+  const enemy = mkEnemy(s, 'walker', 6.5, 16)
+  s = setTurretAutoFire(s, turret.id, false)
+  s = run(s, 1, 0.05)
+  check('炮塔自动开火关闭后不会造成伤害', byId(s.enemies, enemy.id)!.hp === 100000)
+  s = setTurretAutoFire(s, turret.id, true)
+  s = run(s, 1, 0.05)
+  check('炮塔自动开火重新开启后恢复攻击', byId(s.enemies, enemy.id)!.hp < 100000)
+}
+
 // --- 用例 4：穿透 2、衰减 30%，4 敌一线 => 命中 3 个，70% / 49% ---
 {
   Math.random = zeroRandom
   const mgP = TURRET_DEFS.find(d => d.id === 'mg')!
-  const pierce0 = mgP.pierce
+  const ammoP = PROJECTILE_ARTS.find(a => a.id === mgP.art?.projectile)!
+  const pierce0 = ammoP.pierce
   const accuracy0 = mgP.accuracy
-  mgP.pierce = { count: 2, decay: 0.3 } // v1.72：口令出厂已改无穿透；本用例显式注入穿透参数测机制
+  ammoP.pierce = { count: 2, decay: 0.3 } // 战斗属性已迁移到弹丸库
   mgP.accuracy = 0 // 隔离穿透机制，不依赖全局随机数关闭散布
   let s = arena()
   mkTurret(s, 'mg', 6, 20) // 伤害 12，穿透 2，衰减 30%
@@ -571,7 +628,7 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   check('第 4 个不受伤害', h4 === 0, `h4=${h4}`)
   check('第 2 个伤害 70%', Math.abs(h2 / h1 - 0.7) < 0.02, `${h2}/${h1}`)
   check('第 3 个伤害 49%', Math.abs(h3 / h1 - 0.49) < 0.02, `${h3}/${h1}`)
-  mgP.pierce = pierce0
+  ammoP.pierce = pierce0
   mgP.accuracy = accuracy0
 }
 
@@ -580,17 +637,18 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   Math.random = zeroRandom
   const savedRegen = AMMO.regen
   AMMO.regen = 0 // 关闭回复，隔离测试
-  const diss0 = DEFAULT_FORTRESS.heatDissipation
-  DEFAULT_FORTRESS.heatDissipation = 0 // 关闭散热，精确计量产热
+  const diss0 = gameParameters().naturalHeatDissipation
+  setNaturalHeatDissipation(0) // 关闭散热，精确计量产热
   let s = arena()
-  s.ammo = 2 // mg 弹药 1/发，连发 3
-  mkTurret(s, 'mg', 6, 20)
+  const t = mkTurret(s, 'mg', 6, 20)
+  t.ammo = 2 // mg 弹药 1/发，连发 3；资源归属于炮塔实例
   mkEnemy(s, 'walker', 6.5, 16)
   s = run(s, 1.5, 0.05)
   const mg6 = TURRET_DEFS.find(d => d.id === 'mg')! // v1.72：热量按出厂 heatPerShot 动态折算（口令出厂 = 0）
-  check('弹药 2 时射出 2 发停射', s.ammo === 0 && s.fortress.heat === (mg6.heatPerShot ?? 0) * 2, `ammo=${s.ammo} heat=${s.fortress.heat}`)
+  const ammoLeft = byId(s.turrets, t.id)!.ammo
+  check('弹药 2 时射出 2 发停射', ammoLeft === 0 && s.fortress.heat === (mg6.heatPerShot ?? 0) * 2, `ammo=${ammoLeft} heat=${s.fortress.heat}`)
   AMMO.regen = savedRegen
-  DEFAULT_FORTRESS.heatDissipation = diss0
+  setNaturalHeatDissipation(diss0)
 }
 
 // --- 用例 7（汇聚替代）：热量 25/发 => 堡垒池第 4 发后过热全停，散热至 50% 恢复 ---
@@ -600,9 +658,9 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   const oldHeat = mg.heatPerShot!
   mg.heatPerShot = 25
   const cap0 = DEFAULT_FORTRESS.heatCap
-  const diss0 = DEFAULT_FORTRESS.heatDissipation
+  const diss0 = gameParameters().naturalHeatDissipation
   DEFAULT_FORTRESS.heatCap = 100
-  DEFAULT_FORTRESS.heatDissipation = 0 // 隔离散热，精确计量产热
+  setNaturalHeatDissipation(0) // 隔离散热，精确计量产热
   let s = arena()
   mkTurret(s, 'mg', 6, 20)
   mkEnemy(s, 'walker', 6.5, 16, 1e9)
@@ -612,7 +670,7 @@ console.log('== v1.74 口令素材沉淀验收 ==')
     if (g.fortress.overheated && !sawOverheat) { sawOverheat = true; heatAtOverheat = g.fortress.heat }
   })
   check('第 4 发后堡垒热量 100 过热（汇聚全停）', sawOverheat && heatAtOverheat === 100, `heat=${heatAtOverheat}（=4发×25）`)
-  DEFAULT_FORTRESS.heatDissipation = 20 // 恢复散热 → 降至上限 50% 解除
+  setNaturalHeatDissipation(20) // 恢复散热 → 降至上限 50% 解除
   let resumed = false
   s = run(s, 6, 0.05, (g) => {
     if (sawOverheat && !g.fortress.overheated && g.fortress.heat > 0) resumed = true
@@ -620,7 +678,7 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   check('散热至 50% 后恢复射击', resumed)
   mg.heatPerShot = oldHeat
   DEFAULT_FORTRESS.heatCap = cap0
-  DEFAULT_FORTRESS.heatDissipation = diss0
+  setNaturalHeatDissipation(diss0)
 }
 
 // --- 用例 8（v2.22 移除）：人员机制已删除——原「人员不足 => 完全停止工作」用例随 crewFactor 一并移除 ---
@@ -635,17 +693,18 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   Math.random = zeroRandom
   let s = arena()
   const t = mkTurret(s, 'beam', 5, 20) // 中心 6,20.5；持续 10/0.5s，攻击持续 3s
+  t.energy = 100
   const e1 = mkEnemy(s, 'walker', 6.0, 16) // 波束内
   const e2 = mkEnemy(s, 'walker', 1.5, 16) // 波束外（远离堡垒，不被索敌选中）
-  const energy0 = s.energy
+  const energy0 = t.energy ?? 0
   s = run(s, 4, 0.05)
   const d1 = byId(s.enemies, e1.id)!.maxHp - byId(s.enemies, e1.id)!.hp
   const d2 = byId(s.enemies, e2.id)!.maxHp - byId(s.enemies, e2.id)!.hp
   // 单轮 3s / 0.5s = 6~7 次 tick × 15 伤（v2.14 出厂 DoT 10→15）
   check('射线波束内敌人按 tick 受伤', d1 >= 80 && d1 <= 115, `d1=${d1}`)
   check('波束外敌人不受影响', d2 === 0)
-  check('射线消耗电量（发射+维持）', energy0 - s.energy >= 15, `used=${energy0 - s.energy}`)
-  void t
+  const energyLeft = byId(s.turrets, t.id)!.energy ?? 0
+  check('射线消耗电量（发射+维持）', energy0 - energyLeft >= 15, `used=${energy0 - energyLeft}`)
 }
 
 // --- 用例 10：喷射扇形 + 弹药消耗，弹药不足立即停射 ---
@@ -654,8 +713,8 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   const savedRegen = AMMO.regen
   AMMO.regen = 0 // 关闭回复，隔离测试
   let s = arena()
-  s.ammo = 6 // 喷射 5/s，仅够约 1.2s（不足 2.5s 全程）
   const t = mkTurret(s, 'spray', 6, 20) // 60° 扇形朝 0°
+  t.ammo = 6 // 喷射 5/s，仅够约 1.2s（不足 2.5s 全程）
   const e1 = mkEnemy(s, 'walker', 6.5, 18.5) // 扇形内
   const e2 = mkEnemy(s, 'walker', 3.0, 20.4) // 扇形外（bearing≈-95°）
   let fireStart = -1
@@ -671,7 +730,7 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   check('扇形外敌人不受影响', d2 === 0)
   check('弹药不足提前中断喷射', fireStart >= 0 && fireEnd > fireStart && fireEnd - fireStart < 2.5,
     `session=${(fireEnd - fireStart).toFixed(2)}s`)
-  check('喷射消耗弹药', s.ammo <= 1)
+  check('喷射消耗弹药', (byId(s.turrets, t.id)!.ammo ?? Infinity) <= 1)
   AMMO.regen = savedRegen
 }
 
@@ -735,7 +794,7 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   delete hunter.guideDelay // 立即制导，聚焦追踪行为
   let s = arena()
   mkTurret(s, 'hunter', 6, 20)
-  const e = mkEnemy(s, 'walker', 6.5, 12)
+  mkEnemy(s, 'walker', 6.5, 12)
   let p0: (typeof s.projectiles)[number] | undefined
   for (let i = 0; i < 60 && !p0; i++) {
     s = tick(s, 0.05)
@@ -745,7 +804,7 @@ console.log('== v1.74 口令素材沉淀验收 ==')
   const pid = p0!.id
   p0!.x = 6.5; p0!.y = 10
   p0!.heading = 0
-  p0!.speed = 50
+  p0!.speed = legacyMeters(50)
   const h0 = p0!.heading
   s = run(s, 2, 0.05)
   const pp1 = s.projectiles.find(q => q.id === pid)
@@ -818,8 +877,8 @@ console.log('== v1.74 口令素材沉淀验收 ==')
 {
   Math.random = zeroRandom
   let s = arena()
-  s.energy = 0
   const t = mkTurret(s, 'beam', 5, 20)
+  t.energy = 0
   mkEnemy(s, 'walker', 6.0, 16)
   s = run(s, 0.8, 0.05) // 回电 9/s，0.8s 仅 7.2 < 发射电量 15
   check('发射电量不足无法开火', !byId(s.turrets, t.id)!.firing && s.projectiles.length === 0)
@@ -852,6 +911,7 @@ console.log('== 战场验收 ==')
   check('重寻路事件触发', s.pathVersion === v0 + 1)
   // 敌人从缺口进入
   const e = mkEnemy(s, 'walker', 4.5, 10)
+  e.controller = 'ai'
   e.mode = 'move'; e.targetKind = null; e.targetId = null; e.hasGoal = false
   s = run(s, 20, 0.05)
   const ee = byId(s.enemies, e.id)
@@ -886,6 +946,7 @@ console.log('== 战场验收 ==')
   s.phase = 'combat'
   // 敌人经缺口进入基地内部
   const e0 = mkEnemy(s, 'walker', 4.5, 10)
+  e0.controller = 'ai'
   e0.mode = 'move'; e0.targetKind = null; e0.targetId = null; e0.hasGoal = false
   s = run(s, 20, 0.05)
   const ee = byId(s.enemies, e0.id)
@@ -900,6 +961,7 @@ console.log('== 战场验收 ==')
   let s = arena()
   // 冲核心型
   const r = mkEnemy(s, 'rusher', 5.5, 22, 50000)
+  r.controller = 'ai'
   r.mode = 'move'; r.targetKind = null; r.targetId = null; r.hasGoal = false
   mkTurret(s, 'mg', 3, 23) // 侧向射击冲核尸
   let rusherRetaliated = false
@@ -908,7 +970,7 @@ console.log('== 战场验收 ==')
     const ee = byId(g.enemies, r.id)
     if (ee) {
       if (ee.targetKind === 'turret') rusherRetaliated = true
-      if (ee.targetKind === 'core' && ee.mode === 'attack') rusherHitCore = true
+      if (ee.targetKind === 'fortress' && ee.mode === 'attack') rusherHitCore = true
     }
   })
   check('冲核心型被炮塔攻击不切换目标', !rusherRetaliated)
@@ -918,6 +980,7 @@ console.log('== 战场验收 ==')
   Math.random = zeroRandom
   let s = arena()
   const w = mkEnemy(s, 'walker', 5.5, 22, 50000)
+  w.controller = 'ai'
   w.mode = 'move'; w.targetKind = null; w.targetId = null; w.hasGoal = false
   mkTurret(s, 'mg', 3, 23)
   let walkerRetaliated = false
@@ -928,17 +991,17 @@ console.log('== 战场验收 ==')
   check('默认型敌人同样不反击炮塔（反击机制已移除）', !walkerRetaliated)
 }
 
-// --- 用例 10：船体归零 → v2.53 毁灭序列（演出毕判负，取代旧同帧判负） ---
+// --- 用例 10：玩家单位归零 → 统一摧毁表现（演出毕判负，取代旧同帧判负） ---
 {
   Math.random = zeroRandom
   let s = arena()
-  s.fortress.hp = 1
+  s.fortress.hp = 0
   const fr = fortressRect(s)
   const e = mkEnemy(s, 'brute', fr.x + fr.w / 2, fr.y - 0.5, 5000)
-  e.mode = 'attack'; e.targetKind = 'core'; e.targetId = 0
-  s = tick(s, 0.2) // 远程重甲弹出膛并跨越到车体
-  check('船体 hp 归零进入毁灭序列（不立即判负）', s.fortress.hp === 0 && s.fortress.dyingT >= 0 && s.phase !== 'lost', `phase=${s.phase} dyingT=${s.fortress.dyingT}`)
-  for (let i = 0; i < 23; i++) s = tick(s, 0.1) // 推进越过 DEATH_END_T（2.2s）
+  e.mode = 'attack'; e.targetKind = 'fortress'; e.targetId = 0
+  s = run(s, 2, 0.05) // 远程重甲弹出膛、进入主体并飞至随机内部命中点
+  check('玩家单位 hp 归零进入摧毁演出（不立即判负）', s.fortress.hp === 0 && s.fortress.dyingT >= 0 && s.phase !== 'lost', `phase=${s.phase} dyingT=${s.fortress.dyingT}`)
+  for (let i = 0; i < 23; i++) s = tick(s, 0.1) // 推进越过玩家摧毁结算延时（2.2s）
   check('毁灭演出毕判负', s.phase === 'lost', `phase=${s.phase} dyingT=${s.fortress.dyingT.toFixed(2)}`)
 }
 
@@ -967,7 +1030,11 @@ console.log('== 战场验收 ==')
   let s = arena()
   const e1 = mkEnemy(s, 'walker', 7.5, 5.5, 100000) // 直线穿水坑 (6-8, 8-9)
   const e2 = mkEnemy(s, 'walker', 10.5, 5.5, 100000) // 直线不穿水坑
-  for (const e of [e1, e2]) { e.mode = 'move'; e.targetKind = null; e.targetId = null; e.hasGoal = false }
+  for (const e of [e1, e2]) {
+    e.controller = 'ai'
+    e.mode = 'move'; e.targetKind = null; e.targetId = null; e.hasGoal = false
+    e.aiOverride = { targeting: { profile: 'fortress' }, movement: { profile: 'direct' }, attack: { profile: 'none' }, special: { profile: 'none' } }
+  }
   s = run(s, 6, 0.05)
   const a = byId(s.enemies, e1.id)!
   const b = byId(s.enemies, e2.id)!
@@ -1059,37 +1126,31 @@ console.log('== 防御墙行纳入建造区验收 ==')
   restoreLevel()
 }
 
-console.log('== 射线子模式验收 ==')
+console.log('== 射线光束验收 ==')
 
-// --- ① 脉冲点射：单体命中，不可穿透 ---
+check('射线固定为光束：无子模式、无脉冲塔',
+  !TURRET_DEFS.some(def => def.id === 'pulse') && TURRET_DEFS.filter(def => def.type === 'beam').every(def => !('rayMode' in def)))
+
+// --- 光束端点：炮口、目标主体轮廓、命中特效统一使用同一条射线 ---
 {
-  Math.random = zeroRandom
-  let s = arena()
-  mkTurret(s, 'pulse', 6, 20) // 中心 6.5,20.5 朝上
-  const e1 = mkEnemy(s, 'walker', 6.5, 16) // 瞄准线上近者（更靠近核心，被索敌选中）
-  const e2 = mkEnemy(s, 'walker', 6.5, 14) // 同线后方
-  s = run(s, 2, 0.05)
-  const d1 = byId(s.enemies, e1.id)!.maxHp - byId(s.enemies, e1.id)!.hp
-  const d2 = byId(s.enemies, e2.id)!.maxHp - byId(s.enemies, e2.id)!.hp
-  check('脉冲点射只命中单体目标（不可穿透）', d1 > 0 && d2 === 0, `d1=${d1} d2=${d2}`)
+  const s = arena()
+  const t = mkTurret(s, 'beam', 5, 20)
+  const e = mkEnemy(s, 'walker', 6, 16)
+  t.targetId = e.id
+  const def = TURRET_DEFS.find(item => item.id === 'beam')!
+  const muzzle = muzzlePos(t, def, 0)
+  t.angle = Math.atan2(e.x - muzzle.x, -(e.y - muzzle.y))
+  const origin = muzzlePos(t, def, 0)
+  const march = beamMarch(s, t, def)
+  const end = { x: origin.x + dirX(t.angle) * march.len, y: origin.y + dirY(t.angle) * march.len }
+  const centerDistance = Math.hypot(e.x - origin.x, e.y - origin.y)
+  const entry = segmentUnitShapeEntry(origin.x, origin.y, end.x, end.y, e, enemyUnitDef('walker'))
+  check('光束直接止于单位主体：从实际炮口发出且端点不再越过目标到最大射程',
+    march.blocker === null && march.len < centerDistance && entry !== null && Math.abs(entry - 1) < 1e-3,
+    `len=${march.len.toFixed(3)} center=${centerDistance.toFixed(3)} entry=${entry}`)
 }
 
-// --- ② 脉冲点射：耗电按发，电量耗尽停射 ---
-{
-  Math.random = zeroRandom
-  const savedRegen = ENERGY.regen
-  ENERGY.regen = 0 // 关闭回复，隔离测试
-  let s = arena()
-  s.energy = 13 // 脉冲 6/发，仅够 2 发
-  mkTurret(s, 'pulse', 6, 20)
-  const e = mkEnemy(s, 'walker', 6.5, 16)
-  s = run(s, 4, 0.05)
-  const dmg = byId(s.enemies, e.id)!.maxHp - byId(s.enemies, e.id)!.hp
-  check('脉冲耗电按发且电量耗尽停射', s.energy === 1 && dmg === 52, `energy=${s.energy} dmg=${dmg}（=2发×26）`)
-  ENERGY.regen = savedRegen
-}
-
-// --- ③ 光束：持续发射期间可转向，但转向速度削减 50%（BEAM_TURN_FACTOR） ---
+// --- ① 光束：持续发射期间可转向，但转向速度削减 50%（BEAM_TURN_FACTOR） ---
 {
   Math.random = zeroRandom
   let s = arena()
@@ -1165,6 +1226,7 @@ console.log('== 物体/地形新框架验收 ==')
   const r1 = s.objects.find(o => o.id === rock.id)
   check('岩石 hp=-1：敌人攻击不扣耐久不摧毁', !!r1 && r1.hp === -1)
   // 抛射落点在岩石旁：爆炸波及岩石但岩石豁免；敌人受伤证明爆炸发生
+  s.enemies = [] // 隔离第二段爆炸测试，避免炮塔继续索引上一段攻击者
   mkTurret(s, 'lob', 7, 10) // 中心 (7.5,11)
   const e2 = mkEnemy(s, 'walker', 8.5, 6.6) // 落点贴近岩石
   s = run(s, 6, 0.05)
@@ -1219,6 +1281,22 @@ console.log('== 物体/地形新框架验收 ==')
 
 console.log('== 物体高度与爆炸遮挡验收 ==')
 
+{
+  const object = { blockProjectile: true, height: 1 }
+  check('高度1只阻挡子弹直射，不阻挡穿甲弹和破片弹',
+    objectBlocksEnvironmentShot(object, { kind: 'direct', subtype: 'bullet' })
+    && !objectBlocksEnvironmentShot(object, { kind: 'direct', subtype: 'armorPiercing' })
+    && !objectBlocksEnvironmentShot(object, { kind: 'direct', subtype: 'fragmentation' }))
+  object.height = 2
+  check('高度2阻挡全部直射子类、射线与喷射',
+    objectBlocksEnvironmentShot(object, { kind: 'direct', subtype: 'bullet' })
+    && objectBlocksEnvironmentShot(object, { kind: 'direct', subtype: 'armorPiercing' })
+    && objectBlocksEnvironmentShot(object, { kind: 'direct', subtype: 'fragmentation' })
+    && objectBlocksEnvironmentShot(object, { kind: 'ray' })
+    && objectBlocksEnvironmentShot(object, { kind: 'spray' }))
+  check('爆炸高度减伤表为0%/30%/60%/80%', EXPLOSION_COVER_REDUCTION.join(',') === '0,0.3,0.6,0.8')
+}
+
 // --- ① height=2 的阻挡物体拦截后方 2 格内目标的导弹；2 格外越过 ---
 {
   Math.random = zeroRandom
@@ -1249,8 +1327,9 @@ console.log('== 物体高度与爆炸遮挡验收 ==')
 {
   Math.random = zeroRandom
   const lob = TURRET_DEFS.find(d => d.id === 'lob')!
-  const savedBlast = lob.blastRadius!
-  lob.blastRadius = 60 // 临时扩大爆炸半径（2.4 格）覆盖两个目标
+  const lobAmmo = PROJECTILE_ARTS.find(a => a.id === lob.art?.projectile)!
+  const savedBlast = lobAmmo.blastRadius!
+  lobAmmo.blastRadius = 60 // 战斗属性由弹丸库控制；临时扩大到 2.4 格
   const mk = (withObj: boolean) => {
     const s = arena()
     if (withObj) {
@@ -1266,8 +1345,10 @@ console.log('== 物体高度与爆炸遮挡验收 ==')
   const eNear = mkEnemy(s, 'walker', 3.5, 10.5) // 落点（近侧，更靠近核心被索敌选中）
   const eFar = mkEnemy(s, 'walker', 3.5, 8.5) // 物体 (3,9)-(3,10) 正后方
   s = run(s, 6, 0.05)
-  check('爆炸被阻挡物体遮挡时后方敌人无伤（近侧正常受伤）',
-    byId(s.enemies, eNear.id)!.hp < 100000 && byId(s.enemies, eFar.id)!.hp === 100000,
+  const nearDamage = 100000 - byId(s.enemies, eNear.id)!.hp
+  const farDamage = 100000 - byId(s.enemies, eFar.id)!.hp
+  check('高度1遮蔽使后方目标爆炸伤害降低30%',
+    nearDamage > 0 && Math.abs(farDamage / nearDamage - 0.7) < 0.01,
     `near=${byId(s.enemies, eNear.id)!.hp} far=${byId(s.enemies, eFar.id)!.hp}`)
   s = mk(false)
   const eA = mkEnemy(s, 'walker', 3.5, 10.5)
@@ -1276,7 +1357,7 @@ console.log('== 物体高度与爆炸遮挡验收 ==')
   check('无遮挡时爆炸对两个敌人正常结算',
     byId(s.enemies, eA.id)!.hp < 100000 && byId(s.enemies, eB.id)!.hp < 100000,
     `a=${byId(s.enemies, eA.id)!.hp} b=${byId(s.enemies, eB.id)!.hp}`)
-  lob.blastRadius = savedBlast
+  lobAmmo.blastRadius = savedBlast
 }
 
 console.log('== 光束消灭目标不中断验收 ==')
@@ -1311,6 +1392,41 @@ console.log('== 光束消灭目标不中断验收 ==')
 
 console.log('== 关卡配置（LEVEL）验收 ==')
 
+{
+  const sceneOrder = [
+    { id: 'layer-low', layer: 2, x: 99, y: 99, kind: 'object' as const, order: 0 },
+    { id: 'xy-low', layer: 3, x: 1, y: 1, kind: 'unit' as const, order: 1 },
+    { id: 'x-low', layer: 3, x: 1, y: 2, kind: 'unit' as const, order: 2 },
+    { id: 'same-object', layer: 3, x: 2, y: 2, kind: 'object' as const, order: 3 },
+    { id: 'same-unit-a', layer: 3, x: 2, y: 2, kind: 'unit' as const, order: 4 },
+    { id: 'same-unit-b', layer: 3, x: 2, y: 2, kind: 'unit' as const, order: 5 },
+    { id: 'ground-low-screen', layer: 3, x: 9, y: 9, kind: 'unit' as const, airborne: false, order: 6 },
+    { id: 'air-high-altitude', layer: 3, x: 0, y: 0, kind: 'unit' as const, airborne: true, altitude: 3, order: 7 },
+    { id: 'air-low-altitude', layer: 3, x: 9, y: 9, kind: 'unit' as const, airborne: true, altitude: 1, order: 8 },
+    { id: 'air-same-altitude-y0', layer: 3, x: 0, y: 0, kind: 'unit' as const, airborne: true, altitude: 2, order: 9 },
+    { id: 'air-same-altitude-y1', layer: 3, x: 0, y: 1, kind: 'unit' as const, airborne: true, altitude: 2, order: 10 },
+    { id: 'layer-high', layer: 4, x: 0, y: 0, kind: 'object' as const, order: 11 },
+  ].sort(compareSceneRenderItems).map(item => item.id)
+  check('全局显示层级：层级优先于坐标且高层最后绘制', sceneOrder[0] === 'layer-low' && sceneOrder.at(-1) === 'layer-high')
+  check('全局显示层级：同层按 Y 后按 X 升序绘制', sceneOrder.indexOf('xy-low') < sceneOrder.indexOf('x-low') && sceneOrder.indexOf('x-low') < sceneOrder.indexOf('same-object'))
+  check('全局显示层级：同层同坐标单位覆盖物体', sceneOrder.indexOf('same-object') < sceneOrder.indexOf('same-unit-a'))
+  check('全局显示层级：同类完全同键保持稳定放置顺序', sceneOrder.indexOf('same-unit-a') < sceneOrder.indexOf('same-unit-b'))
+  check('飞行载具层级：同层飞行单位始终覆盖地面单位', sceneOrder.indexOf('ground-low-screen') < sceneOrder.indexOf('air-low-altitude'))
+  check('飞行载具层级：飞行单位先按当前高度由低到高绘制', sceneOrder.indexOf('air-low-altitude') < sceneOrder.indexOf('air-high-altitude'))
+  check('飞行载具层级：同高度飞行单位仍按原有 Y 坐标顺序', sceneOrder.indexOf('air-same-altitude-y0') < sceneOrder.indexOf('air-same-altitude-y1'))
+  const airUnit = unitLibrary().find(unit => unit.stats.air)!
+  const shadowNorth = airUnitShadowTransform(airUnit, 1, BASE_CELL, 0)
+  const shadowEast = airUnitShadowTransform(airUnit, 1, BASE_CELL, Math.PI / 2)
+  const shadowHigh = airUnitShadowTransform(airUnit, 3, BASE_CELL, Math.PI / 2)
+  check('飞行载具阴影：轮廓方向严格复用单位当前朝向', shadowNorth.heading === 0 && shadowEast.heading === Math.PI / 2)
+  check('飞行载具阴影：高度越高越小、越淡且地面投影偏移更远', shadowHigh.scale < shadowEast.scale && shadowHigh.opacity < shadowEast.opacity && shadowHigh.offsetX > shadowEast.offsetX)
+  const groundLow = groundEntityShadowTransform(0, BASE_CELL)
+  const groundHigh = groundEntityShadowTransform(3, BASE_CELL)
+  const infantry = groundEntityShadowTransform(0, BASE_CELL, true)
+  check('地面实体阴影：物体高度越高投影偏移越远', groundHigh.offsetX > groundLow.offsetX && groundHigh.offsetY > groundLow.offsetY)
+  check('地面实体阴影：步兵使用压扁的贴地轮廓', infantry.scaleY < groundLow.scaleY)
+}
+
 
 // --- ① buildCells 非矩形集合：集合内逐格可建、集合外不可建 ---
 {
@@ -1330,22 +1446,27 @@ console.log('== 关卡配置（LEVEL）验收 ==')
 
 // --- ③ 自定义地形减速生效；自定义 hp=50 挡弹道物体截断实弹并可被打掉 ---
 {
-  LEVEL.terrain.push({ kind: 'puddle', x: 4, y: 5, w: 2, h: 2, moveModifier: 0.3 })
-  let s = fresh()
-  s.phase = 'combat'
-  const e1 = mkEnemy(s, 'walker', 4.5, 4, 100000) // 直线穿自定义地形 (4-5, 5-6)
-  const e2 = mkEnemy(s, 'walker', 10.5, 4, 100000)
-  for (const e of [e1, e2]) { e.mode = 'move'; e.targetKind = null; e.targetId = null; e.hasGoal = false }
-  s = run(s, 4, 0.05)
+  const travel = (withPuddle: boolean) => {
+    LEVEL.terrain = withPuddle ? [{ kind: 'puddle', x: 4, y: 5, w: 2, h: 5, moveModifier: 0.3 }] : []
+    LEVEL.objects = []; LEVEL.buildCells = []; LEVEL.initialWalls = []; LEVEL.buildings = []; LEVEL.core = null
+    let state = fresh(); state.phase = 'combat'; state.spawnQueue = [{ kind: 'walker', delay: 100 }]; state.spawnTimer = 100
+    const enemy = mkEnemy(state, 'walker', 4.5, 4, 100000)
+    enemy.controller = 'ai'
+    enemy.aiOverride = { targeting: { profile: 'fortress' }, movement: { profile: 'direct' }, attack: { profile: 'none' }, special: { profile: 'none' } }
+    state = run(state, 4, 0.05)
+    return state.enemies.find(item => item.id === enemy.id)?.y ?? 4
+  }
+  const through = travel(true)
+  const free = travel(false)
   check('自定义地形实例（减速 0.3）生效',
-    byId(s.enemies, e1.id)!.y < byId(s.enemies, e2.id)!.y - 0.5,
-    `through=${byId(s.enemies, e1.id)!.y} free=${byId(s.enemies, e2.id)!.y}`)
+    through < free - 0.5,
+    `through=${through} free=${free}`)
 
   Math.random = zeroRandom
   const spdBk3 = ENEMY_DEFS.walker.speed
   ENEMY_DEFS.walker.speed = 0 // v2.45 口令(5)：钉住敌人（理由同废墟用例）
   LEVEL.objects.push({ kind: 'ruins', x: 6, y: 9, w: 1, h: 1, hp: 60, blockMove: true, blockProjectile: true, height: 1 }) // v1.72：第一轮后存活；v2.45 口令(5)：单轮 6×5=30 → hp 60（130 需 5 轮 ≈13s 超出窗口）
-  s = arena()
+  let s = arena()
   mkTurret(s, 'mg', 6, 13) // 中心 (6.5,13.5) 朝上，弹道穿自定义物体 (6,9)
   const e3 = mkEnemy(s, 'walker', 6.5, 8)
   const obj = s.objects.find(o => o.x === 6 && o.y === 9)!
@@ -1369,20 +1490,18 @@ console.log('== 关卡配置（LEVEL）验收 ==')
   const originOk = dist[Math.floor(fr0.y) * COLS + Math.floor(fr0.x)] === 0
     && dist[25 * COLS + 5] !== 0 // 旧核心位置不再是原点
   const e = mkEnemy(s, 'flyer', 9, 10, 100000) // 飞行直冲堡垒中心
+  e.controller = 'ai'
   e.mode = 'move'; e.targetKind = null; e.targetId = null; e.hasGoal = false
   s = run(s, 8, 0.05)
   const ee = byId(s.enemies, e.id)!
   check('距离场以堡垒为原点、敌人朝堡垒推进',
-    originOk && (ee.y > 17 || (ee.mode === 'attack' && ee.targetKind === 'core')),
+    originOk && (ee.y > 17 || (ee.mode === 'attack' && ee.targetKind === 'fortress')),
     `originOk=${originOk} y=${ee.y} mode=${ee.mode}/${ee.targetKind}`)
-  // 船体归零 → v2.53 毁灭序列（演出毕判负，取代旧同帧判负）
-  s.fortress.hp = 1
-  s.fortress.armor.front = 0 // 本用例只验毁灭序列，隔离 v2.76 概率跳弹
-  const fr1 = fortressRect(s)
-  const b = mkEnemy(s, 'brute', fr1.x + fr1.w / 2, fr1.y - 0.5, 100000)
-  b.mode = 'attack'; b.targetKind = 'core'; b.targetId = 0
-  s = tick(s, 0.1) // 第一帧发射
-  s = tick(s, 0.1) // 第二帧推进独立敌方弹丸到主体
+  // 船体归零 → v2.53 毁灭序列（直接走统一承伤，避免依赖某个敌人武器配置）
+  s.fortress.hp = 0
+  s.fortress.shield = 0
+  s.fortress.armor = { front: 0, rear: 0, left: 0, right: 0 }
+  s = tick(s, 0.05)
   check('船体归零进入毁灭序列（不立即判负）', s.fortress.dyingT >= 0 && s.phase !== 'lost', `phase=${s.phase} dyingT=${s.fortress.dyingT}`)
   for (let i = 0; i < 23; i++) s = tick(s, 0.1)
   check('毁灭演出毕判负', s.phase === 'lost', `phase=${s.phase}`)
@@ -1416,7 +1535,11 @@ console.log('== 关卡配置（LEVEL）验收 ==')
   let s = fresh()
   s.phase = 'combat'
   const e = mkEnemy(s, 'walker', 5.5, 3.5)
+  e.controller = 'ai'
+  e.controller = 'ai'
+  e.controller = 'ai'
   e.mode = 'move'; e.targetKind = null; e.targetId = null; e.hasGoal = false
+  e.aiOverride = { targeting: { profile: 'fortress' }, movement: { profile: 'direct' }, attack: { profile: 'none' }, special: { profile: 'none' } }
   s = run(s, 25)
   const ee = byId(s.enemies, e.id)
   check('清空 baseCells 后敌人直达基地区（无派生墙阻挡）',
@@ -1434,6 +1557,7 @@ console.log('== 关卡配置（LEVEL）验收 ==')
   const seedFort = dist[Math.floor(fr.y + 1) * COLS + Math.floor(fr.x + 1)] === 0
   s.phase = 'combat'
   const e = mkEnemy(s, 'walker', 5.5, 3.5)
+  e.controller = 'ai'
   e.mode = 'move'; e.targetKind = null; e.targetId = null; e.hasGoal = false
   s = run(s, 6)
   const ee = byId(s.enemies, e.id)
@@ -1445,17 +1569,17 @@ console.log('== 关卡配置（LEVEL）验收 ==')
   restoreLevel()
 }
 
-// --- ⑧ version 迁移：旧配置迁移至 v10（含通用事件动作与交互物） ---
+// --- ⑧ version 迁移：旧配置迁移至当前 v18 ---
 {
   const m1 = parseLevel(JSON.stringify({ buildTop: 20, buildBottom: 24 })) // 无 version 老存档
   const m2 = parseLevel(JSON.stringify({ version: 2, initialWalls: [] })) // v2 存档同样并入模板墙
-  check('version 迁移：模板墙格 + buildCells 合并为基地格全集，version 升 10 且补齐事件/交互物',
-    m1.version === 10 && m2.version === 10
+  check('version 迁移：模板墙格 + buildCells 合并为基地格全集，version 升 18 且补齐分层/统一事件/初始单位',
+    m1.version === 18 && m2.version === 18
     && Array.isArray(m1.groundCells) && m1.groundCells.length === 0
     && Array.isArray(m2.groundCells) && m2.groundCells.length === 0
     && m1.mode === 'defend' && m1.objective.type === 'defend'
     && m1.startZone.w > 0 && m1.finishZone.w > 0
-    && m1.triggers.length === 0 && m2.triggers.length === 0 && m1.interactables.length === 0
+    && m1.triggers.length === 0 && m2.triggers.length === 0 && m1.interactables.length === 0 && m1.events.length === 0 && m1.initialUnits.length === 0
     && new Set(m1.buildCells).size === m1.buildCells.length
     && m1.rows === 28 && m1.cols === 42 // 旧配置无 rows/cols → 28/COLS（v1.41 上限不限：不再钳到 24）；v2.45 口令(5)：COLS 36→42
     && templateWallCells(m1.rows, m1.cols).every(c => m1.buildCells.includes(`${c.x},${c.y}`))
@@ -1476,7 +1600,7 @@ console.log('== 关卡配置（LEVEL）验收 ==')
   lv.version = 4
   const loaded = parseLevel(JSON.stringify(lv))
   check('v4 存档往返：buildCells/groundCells 原样保留，不回补模板墙格',
-    loaded.version === 10
+    loaded.version === 18
     && loaded.buildCells.length === lv.buildCells.length
     && removed.every(k => !loaded.buildCells.includes(k))
     && lv.buildCells.every(k => loaded.buildCells.includes(k))
@@ -1566,8 +1690,12 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
 {
   Math.random = zeroRandom
   const hunter = TURRET_DEFS.find(d => d.id === 'hunter')!
-  hunter.missileFlightTime = 2.0 // 可达半径 ≈ flightLeft*0.9*320m
-  delete hunter.guideDelay // v1.96：本用例测重选逻辑，临时移除出厂延迟制导（v1.95 起 hunter 自带 0.4s）
+  const hunterAmmo = PROJECTILE_ARTS.find(a => a.id === hunter.art?.projectile)!
+  const savedFlightTime = hunterAmmo.missileFlightTime, savedDelay = hunterAmmo.guideDelay
+  const savedTurretDelay = hunter.guideDelay
+  hunterAmmo.missileFlightTime = 2.0 // 可达半径 ≈ flightLeft*0.9*320m
+  delete hunterAmmo.guideDelay
+  delete hunter.guideDelay
   let s = arena()
   mkTurret(s, 'hunter', 6, 20) // 中心 (7,21)
   const a = mkEnemy(s, 'walker', 14.5, 18.5) // 首选（紧邻 5×8 堡垒，离堡垒最近）
@@ -1580,13 +1708,155 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
   }
   const lockedA = p0 !== undefined && p0.targetId === a.id
   byId(s.enemies, a.id)!.hp = 0 // A 在命中前被消灭
-  s = tick(s, 0.05)
+  s = run(s, 0.15, 0.05)
   const p1 = s.projectiles.find(p => p.id === p0?.id)
   check('制导导弹目标被消灭后重选：优先可达的 B 而非不可达的 C',
     lockedA && p1 !== undefined && p1.targetId === b.id && p1.targetId !== c.id,
     `lockedA=${lockedA} target=${p1?.targetId} b=${b.id} c=${c.id}`)
-  hunter.missileFlightTime = 10 // 恢复出厂默认（v1.95）
-  hunter.guideDelay = 0.4 // 恢复出厂默认（v1.95）
+  hunterAmmo.missileFlightTime = savedFlightTime
+  hunterAmmo.guideDelay = savedDelay
+  hunter.guideDelay = savedTurretDelay
+}
+
+// --- ③b 垂发固定 7 帧 + 发射阶段制导生效、飞行寿命从离架后计算 ---
+{
+  const first = verticalLaunchFrameRect(700, 48, 0)
+  const middle = verticalLaunchFrameRect(700, 48, 0.5)
+  const last = verticalLaunchFrameRect(700, 48, 0.999)
+  check('垂发素材固定横向7帧自动切分（首帧/中间帧/末帧）',
+    VERTICAL_LAUNCH_FRAMES === 7
+      && first.index === 0 && first.sx === 0 && first.sw === 100
+      && middle.index === 3 && middle.sx === 300
+      && last.index === 6 && last.sx === 600,
+    `frames=${VERTICAL_LAUNCH_FRAMES} indices=${first.index}/${middle.index}/${last.index}`)
+
+  const sharedAssetAmmo = { id: 'vertical-shared', name: '垂发共用素材', kind: 'missile', projectileAsset: 'shared-projectile', verticalLaunch: { enabled: true, duration: 0.6 } } as ProjectileArtDef
+  const sharedFirst = projectileBodyFrameRect(sharedAssetAmmo, 700, 48, 0)
+  const sharedFlight = projectileBodyFrameRect(sharedAssetAmmo, 700, 48)
+  check('垂发导弹直接把当前弹丸贴图作为7帧帧条，飞行阶段保持末帧',
+    sharedFirst.index === 0 && sharedFirst.sw === 100 && sharedFlight.index === 6 && sharedFlight.sx === 600)
+  const tailStart = verticalLaunchTailProjection(sharedAssetAmmo, 0)
+  const tailMiddle = verticalLaunchTailProjection(sharedAssetAmmo, 0.3)
+  const tailFlight = verticalLaunchTailProjection(sharedAssetAmmo, 0.6)
+  check('垂发尾焰平面投影：竖直首帧位于弹体下方，转向中逐渐移至平飞尾端',
+    tailStart === 0 && tailMiddle === 0.5 && tailFlight === 1,
+    `projection=${tailStart}/${tailMiddle}/${tailFlight}`)
+  const uprightTrail = projectileTrailVelocity(12, -4, Math.PI / 3, 0.9, tailStart)
+  const flightTrail = projectileTrailVelocity(0, 0, 0, 0, tailFlight)
+  check('垂发尾焰速度投影：竖直首帧不继承平面前向速度，平飞后只向航向后方喷射',
+    uprightTrail.vx === 0 && uprightTrail.vy === 0 && Math.abs(flightTrail.vx) < 1e-9 && flightTrail.vy > 0,
+    `upright=${JSON.stringify(uprightTrail)} flight=${JSON.stringify(flightTrail)}`)
+  const inheritedTrail = projectileTrailVelocity(12, 0, Math.PI / 2, 0.9, 1)
+  const driftingSmoke = rearOnlyTrailVelocity(12, 2, Math.PI / 2)
+  const bulletEmitter = projectileTailEmitter(5, 6, Math.PI / 2, 0.8)
+  check('所有弹丸尾迹统一：惯性与烟尾不含航向前方速度，贴图弹丸从弹体尾端发射',
+    inheritedTrail.vx <= 1e-9 && driftingSmoke.vx <= 1e-9
+      && Math.abs(bulletEmitter.x - 4.6) < 1e-9 && Math.abs(bulletEmitter.y - 6) < 1e-9,
+    `trail=${JSON.stringify(inheritedTrail)} smoke=${JSON.stringify(driftingSmoke)} emitter=${JSON.stringify(bulletEmitter)}`)
+  const uprightGlow = missileEngineGlowLayout(0.5, tailStart)
+  const middleGlow = missileEngineGlowLayout(0.5, tailMiddle)
+  const flightGlow = missileEngineGlowLayout(0.5, tailFlight)
+  check('垂发喷口辉光：竖直首帧隐藏，转向后仅从弹体中心向航向后方渐显并最终锚定尾端',
+    uprightGlow.alpha === 0 && uprightGlow.y === 0
+      && middleGlow.alpha === 0.5 && middleGlow.y === 0.25
+      && flightGlow.alpha === 1 && flightGlow.y === 0.5,
+    `upright=${JSON.stringify(uprightGlow)} middle=${JSON.stringify(middleGlow)} flight=${JSON.stringify(flightGlow)}`)
+  const migratedSharedAsset = migrateVerticalLaunchProjectileAsset({
+    id: 'legacy-vertical', name: '旧垂发', kind: 'missile', projectileAsset: 'old-flight', verticalLaunch: { enabled: true, asset: 'old-turn-strip', duration: 0.6 },
+  } as unknown as ProjectileArtDef)
+  check('旧独立垂发转向贴图迁入统一弹丸贴图并删除旧字段',
+    migratedSharedAsset.projectileAsset === 'old-turn-strip'
+      && !('asset' in (migratedSharedAsset.verticalLaunch ?? {})))
+
+  Math.random = zeroRandom
+  const hunter = TURRET_DEFS.find(d => d.id === 'hunter')!
+  const hunterAmmo = PROJECTILE_ARTS.find(a => a.id === hunter.art?.projectile)!
+  const savedVerticalLaunch = structuredClone(hunterAmmo.verticalLaunch)
+  const savedDelay = hunterAmmo.guideDelay
+  const savedTurretDelay = hunter.guideDelay
+  const savedSplit = structuredClone(hunterAmmo.split)
+  const savedVerticalFlightTime = hunterAmmo.missileFlightTime
+  hunterAmmo.verticalLaunch = { enabled: true, duration: 0.6 }
+  hunterAmmo.missileFlightTime = 2
+  delete hunterAmmo.guideDelay
+  delete hunter.guideDelay
+  delete hunterAmmo.split
+  let s = arena()
+  mkTurret(s, 'hunter', 6, 20)
+  const candidateA = mkEnemy(s, 'walker', 14.5, 18.5)
+  const candidateB = mkEnemy(s, 'walker', 8.5, 15)
+  let launched: (typeof s.projectiles)[number] | undefined
+  for (let i = 0; i < 60 && !launched; i++) {
+    s = tick(s, 0.05)
+    launched = s.projectiles.find(p => p.kind === 'missile')
+  }
+  const launchX = launched?.x, launchY = launched?.y, lockedTargetId = launched?.targetId
+  const launchFlightLeft = launched?.flightLeft
+  const replacementId = lockedTargetId === candidateA.id ? candidateB.id : candidateA.id
+  if (lockedTargetId !== undefined && lockedTargetId !== null) byId(s.enemies, lockedTargetId)!.hp = 0
+  s = run(s, 0.25, 0.05)
+  const during = s.projectiles.find(p => p.id === launched?.id)
+  check('垂发转向期间弹体持续移动，制导和重索敌生效且不扣飞行寿命',
+    lockedTargetId !== undefined && lockedTargetId !== null && during !== undefined && during.targetId === replacementId
+      && launchX !== undefined && launchY !== undefined
+      && Math.hypot(during.x - launchX, during.y - launchY) > 1e-6
+      && launchFlightLeft !== undefined && Math.abs((during.flightLeft ?? -1) - launchFlightLeft) < 1e-9,
+    `locked=${lockedTargetId} target=${during?.targetId} pos=${during?.x.toFixed(3)},${during?.y.toFixed(3)} flight=${during?.flightLeft}`)
+  for (let i = 0; i < 20; i++) {
+    const current = s.projectiles.find(p => p.id === launched?.id)
+    if (!current || current.t >= 0.65) break
+    s = tick(s, 0.05)
+  }
+  const after = s.projectiles.find(p => p.id === launched?.id)
+  check('垂发结束后继续移动并扣减飞行寿命，继续跟踪垂发期间锁定的新目标',
+    after !== undefined && after.targetId === replacementId
+      && launchX !== undefined && launchY !== undefined
+      && Math.hypot(after.x - launchX, after.y - launchY) > 1e-6
+      && launchFlightLeft !== undefined && (after.flightLeft ?? Infinity) < launchFlightLeft,
+    `target=${after?.targetId} replacement=${replacementId} t=${after?.t.toFixed(2)} flight=${after?.flightLeft}`)
+
+  let unitState = arena()
+  const playerRect = fortressRect(unitState)
+  const playerCenter = { x: playerRect.x + playerRect.w / 2, y: playerRect.y + playerRect.h / 2 }
+  const unitLaunch = { x: playerCenter.x, y: playerCenter.y - 8 }
+  const unitMissileId = unitState.nextId++
+  unitState.enemyProjectiles.push({
+    id: unitMissileId, shooterId: -1,
+    x: unitLaunch.x, y: unitLaunch.y, px: unitLaunch.x, py: unitLaunch.y,
+    heading: Math.PI / 2, speed: 4, damage: 1, penetration: 0,
+    traveled: 0, maxTravel: 999,
+    kind: 'missile', defId: hunter.id, ammoId: hunterAmmo.id,
+    t: 0, guided: true, willGuide: true, turnRate: 0,
+    missileAccel: 40, missileMaxSpeed: 100, missileTurnMax: 120, missileTurnAccel: 240,
+    flightLeft: 2, targetKind: 'fortress', targetX: playerCenter.x, targetY: playerCenter.y,
+    tgtPX: playerCenter.x, tgtPY: playerCenter.y,
+    sourceSide: 'enemy', sourceFaction: 'enemy',
+  })
+  unitState = run(unitState, 0.25, 0.05)
+  const unitDuring = unitState.enemyProjectiles.find(projectile => projectile.id === unitMissileId)
+  check('敌方/友方单位导弹共用垂发口径：转向期制导并持续移动，但不扣飞行寿命',
+    unitDuring !== undefined
+      && Math.hypot(unitDuring.x - unitLaunch.x, unitDuring.y - unitLaunch.y) > 1e-6
+      && Math.abs((unitDuring.flightLeft ?? -1) - 2) < 1e-9
+      && Math.abs(unitDuring.heading - Math.PI / 2) > 1e-6,
+    `pos=${unitDuring?.x.toFixed(3)},${unitDuring?.y.toFixed(3)} heading=${unitDuring?.heading.toFixed(3)} flight=${unitDuring?.flightLeft}`)
+  unitState = run(unitState, 0.4, 0.05)
+  const unitAfter = unitState.enemyProjectiles.find(projectile => projectile.id === unitMissileId)
+  check('敌方/友方单位导弹转向结束后继续移动并开始扣飞行寿命',
+    unitAfter !== undefined
+      && Math.hypot(unitAfter.x - unitLaunch.x, unitAfter.y - unitLaunch.y) > 1e-6
+      && (unitAfter.flightLeft ?? Infinity) < 2,
+    `pos=${unitAfter?.x.toFixed(3)},${unitAfter?.y.toFixed(3)} flight=${unitAfter?.flightLeft}`)
+  if (savedVerticalLaunch) hunterAmmo.verticalLaunch = savedVerticalLaunch
+  else delete hunterAmmo.verticalLaunch
+  if (savedDelay !== undefined) hunterAmmo.guideDelay = savedDelay
+  else delete hunterAmmo.guideDelay
+  if (savedTurretDelay !== undefined) hunter.guideDelay = savedTurretDelay
+  else delete hunter.guideDelay
+  if (savedSplit) hunterAmmo.split = savedSplit
+  else delete hunterAmmo.split
+  if (savedVerticalFlightTime !== undefined) hunterAmmo.missileFlightTime = savedVerticalFlightTime
+  else delete hunterAmmo.missileFlightTime
 }
 
 // --- ④ 非制导导弹无重选行为（目标消灭不影响锁定落点） ---
@@ -1614,7 +1884,9 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
 {
   Math.random = zeroRandom
   const hunter = TURRET_DEFS.find(d => d.id === 'hunter')!
-  hunter.guideDelay = 0.5
+  const hunterAmmo = PROJECTILE_ARTS.find(a => a.id === hunter.art?.projectile)!
+  const savedDelay = hunterAmmo.guideDelay
+  hunterAmmo.guideDelay = 0.5
   let s = arena()
   mkTurret(s, 'hunter', 6, 20)
   const e94 = mkEnemy(s, 'walker', 8.5, 15)
@@ -1640,14 +1912,18 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
   const pEnd = s.projectiles.find(p => p.id === p0?.id)
   check('v1.94：延迟到期开制导并命中目标', hit94 && (!pEnd || pEnd.guided || pEnd.fading !== undefined),
     `hit=${hit94}`)
-  hunter.guideDelay = 0.4 // 恢复出厂默认（v1.95 起 hunter 自带延迟制导 0.4s）
+  hunterAmmo.guideDelay = savedDelay
 }
 
 // --- ⑥ v1.94 兼容回归：guided=true 无 guideDelay → 立即制导（无延迟字段） ---
 {
   Math.random = zeroRandom
   const hunter6 = TURRET_DEFS.find(d => d.id === 'hunter')!
-  delete hunter6.guideDelay // 临时移除出厂延迟制导，模拟旧配置
+  const hunterAmmo6 = PROJECTILE_ARTS.find(a => a.id === hunter6.art?.projectile)!
+  const savedDelay6 = hunterAmmo6.guideDelay
+  const savedTurretDelay6 = hunter6.guideDelay
+  delete hunterAmmo6.guideDelay // 临时移除弹丸库延迟制导，模拟立即制导
+  delete hunter6.guideDelay
   let s = arena()
   mkTurret(s, 'hunter', 6, 20)
   mkEnemy(s, 'walker', 8.5, 15)
@@ -1659,7 +1935,8 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
   check('v1.94：立即制导弹无延迟字段且出生即追踪（兼容旧配置）',
     !!p0 && p0.guided === true && p0.guideDelayLeft === undefined && p0.targetId !== null,
     `guided=${p0?.guided} delayLeft=${p0?.guideDelayLeft}`)
-  hunter6.guideDelay = 0.4 // 恢复出厂默认
+  hunterAmmo6.guideDelay = savedDelay6
+  hunter6.guideDelay = savedTurretDelay6
 }
 
 
@@ -1667,10 +1944,11 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
 {
   Math.random = zeroRandom
   const hunter = TURRET_DEFS.find(d => d.id === 'hunter')!
-  const bakDelay = hunter.guideDelay
-  hunter.guideDelay = 0.5
-  hunter.missileInitSpeed = 100
-  hunter.guideDecel = 150 // 延迟 0.5s 内共减速 75 → 100 → 25
+  const hunterAmmo = PROJECTILE_ARTS.find(a => a.id === hunter.art?.projectile)!
+  const bakDelay = hunterAmmo.guideDelay, bakInit = hunterAmmo.missileInitSpeed, bakDecel = hunterAmmo.guideDecel
+  hunterAmmo.guideDelay = 0.5
+  hunterAmmo.missileInitSpeed = legacyMeters(100)
+  hunterAmmo.guideDecel = legacyMeters(150) // 延迟 0.5s 内按旧格速等比减速
   let s = arena()
   mkTurret(s, 'hunter', 6, 20)
   mkEnemy(s, 'walker', 8.5, 15)
@@ -1680,7 +1958,7 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
     p0 = s.projectiles.find(p => p.kind === 'missile')
   }
   check('v1.96：导弹出生速度 = 初速度参数（而非 0）',
-    !!p0 && p0.speed > 80 && p0.speed <= 100,
+    !!p0 && p0.speed > legacyMeters(80) && p0.speed <= legacyMeters(100),
     `speed=${p0?.speed.toFixed(1)}`)
   let prevSp = p0!.speed
   let decOK = true
@@ -1690,7 +1968,7 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
     if (!pp || pp.speed >= prevSp) decOK = false
     else prevSp = pp.speed
   }
-  check('v1.96：延迟期内速度按延迟减速度递减', decOK && prevSp < 90, `末速=${prevSp.toFixed(1)}`)
+  check('v1.96：延迟期内速度按延迟减速度递减', decOK && prevSp < legacyMeters(90), `末速=${prevSp.toFixed(1)}`)
   let sp2 = 0, guided96 = false
   for (let i = 0; i < 40; i++) { // 延迟到期：开制导 + 恢复加速度爬升
     s = tick(s, 0.05)
@@ -1703,17 +1981,18 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
   }
   check('v1.96：延迟到期后开制导并恢复加速（速度重新爬升）', guided96 && sp2 > prevSp,
     `guided=${guided96} 延迟末速=${prevSp.toFixed(1)} 制导后=${sp2.toFixed(1)}`)
-  hunter.guideDelay = bakDelay; delete hunter.missileInitSpeed; delete hunter.guideDecel
+  hunterAmmo.guideDelay = bakDelay; hunterAmmo.missileInitSpeed = bakInit; hunterAmmo.guideDecel = bakDecel
 }
 
 // --- ⑧ v1.96 延迟减速度下限：减到 0 为止不出现负速度 ---
 {
   Math.random = zeroRandom
   const hunter = TURRET_DEFS.find(d => d.id === 'hunter')!
-  const bakDelay = hunter.guideDelay
-  hunter.guideDelay = 0.5
-  hunter.missileInitSpeed = 10
-  hunter.guideDecel = 10000 // 极大减速度：第 1 tick 就应钳到 0
+  const hunterAmmo = PROJECTILE_ARTS.find(a => a.id === hunter.art?.projectile)!
+  const bakDelay = hunterAmmo.guideDelay, bakInit = hunterAmmo.missileInitSpeed, bakDecel = hunterAmmo.guideDecel
+  hunterAmmo.guideDelay = 0.5
+  hunterAmmo.missileInitSpeed = 10
+  hunterAmmo.guideDecel = 10000 // 极大减速度：第 1 tick 就应钳到 0
   let s = arena()
   mkTurret(s, 'hunter', 6, 20)
   mkEnemy(s, 'walker', 8.5, 15)
@@ -1727,15 +2006,21 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
   check('v1.96：延迟减速度将速度钳到 0（不为负）',
     !!p1 && p1.speed === 0 && p1.guided === false,
     `speed=${p1?.speed} guided=${p1?.guided}`)
-  hunter.guideDelay = bakDelay; delete hunter.missileInitSpeed; delete hunter.guideDecel
+  hunterAmmo.guideDelay = bakDelay; hunterAmmo.missileInitSpeed = bakInit; hunterAmmo.guideDecel = bakDecel
 }
 
 // --- ⑨ v1.96 兼容回归：未配置初速度/减速度 → 出生 0 速、延迟期照常加速 ---
 {
   Math.random = zeroRandom
   const hunter = TURRET_DEFS.find(d => d.id === 'hunter')!
-  const bakDelay = hunter.guideDelay
-  hunter.guideDelay = 0.5 // 仅延迟，无初速/减速
+  const hunterAmmo = PROJECTILE_ARTS.find(a => a.id === hunter.art?.projectile)!
+  const bakDelay = hunterAmmo.guideDelay, bakInit = hunterAmmo.missileInitSpeed, bakDecel = hunterAmmo.guideDecel
+  const bakTurretInit = hunter.missileInitSpeed, bakTurretDecel = hunter.guideDecel
+  hunterAmmo.guideDelay = 0.5 // 仅延迟，无初速/减速
+  delete hunterAmmo.missileInitSpeed
+  delete hunterAmmo.guideDecel
+  delete hunter.missileInitSpeed
+  delete hunter.guideDecel
   let s = arena()
   mkTurret(s, 'hunter', 6, 20)
   mkEnemy(s, 'walker', 8.5, 15)
@@ -1750,7 +2035,8 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
   check('v1.96：未配置时出生近 0 速且延迟期照常加速（旧行为兼容）',
     spA >= 0 && spA <= 4 && !!p1 && p1.speed > spA && p1.guided === false,
     `出生=${spA.toFixed(1)} 两帧后=${p1?.speed.toFixed(1)}`)
-  hunter.guideDelay = bakDelay
+  hunterAmmo.guideDelay = bakDelay; hunterAmmo.missileInitSpeed = bakInit; hunterAmmo.guideDecel = bakDecel
+  hunter.missileInitSpeed = bakTurretInit; hunter.guideDecel = bakTurretDecel
 }
 
 
@@ -1797,12 +2083,12 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
   hunter.guideDelay = bakDelay; hunter.missileCurve = bakCurve; hunter.split = bakSplit
 }
 
-// --- v2.20 ② 出膛偏角：延迟期内初始航向 = 炮塔方向 + 偏角 ---
+// --- 出膛偏角：填写总随机区间，延迟期内按弹丸 id 确定性取样 ---
 {
   Math.random = zeroRandom
   const hunter = TURRET_DEFS.find(d => d.id === 'hunter')!
   const bakEject = hunter.ejectAngle, bakSplit = hunter.split
-  hunter.ejectAngle = 90
+  hunter.ejectAngle = 20
   delete hunter.split
   let s = arena()
   mkTurret(s, 'hunter', 6, 20) // hunter rotateSpeed 0 → 炮塔向恒 0（-y）
@@ -1812,10 +2098,14 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
     s = tick(s, 0.05)
     p0 = s.projectiles.find(p => p.kind === 'missile')
   }
-  const dev = p0 ? Math.abs(wrapAngle(p0.heading - Math.PI / 2)) : 999
-  check('v2.20：出膛偏角 90° → 延迟期内出生航向 = 炮塔向 0° + 90°（且未开制导）',
-    !!p0 && dev < 2 * Math.PI / 180 && p0.guided === false,
-    `heading=${p0 ? (p0.heading * 57.3).toFixed(1) : '?'}° guided=${p0?.guided}`)
+  const expected = p0 ? missileEjectOffsetDeg(20, p0.id) * Math.PI / 180 : 999
+  const dev = p0 ? Math.abs(wrapAngle(p0.heading - expected)) : 999
+  check('出膛偏角 20° → 每发在 -10°～+10° 确定性取样（且延迟期未开制导）',
+    !!p0 && Math.abs(p0.heading) <= 10 * Math.PI / 180 + 1e-9 && dev < 1e-9 && p0.guided === false,
+    `heading=${p0 ? (p0.heading * 57.3).toFixed(1) : '?'}° expected=${expected === 999 ? '?' : (expected * 57.3).toFixed(1)}° guided=${p0?.guided}`)
+  check('制导延迟期间曲线幅度提高 100%，延迟结束恢复设定值',
+    missileCurveAmplitudeScale(0.5) === 2 && missileCurveAmplitudeScale(0) === 1,
+    `delay=${missileCurveAmplitudeScale(0.5)} guided=${missileCurveAmplitudeScale(0)}`)
   if (bakEject !== undefined) hunter.ejectAngle = bakEject; else delete hunter.ejectAngle
   hunter.split = bakSplit
 }
@@ -1824,11 +2114,12 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
 {
   Math.random = zeroRandom
   const hunter = TURRET_DEFS.find(d => d.id === 'hunter')!
-  const bakDelay = hunter.guideDelay, bakCurve = hunter.missileCurve, bakSplit = hunter.split, bakBurn = hunter.burnTime
-  delete hunter.guideDelay
-  delete hunter.missileCurve
-  delete hunter.split
-  hunter.burnTime = 0.6
+  const hunterAmmo = PROJECTILE_ARTS.find(a => a.id === hunter.art?.projectile)!
+  const bakDelay = hunterAmmo.guideDelay, bakCurve = hunterAmmo.missileCurve, bakSplit = hunterAmmo.split, bakBurn = hunterAmmo.burnTime
+  delete hunterAmmo.guideDelay
+  delete hunterAmmo.missileCurve
+  delete hunterAmmo.split
+  hunterAmmo.burnTime = 0.6
   let s = arena()
   mkTurret(s, 'hunter', 6, 20)
   mkEnemy(s, 'walker', 6.5, 6) // 远距离目标：保证弹存活足够久
@@ -1843,8 +2134,8 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
   check('v2.20：燃烧时间耗尽后速度不再爬升（惯性滑行，且低于极速 320）',
     p0id >= 0 && spAtBurn > 0 && spLate > 0 && Math.abs(spLate - spAtBurn) < 0.01 && spLate < 320,
     `燃尽末速=${spAtBurn.toFixed(1)} 1.5s=${spLate.toFixed(1)}`)
-  hunter.guideDelay = bakDelay; hunter.missileCurve = bakCurve; hunter.split = bakSplit
-  if (bakBurn !== undefined) hunter.burnTime = bakBurn; else delete hunter.burnTime
+  hunterAmmo.guideDelay = bakDelay; hunterAmmo.missileCurve = bakCurve; hunterAmmo.split = bakSplit
+  if (bakBurn !== undefined) hunterAmmo.burnTime = bakBurn; else delete hunterAmmo.burnTime
 }
 
 // --- v2.20 ④ 非制导沿途撞击：飞行途中撞敌即在敌处爆炸（不再只等锁定落点） ---
@@ -1870,8 +2161,9 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
 {
   Math.random = zeroRandom
   const hunter20 = TURRET_DEFS.find(d => d.id === 'hunter')!
-  const bakSplit20 = hunter20.split
-  hunter20.split = { count: 3, spread: 40, at: 'proximity', range: 25 } // v2.27 出厂已移除分裂，本用例临时挂回聚焦机制本身
+  const hunterAmmo20 = PROJECTILE_ARTS.find(a => a.id === hunter20.art?.projectile)!
+  const bakSplit20 = hunterAmmo20.split
+  hunterAmmo20.split = { count: 3, spread: 40, at: 'proximity', range: M_PER_CELL }
   let s = arena()
   mkTurret(s, 'hunter', 6, 20)
   mkEnemy(s, 'walker', 6.5, 12)
@@ -1891,18 +2183,19 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
   check('v2.20：子弹 splitDone 防再分裂（同屏子弹数不爆炸式增长）且继承制导结算伤害',
     maxSubs <= 6 && s.enemies[0].hp < 100000 - 30,
     `maxSubs=${maxSubs} hp=${s.enemies[0].hp.toFixed(1)}`)
-  hunter20.split = bakSplit20
+  hunterAmmo20.split = bakSplit20
 }
 
 // --- v2.20 ⑨b 真集束（燃尽）：burnTime 耗尽触发分裂，子弹继承弹龄 ---
 {
   Math.random = zeroRandom
   const hunter = TURRET_DEFS.find(d => d.id === 'hunter')!
-  const bakSplit = hunter.split, bakBurn = hunter.burnTime, bakDelay = hunter.guideDelay, bakCurve = hunter.missileCurve
-  delete hunter.guideDelay
-  delete hunter.missileCurve
-  hunter.burnTime = 0.6
-  hunter.split = { count: 2, spread: 30, at: 'burnout' }
+  const hunterAmmo = PROJECTILE_ARTS.find(a => a.id === hunter.art?.projectile)!
+  const bakSplit = hunterAmmo.split, bakBurn = hunterAmmo.burnTime, bakDelay = hunterAmmo.guideDelay, bakCurve = hunterAmmo.missileCurve
+  delete hunterAmmo.guideDelay
+  delete hunterAmmo.missileCurve
+  hunterAmmo.burnTime = 0.6
+  hunterAmmo.split = { count: 2, spread: 30, at: 'burnout' }
   let s = arena()
   mkTurret(s, 'hunter', 6, 20)
   mkEnemy(s, 'walker', 6.5, 6)
@@ -1914,8 +2207,8 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
   check('v2.20：燃尽分裂 = 燃烧时间耗尽触发（子弹弹龄 ≥ burnTime）',
     firstSubs === 2 && subT >= 0.6 - 1e-6,
     `subs=${firstSubs} subT=${subT.toFixed(2)}`)
-  hunter.split = bakSplit; hunter.guideDelay = bakDelay; hunter.missileCurve = bakCurve
-  if (bakBurn !== undefined) hunter.burnTime = bakBurn; else delete hunter.burnTime
+  hunterAmmo.split = bakSplit; hunterAmmo.guideDelay = bakDelay; hunterAmmo.missileCurve = bakCurve
+  if (bakBurn !== undefined) hunterAmmo.burnTime = bakBurn; else delete hunterAmmo.burnTime
 }
 
 // --- v2.23 ② 烟尾「持续」：点火后喷射窗口，≤ 燃烧时间；缺省=整个燃烧期 ---
@@ -1923,7 +2216,7 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
   check('v2.23：smokeDuration——持续 ≤ 炮塔燃烧时间（未配 burnTime 不钳；未配持续=整个燃烧期）',
     smokeDuration(5, 3) === 3 && smokeDuration(2, 3) === 2 && smokeDuration(5, undefined) === 5 && smokeDuration(undefined, 3) === undefined,
     `sd(5,3)=${smokeDuration(5, 3)} sd(undef,3)=${smokeDuration(undefined, 3)}`)
-  // 点火时刻弹龄：延迟制导弹 = 出生延迟；出厂猎手（guideDelay 0.4）
+  // 点火时刻弹龄：延迟制导弹 = 弹丸库出生延迟；当前集束导弹 guideDelay=0.5
   Math.random = zeroRandom
   let s = arena()
   mkTurret(s, 'hunter', 6, 20)
@@ -1933,8 +2226,8 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
     s = tick(s, 0.05)
     p0 = s.projectiles.find(p => p.kind === 'missile')
   }
-  check('v2.23：导弹携带点火时刻弹龄（igniteAtT = 出生制导延迟 0.4s）',
-    !!p0 && Math.abs((p0.igniteAtT ?? -1) - 0.4) < 1e-9,
+  check('v2.23：导弹携带点火时刻弹龄（igniteAtT = 出生制导延迟 0.5s）',
+    !!p0 && Math.abs((p0.igniteAtT ?? -1) - 0.5) < 1e-9,
     `igniteAtT=${p0?.igniteAtT}`)
 }
 
@@ -2170,7 +2463,7 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
   const tt1 = byId(s.turrets, t.id)!
   const holding = !tt1.firing && tt1.chargeLeft < 0 && tt1.chargeLeft > -0.05 && byId(s.enemies, e.id)!.hp === hp0
   s = run(s, 0.2, 0.05) // -0.03-0.05=-0.08 ≤ -0.05 → 滞留 0.05 结束起射
-  // v2.35：起射后光束以 2400m/s 伸展（250m 射程 ≈0.10s 到位），首次 DoT 顺延到伸展到位帧，
+  // 起射后光束按 BEAM_ON_SPEED 伸展，首次 DoT 顺延到伸展到位帧，
   // 故伤害断言窗口由 0.1s 放宽到 0.2s（滞留/起射时序断言不变）
   const tt2 = byId(s.turrets, t.id)!
   const fired = tt2.firing && byId(s.enemies, e.id)!.hp < hp0
@@ -2183,7 +2476,7 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
   beam.chargeTime = ch0
 }
 
-// --- v2.7 ④ 光束命中事件：持续光束 DoT 端点 + 脉冲点射命中点（配置弹丸条目时）---
+// --- v2.7 ④ 光束命中事件：持续光束 DoT 端点（配置弹丸条目时）---
 {
   Math.random = zeroRandom
   // 持续光束：注入 art.projectile → DoT tick 在端点产生 impact 事件（ttl 0.15s，回调内观察避免过期被清）
@@ -2198,19 +2491,30 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
   beamDef.art = savedBeamArt // 恢复
   check('v2.7：持续光束 DoT 在端点产生 impact 事件（ammoId=art.projectile）', beamSeen > 0, `seen=${beamSeen}`)
 }
+
+// --- 弹丸库命中表现：直射弹实际碰撞后必须生成 impact 事件 ---
 {
   Math.random = zeroRandom
-  // 脉冲点射：注入 art.projectile → 每发命中点产生 impact 事件；未配置 → 无事件（现状不变）
   let s = arena()
-  const pulseDef = TURRET_DEFS.find(d => d.id === 'pulse')!
-  const savedPulseArt = pulseDef.art
-  pulseDef.art = { ...(savedPulseArt ?? {}), projectile: 'ray_std' }
-  mkTurret(s, 'pulse', 6, 20)
-  mkEnemy(s, 'walker', 6.5, 14)
-  let pulseSeen = 0
-  s = run(s, 2, 0.05, g => { pulseSeen += g.impacts.filter(im => im.ammoId === 'ray_std').length })
-  pulseDef.art = savedPulseArt // 恢复
-  check('v2.7：脉冲点射命中点产生 impact 事件（ammoId=art.projectile）', pulseSeen > 0, `seen=${pulseSeen}`)
+  s.objects = []
+  const cannon = TURRET_DEFS.find(d => d.id === 'custom-1787149972481-1')!
+  const savedProjectile = cannon.art?.projectile
+  cannon.art = { ...(cannon.art ?? {}), projectile: 'custom_ammo_2' }
+  const target = mkEnemy(s, 'walker', 6, 5, 100)
+  s.projectiles.push({
+    id: s.nextId++, kind: 'bullet', defId: cannon.id, level: 1,
+    x: 6, y: 4.5, px: 6, py: 4.5, heading: Math.PI,
+    damage: 10, traveled: 0, maxTravel: 1000, shooter: 0, hitIds: [],
+    t: 0, flightTime: 0, sx: 0, sy: 0, tx: 0, ty: 0,
+    speed: 0, turnRate: 0, guided: false, targetId: null,
+    lockX: 0, lockY: 0, lostLock: false, prevDist: -1, weavePhase: 0,
+  })
+  s = tick(s, 0.05)
+  const impacts = s.impacts.filter(im => im.ammoId === 'custom_ammo_2')
+  check('弹丸库命中表现：穿甲直射弹命中单位后生成一次对应 impact 事件',
+    byId(s.enemies, target.id)!.hp < 100 && impacts.length === 1,
+    `hp=${byId(s.enemies, target.id)!.hp} impacts=${JSON.stringify(impacts)}`)
+  cannon.art = { ...(cannon.art ?? {}), projectile: savedProjectile }
 }
 
 // --- v2.5 ① resCompatUrl：旧 /sprites/ 路径重写为 /res/，其余不动 ---
@@ -2245,34 +2549,29 @@ console.log('== 导弹飞行时间/制导重选验收 ==')
 
 console.log('== 波次收尾投射物/自然散热验收 ==')
 
-// --- ① 波次结束结算后：已发射投射物继续飞行直至消失，不冻结 ---
+// --- ① 整备阶段：上一波已发射投射物继续飞行直至消失，不冻结 ---
 {
-  Math.random = zeroRandom
   let s = arena()
-  s.wave = 1
-  s.spawnQueue = []
-  mkTurret(s, 'mg', 6, 20) // 射程 150m=6 格，弹速 400m/s
-  mkEnemy(s, 'walker', 6.5, 15, 65) // v2.45 口令(5)：mg 伤害 12→5/轮间隔 1→2s——65=13 发击死（第三轮首发致死，该轮后续弹仍在飞）
-  let transitionHadProj = false
-  let reachedPrep = false
-  s = run(s, 8, 0.05, g => {
-    if (g.phase === 'prep') {
-      reachedPrep = true
-      if (g.projectiles.length > 0) transitionHadProj = true
-    }
-  })
-  // 收尾后继续推进：投射物最终全部命中/出界消失（不永久冻结）
-  s = run(s, 6, 0.05)
+  s.phase = 'prep'; s.prepLeft = 999
+  s.objects = []; s.walls = []; s.buildings = []; s.core = null; s.enemies = []; s.allies = []
+  s.projectiles.push({ id: s.nextId++, kind: 'bullet', defId: 'mg', x: 20, y: 10, px: 20, py: 10,
+    heading: Math.PI / 2, speed: 10, damage: 1, t: 0, traveled: 0, maxTravel: 500, hitIds: [] })
+  const x0 = s.projectiles[0].x
+  const y0 = s.projectiles[0].y
+  s = tick(s, 0.05)
+  const firstProjectile = s.projectiles[0]
+  const movedDuringPrep = !!firstProjectile && Math.hypot(firstProjectile.x - x0, firstProjectile.y - y0) > 0
+  s = run(s, 10, 0.05)
   check('波次结束后已发射投射物继续执行直至消失（不冻结）',
-    reachedPrep && transitionHadProj && s.projectiles.length === 0,
-    `prep=${reachedPrep} hadProj=${transitionHadProj} left=${s.projectiles.length} phase=${s.phase}`)
+    movedDuringPrep && s.projectiles.length === 0,
+    `moved=${movedDuringPrep} first=${firstProjectile ? `${firstProjectile.x},${firstProjectile.y}` : 'removed'} left=${s.projectiles.length} phase=${s.phase}`)
 }
 
 // --- ② 堡垒汇聚散热：射击产热进堡垒池，停止射击后按散热速率下降至 0 ---
 {
   Math.random = zeroRandom
-  const diss0 = DEFAULT_FORTRESS.heatDissipation
-  DEFAULT_FORTRESS.heatDissipation = 10 // 10 点/s = 0.5 点/0.05s tick
+  const diss0 = gameParameters().naturalHeatDissipation
+  setNaturalHeatDissipation(10) // 10 点/s = 0.5 点/0.05s tick
   const mgH = TURRET_DEFS.find(d => d.id === 'mg')!
   const heatPS0 = mgH.heatPerShot
   mgH.heatPerShot = 7 // v1.72：口令出厂不产热；本用例显式给产热测汇聚散热
@@ -2290,14 +2589,14 @@ console.log('== 波次收尾投射物/自然散热验收 ==')
     hot > 0 && Math.abs(hot - cool1 - 10) < 0.5 && cool2 === 0, // 10 点/s × 1s = 10 点
     `hot=${hot.toFixed(1)} after1s=${cool1.toFixed(1)} end=${cool2}`)
   mgH.heatPerShot = heatPS0
-  DEFAULT_FORTRESS.heatDissipation = diss0
+  setNaturalHeatDissipation(diss0)
 }
 
 // --- ③ 持续射击中（光束）堡垒散热持续生效（汇聚后散热不中断） ---
 {
   Math.random = zeroRandom
-  const diss0 = DEFAULT_FORTRESS.heatDissipation
-  DEFAULT_FORTRESS.heatDissipation = 10
+  const diss0 = gameParameters().naturalHeatDissipation
+  setNaturalHeatDissipation(10)
   let s = arena()
   const t = mkTurret(s, 'beam', 6, 20)
   mkEnemy(s, 'walker', 6.5, 16)
@@ -2309,7 +2608,7 @@ console.log('== 波次收尾投射物/自然散热验收 ==')
   check('持续射击中（光束）堡垒散热持续生效',
     wasFiring && byId(s.turrets, t.id)!.firing && Math.abs(50 - during - 5) < 0.5, // 10 点/s × 0.5s = 5 点
     `firing=${wasFiring} heat=${during.toFixed(1)}`)
-  DEFAULT_FORTRESS.heatDissipation = diss0
+  setNaturalHeatDissipation(diss0)
 }
 
 // --- ④ 散热器直连堡垒：功率全额叠加到堡垒散热速率（不按炮塔数摊薄、可叠加） ---
@@ -2331,8 +2630,8 @@ console.log('== 波次收尾投射物/自然散热验收 ==')
 // --- ⑤ 备战阶段（波次结束后）堡垒散热继续生效 ---
 {
   Math.random = zeroRandom
-  const diss0 = DEFAULT_FORTRESS.heatDissipation
-  DEFAULT_FORTRESS.heatDissipation = 10 // 点/s
+  const diss0 = gameParameters().naturalHeatDissipation
+  setNaturalHeatDissipation(10) // 点/s
   let s = arena()
   s.fortress.heat = 40
   s.phase = 'prep'
@@ -2344,16 +2643,16 @@ console.log('== 波次收尾投射物/自然散热验收 ==')
   check('备战阶段堡垒散热继续生效（点/s）',
     Math.abs(heat1 - 30) < 0.5 && heat2 === 0,
     `after1s=${heat1.toFixed(1)} end=${heat2}`)
-  DEFAULT_FORTRESS.heatDissipation = diss0
+  setNaturalHeatDissipation(diss0)
 }
 
 // --- ⑥ 堡垒过热：全炮塔停火；降至上限 50% 迟滞恢复 ---
 {
   Math.random = zeroRandom
   const cap0 = DEFAULT_FORTRESS.heatCap
-  const diss0 = DEFAULT_FORTRESS.heatDissipation
+  const diss0 = gameParameters().naturalHeatDissipation
   DEFAULT_FORTRESS.heatCap = 100
-  DEFAULT_FORTRESS.heatDissipation = 20
+  setNaturalHeatDissipation(20)
   let s = arena()
   mkTurret(s, 'mg', 6, 20)
   const e = mkEnemy(s, 'walker', 6.5, 16, 1e9) // 打不死，持续供靶
@@ -2368,7 +2667,7 @@ console.log('== 波次收尾投射物/自然散热验收 ==')
     stillHot && resumed,
     `stillHot=${stillHot} heat=${s.fortress.heat.toFixed(1)} oh=${s.fortress.overheated} hp=${byId(s.enemies, e.id)!.hp}`)
   DEFAULT_FORTRESS.heatCap = cap0
-  DEFAULT_FORTRESS.heatDissipation = diss0
+  setNaturalHeatDissipation(diss0)
 }
 
 console.log('== 导弹飞行曲线（weave）验收 ==')
@@ -2452,25 +2751,26 @@ console.log('== 多联炮管（barrels/barrelMode）验收 ==')
   const burst0 = mg.burst
   const regen0 = AMMO.regen
   AMMO.regen = 0 // 关闭回复，隔离计量
-  const diss0 = DEFAULT_FORTRESS.heatDissipation
-  DEFAULT_FORTRESS.heatDissipation = 0 // 关闭散热，精确计量产热
+  const diss0 = gameParameters().naturalHeatDissipation
+  setNaturalHeatDissipation(0) // 关闭散热，精确计量产热
   mg.barrels = 3; mg.barrelMode = 'salvo'; mg.burst = 1
   let s = arena()
   const t = mkTurret(s, 'mg', 6, 20)
   mkEnemy(s, 'walker', 6.5, 16)
-  s.ammo = 100 // cap 以下，避免 tick 内 min(cap,…) 钳回 arena 高弹药干扰计量
-  const ammo0 = s.ammo
+  t.ammo = 100
+  const ammo0 = t.ammo
   let volley = 0
   for (let i = 0; i < 30 && volley === 0; i++) {
     s = tick(s, 0.05)
     volley = s.projectiles.filter(p => p.shooter === t.id).length
   }
+  const ammoLeft = byId(s.turrets, t.id)!.ammo ?? 0
   check('齐射 barrels=3：单次击发 3 枚弹丸，弹药/热量按 3 枚结算',
-    volley === 3 && Math.abs(ammo0 - s.ammo - (mg.ammoPerShot ?? 0) * 3) < 1e-6 && s.fortress.heat === (mg.heatPerShot ?? 0) * 3,
-    `volley=${volley} ammoΔ=${ammo0 - s.ammo} heat=${s.fortress.heat}`)
+    volley === 3 && Math.abs(ammo0 - ammoLeft - 3) < 1e-6 && s.fortress.heat === (mg.heatPerShot ?? 0) * 3,
+    `volley=${volley} ammoΔ=${ammo0 - ammoLeft} heat=${s.fortress.heat}`)
   delete mg.barrels; delete mg.barrelMode; mg.burst = burst0
   AMMO.regen = regen0
-  DEFAULT_FORTRESS.heatDissipation = diss0
+  setNaturalHeatDissipation(diss0)
 }
 
 // --- ② 轮流：barrels=3 + sequential（连发=3），逐枚射出、间隔≈连发间隔、barrelIdx 轮转 ---
@@ -2505,24 +2805,25 @@ console.log('== 多联炮管（barrels/barrelMode）验收 ==')
   const mg = TURRET_DEFS.find(d => d.id === 'mg')! // 注：上方②结束已 delete barrels/barrelMode = 未配置态
   const regen0 = AMMO.regen
   AMMO.regen = 0
-  const diss0 = DEFAULT_FORTRESS.heatDissipation
-  DEFAULT_FORTRESS.heatDissipation = 0 // 关闭散热，精确计量产热
+  const diss0 = gameParameters().naturalHeatDissipation
+  setNaturalHeatDissipation(0) // 关闭散热，精确计量产热
   let s = arena()
   const t = mkTurret(s, 'mg', 6, 20)
   mkEnemy(s, 'walker', 6.5, 16)
-  s.ammo = 100
-  const ammo0 = s.ammo
+  t.ammo = 100
+  const ammo0 = t.ammo
   let volley = 0
   for (let i = 0; i < 30 && volley === 0; i++) {
     s = tick(s, 0.05)
     volley = s.projectiles.filter(p => p.shooter === t.id).length
   }
+  const ammoLeft = byId(s.turrets, t.id)!.ammo ?? 0
   check('barrels 未配置：行为不变（单管单发结算）',
     mg.barrels === undefined && volley === 1
-    && Math.abs(ammo0 - s.ammo - (mg.ammoPerShot ?? 0)) < 1e-6 && s.fortress.heat === (mg.heatPerShot ?? 0),
-    `volley=${volley} ammoΔ=${ammo0 - s.ammo} heat=${s.fortress.heat}`)
+    && Math.abs(ammo0 - ammoLeft - 1) < 1e-6 && s.fortress.heat === (mg.heatPerShot ?? 0),
+    `volley=${volley} ammoΔ=${ammo0 - ammoLeft} heat=${s.fortress.heat}`)
   AMMO.regen = regen0
-  DEFAULT_FORTRESS.heatDissipation = diss0
+  setNaturalHeatDissipation(diss0)
 }
 
 // --- ④ 轮流跨轮 barrelIdx 不重置：第二轮第一枚从前一轮的下一管射出 ---
@@ -2602,6 +2903,40 @@ console.log('== 炮塔美术渲染管线（art 挂点/炮口事件）验收 ==')
   mg.art = art0
 }
 
+// --- ②b 未配置 art 的单管：预览挂点、弹丸出生点与火光事件共用前伸 0.35 格炮口 ---
+{
+  Math.random = zeroRandom
+  const mg = TURRET_DEFS.find(d => d.id === 'mg')!
+  const burst0 = mg.burst
+  const art0 = mg.art
+  const barrels0 = mg.barrels
+  const barrelMode0 = mg.barrelMode
+  delete mg.art
+  mg.barrels = 1; mg.barrelMode = 'salvo'; mg.burst = 1
+  let s = arena()
+  const t = mkTurret(s, 'mg', 6, 20)
+  const expected = muzzlePos(t, mg, 0)
+  const generated = artMounts(t, mg)[0].muzzle
+  mkEnemy(s, 'walker', 6.5, 16)
+  let spawn: { x: number; y: number } | undefined
+  let flash: typeof s.muzzles[number] | undefined
+  for (let i = 0; i < 30 && (!spawn || !flash); i++) {
+    s = tick(s, 0.05)
+    spawn ??= s.projectiles.find(p => p.shooter === t.id)
+    flash ??= s.muzzles.find(m => m.turretId === t.id)
+  }
+  check('未配置 art 的单管：预览挂点、弹丸出生点与火光共用 +0.35 格炮口',
+    generated[0] === 0 && generated[1] === 0.35
+    && Math.abs(expected.x - 6.5) < 0.01 && Math.abs(expected.y - 20.15) < 0.01
+    && !!spawn && Math.abs(spawn.x - expected.x) < 0.01 && Math.abs(spawn.y - expected.y) < 0.01
+    && !!flash && Math.abs(flash.x - expected.x) < 0.01 && Math.abs(flash.y - expected.y) < 0.01,
+    `expected=${JSON.stringify(expected)} spawn=${JSON.stringify(spawn)} flash=${JSON.stringify(flash)}`)
+  mg.art = art0
+  if (barrels0 === undefined) delete mg.barrels; else mg.barrels = barrels0
+  if (barrelMode0 === undefined) delete mg.barrelMode; else mg.barrelMode = barrelMode0
+  mg.burst = burst0
+}
+
 // --- ③ sequential + art：barrelIdx 轮转对应不同 muzzle ---
 {
   Math.random = zeroRandom
@@ -2675,15 +3010,38 @@ console.log('== validateArt 校验验收 ==')
     JSON.stringify(v))
 }
 
-// --- ② 挂点表数量 ≠ 逻辑炮管数 → warning ---
+// --- ①b 偶数炮管贴图翻转：索引、默认值与持久化 ---
 {
   const mg = TURRET_DEFS.find(d => d.id === 'mg')!
   const art0 = mg.art
+  mg.art = { ...art0, flipEvenBarrels: true }
+  check('偶数炮管翻转：仅第2/4/6…根炮管贴图翻转',
+    !shouldFlipEvenBarrel(mg, 0)
+    && shouldFlipEvenBarrel(mg, 1)
+    && !shouldFlipEvenBarrel(mg, 2)
+    && shouldFlipEvenBarrel(mg, 3))
+  const roundTrip = parseTurretDefs(serializeTurretDefs([mg]))?.[0]
+  check('偶数炮管翻转：炮塔配置序列化往返保留开关', roundTrip?.art?.flipEvenBarrels === true)
+  mg.art = { ...art0 }
+  delete mg.art.flipEvenBarrels
+  check('偶数炮管翻转：默认关闭时所有炮管均不翻转',
+    !shouldFlipEvenBarrel(mg, 0) && !shouldFlipEvenBarrel(mg, 1))
+  mg.art = art0
+}
+
+// --- ② 炮管数是唯一数量来源；旧挂点表不再额外绘制/发射 ---
+{
+  const mg = TURRET_DEFS.find(d => d.id === 'mg')!
+  const art0 = mg.art
+  const fakeT = { x: 0, y: 0, w: mg.w, h: mg.h } as never
   mg.barrels = 3 // 逻辑 3 管 vs 挂点表 2 项（v1.72 口令出厂挂点表为双管）
   const v = validateArt(mg)
-  check('validateArt：挂点数≠炮管数 → warning（§7.1）',
+  check('validateArt：旧挂点数≠炮管数 → 自动兼容 warning',
     v.ok && v.warnings.some(w => w.includes('≠')),
     JSON.stringify(v))
+  check('炮管数增加：缺少的美术挂点自动生成且有效挂点数=3', artMounts(fakeT, mg).length === 3)
+  mg.barrels = 1
+  check('炮管数减少：多余旧挂点不再进入预览、实战渲染或出生点', artMounts(fakeT, mg).length === 1)
   mg.barrels = 2 // 恢复 v1.72 出厂
   mg.art = art0
 }
@@ -2727,6 +3085,19 @@ console.log('== validateArt 校验验收 ==')
 
 console.log('== 光束停火消退验收 ==')
 
+{
+  const shrink = beamFadeSpan(10, 0.5, 'shrink')
+  const transferFull = beamFadeSpan(10, 1, 'transfer')
+  const transferHalf = beamFadeSpan(10, 0.5, 'transfer')
+  const transferGone = beamFadeSpan(10, 0, 'transfer')
+  check('光束消散模式：收缩保持原长度；传递从源头向目标收束且命中端点保持原位',
+    shrink.start === 0 && shrink.length === 10
+    && transferFull.start === 0 && transferFull.length === 10
+    && transferHalf.start === 5 && transferHalf.length === 5 && transferHalf.start + transferHalf.length === 10
+    && transferGone.start === 10 && transferGone.length === 0 && transferGone.start + transferGone.length === 10,
+    `shrink=${JSON.stringify(shrink)} transfer=${JSON.stringify(transferHalf)}`)
+}
+
 // --- ① 停火转换沿推 1 条消退记录（角度=停火时刻、宽幅=配置、ttl≈BEAM_FADE） ---
 {
   Math.random = zeroRandom
@@ -2746,7 +3117,7 @@ console.log('== 光束停火消退验收 ==')
   const tt = byId(s.turrets, t.id)!
   check('光束停火：转换沿推 1 条消退记录（角度/宽幅/ttl 正确）',
     sawFiring && !tt.firing && maxN === 1 && snap !== null
-    && Math.abs(snap.angle - stopAngle) < 1e-9 && snap.width === 10 && snap.len > 0 // v2.14 出厂宽幅 8→10
+    && Math.abs(snap.angle - stopAngle) < 1e-9 && snap.width === legacyMeters(10) && snap.mode === 'shrink' && snap.len > 0
     && snap.ttl > 0 && snap.ttl <= 0.25 && snap.max === 0.25,
     `firing=${sawFiring}→${tt.firing} maxN=${maxN} angle=${snap?.angle.toFixed(3)}/${stopAngle.toFixed(3)} w=${snap?.width} ttl=${snap?.ttl}`)
 }
@@ -2803,16 +3174,6 @@ console.log('== 光束停火消退验收 ==')
     `first=${firstTtl.toFixed(2)} later=${midTtl.toFixed(2)} end=${s.beamFades.length}`)
 }
 
-// --- ④ 点射（rayMode:'pulse'）停火不产生 beamFades ---
-{
-  Math.random = zeroRandom
-  let s = arena()
-  mkTurret(s, 'pulse', 5, 20)
-  mkEnemy(s, 'walker', 6.0, 16)
-  s = run(s, 4, 0.05)
-  check('点射停火不产生消退记录', s.beamFades.length === 0, `n=${s.beamFades.length}`)
-}
-
 console.log('== 弹丸美术库（§3A）验收 ==')
 
 // --- ① 引用解析：有效 id 返回条目，不存在/未传 → undefined（回退） ---
@@ -2863,20 +3224,20 @@ console.log('== 弹丸美术库（§3A）验收 ==')
 
 console.log('== 弹丸库四类别/爆炸门控/注册表增删验收 ==')
 
-// --- ① ray 类别映射：ray_std 配点射无警告、配直射有警告 ---
+// --- ① ray 类别映射：ray_std 配光束无警告、配直射有警告 ---
 {
-  const pulse = TURRET_DEFS.find(d => d.id === 'pulse')!
+  const beam = TURRET_DEFS.find(d => d.id === 'beam')!
   const mg = TURRET_DEFS.find(d => d.id === 'mg')!
-  const pArt0 = pulse.art
+  const beamArt0 = beam.art
   const mArt0 = mg.art
-  pulse.art = { ...pArt0, projectile: 'ray_std' }
+  beam.art = { ...beamArt0, projectile: 'ray_std' }
   mg.art = { ...mArt0, projectile: 'ray_std' }
-  const vPulse = validateArt(pulse)
+  const vBeam = validateArt(beam)
   const vMg = validateArt(mg)
-  check('ray 类别映射：配点射无警告、配直射有警告',
-    vPulse.ok && vPulse.warnings.length === 0 && vMg.warnings.some(w => w.includes('类别不匹配')),
-    `pulse=${vPulse.warnings.length} mg=${JSON.stringify(vMg.warnings)}`)
-  pulse.art = pArt0
+  check('ray 类别映射：配光束无警告、配直射有警告',
+    vBeam.ok && !vBeam.warnings.some(w => w.includes('类别不匹配')) && vMg.warnings.some(w => w.includes('类别不匹配')),
+    `beam=${vBeam.warnings.length} mg=${JSON.stringify(vMg.warnings)}`)
+  beam.art = beamArt0
   mg.art = mArt0
 }
 
@@ -2885,9 +3246,12 @@ console.log('== 弹丸库四类别/爆炸门控/注册表增删验收 ==')
   Math.random = zeroRandom
   const lob = TURRET_DEFS.find(d => d.id === 'lob')!
   const art0 = lob.art
-  const blast0 = lob.blastRadius
+  const shellAmmo = PROJECTILE_ARTS.find(a => a.id === 'shell_std')!
+  const blast0 = shellAmmo.blastRadius
+  const turretBlast0 = lob.blastRadius
   lob.art = { ...art0, projectile: 'shell_std' }
-  lob.blastRadius = undefined as never // 模拟未配置爆炸
+  delete shellAmmo.blastRadius // 模拟弹丸库未配置爆炸
+  delete lob.blastRadius // 旧炮塔字段也清空，模拟真正未配置
   let s = arena()
   mkTurret(s, 'lob', 6, 20)
   mkEnemy(s, 'walker', 6.5, 12)
@@ -2896,10 +3260,10 @@ console.log('== 弹丸库四类别/爆炸门控/注册表增删验收 ==')
   s = run(s, 8, 0.05, g => { // 爆炸事件 0.35s 即衰减，perTick 观测
     for (const ex of g.explosions) {
       sawExplosion = true
-      if (ex.ammoId !== undefined) gated = false
+      if (ex.kind !== 'groundImpact' && ex.ammoId !== undefined) gated = false
     }
   })
-  lob.blastRadius = blast0 // 恢复：配置爆炸 → 带库引用
+  shellAmmo.blastRadius = blast0 // 恢复：配置爆炸 → 带库引用
   s = arena()
   mkTurret(s, 'lob', 6, 20)
   mkEnemy(s, 'walker', 6.5, 12)
@@ -2912,6 +3276,7 @@ console.log('== 弹丸库四类别/爆炸门控/注册表增删验收 ==')
     gated && withRef,
     `gated=${gated} withRef=${withRef} saw=${sawExplosion}`)
   lob.art = art0
+  lob.blastRadius = turretBlast0
 }
 
 // --- ③ 注册表增删：新条目可解析、删除后回退 ---
@@ -2922,7 +3287,7 @@ console.log('== 弹丸库四类别/爆炸门控/注册表增删验收 ==')
   PROJECTILE_ARTS.splice(i, 1)
   const removed = projectileArtDef('custom_ammo_9') === undefined
   check('注册表增删：新条目可解析、删除后引用回退',
-    added && removed && PROJECTILE_ARTS.length === 6, // v2.19：4→5（custom_ammo_1 沉淀）；v2.45：5→6（custom_ammo_2 沉淀）
+    added && removed && PROJECTILE_ARTS.length === 8,
     `added=${added} removed=${removed} n=${PROJECTILE_ARTS.length}`)
 }
 
@@ -2994,12 +3359,15 @@ console.log('== 充能时间验收 ==')
   s = run(s, 0.4, 0.05) // 索敌(~0.1s)+充能中
   const tt1 = byId(s.turrets, t.id)!
   const noFireDuringCharge = !tt1.firing && tt1.chargeLeft > 0 && byId(s.enemies, e.id)!.hp === hp0
-  s = run(s, 0.6, 0.05) // 充能完成 → 起射
+  let beamFireSignalOwned = false
+  s = run(s, 0.6, 0.05, current => {
+    beamFireSignalOwned ||= !!current.audioSignals?.some(signal => signal.kind === 'turretFire' && signal.defId === 'beam' && signal.sourceId === t.id)
+  }) // 充能完成 → 起射
   const tt2 = byId(s.turrets, t.id)!
   const firingAfter = tt2.firing && byId(s.enemies, e.id)!.hp < hp0
-  check('光束充能：充能期不 firing 不结算伤害，完成后起射',
-    noFireDuringCharge && firingAfter,
-    `charge=${tt1.chargeLeft.toFixed(2)} firing=${tt1.firing}→${tt2.firing}`)
+  check('光束充能：充能期不 firing 不结算伤害，完成后起射且开火声携带炮塔来源',
+    noFireDuringCharge && firingAfter && beamFireSignalOwned,
+    `charge=${tt1.chargeLeft.toFixed(2)} firing=${tt1.firing}→${tt2.firing} signal=${beamFireSignalOwned}`)
   beam.chargeTime = ch0
 }
 
@@ -3048,12 +3416,72 @@ console.log('== debug 持久化验收 ==')
     rt !== null && JSON.stringify(rt) === JSON.stringify(TURRET_DEFS)
     && ra !== null && JSON.stringify(ra) === JSON.stringify(PROJECTILE_ARTS),
     `turrets=${rt?.length} ammo=${ra?.length}`)
+  const raySoundRoundTrip = parseProjectileArts(serializeProjectileArts([{ id: 'sound-ray', name: '声音射线', kind: 'ray', sounds: { flight: 'none', impact: 'none', ricochet: 'bounce-preset', explosion: 'none', continuous: 'loop-preset' } }]))
+  check('弹丸音效：跳弹与射线持续播放预设可随弹丸库往返保存', raySoundRoundTrip?.[0]?.sounds?.ricochet === 'bounce-preset' && raySoundRoundTrip?.[0]?.sounds?.continuous === 'loop-preset')
+  const migratedBeamSounds = migrateBeamTurretSounds({ ...TURRET_DEFS.find(def => def.id === 'beam')!, sounds: { reload: 'old-reload', continuous: 'beam-loop' } } as TurretDef & { sounds: { reload?: string; continuous?: string } })
+  check('射线炮塔音效迁移：删除旧装填音效并保留持续循环音效',
+    !(migratedBeamSounds.sounds as { reload?: string } | undefined)?.reload && migratedBeamSounds.sounds?.continuous === 'beam-loop')
+  check('射线炮塔音效衔接：开火音效启动后固定 0.1s 接入持续循环音效', BEAM_CONTINUOUS_AUDIO_DELAY === 0.1)
+  const retiredClusterLaser = { ...TURRET_DEFS.find(def => def.id === 'beam')!, id: 'custom-1787847910626-3', name: '集束激光炮' }
+  check('炮塔退役迁移：集束激光炮不会从旧存档或导入配置恢复', migrateRetiredRayTurret(retiredClusterLaser) === null)
+  const retiredFields = migrateRetiredTurretFields({ ...TURRET_DEFS.find(def => def.id === 'beam')!, fireRate: 2, reload: 5, gpu: 6 } as TurretDef & { reload: number; gpu: number })
+  check('炮塔字段迁移：旧持续武器取双冷却较大值并删除 reload/GPU',
+    retiredFields.fireRate === 5 && !('reload' in retiredFields) && !('gpu' in retiredFields))
+  const migratedAmmoPool = migrateTurretResourceCapacity({ ...TURRET_DEFS.find(def => def.id === 'mg')!, ammoCapacity: undefined, ammoPerShot: 4 } as TurretDef & { ammoPerShot: number })
+  const migratedEnergyPool = migrateTurretResourceCapacity({ ...TURRET_DEFS.find(def => def.id === 'beam')!, energyCapacity: undefined })
+  check('炮塔资源迁移：旧消耗型炮塔补齐100容量并删除旧弹药/发字段',
+    migratedAmmoPool.ammoCapacity === 100 && migratedAmmoPool.energyCapacity === 0
+    && !('ammoPerShot' in migratedAmmoPool)
+    && migratedEnergyPool.ammoCapacity === 0 && migratedEnergyPool.energyCapacity === 100
+    && migratedAmmoPool.ammoExchangeRate === 1 && turretAmmoExchangeRate({}) === 1)
   check('持久化版本/坏数据丢弃为 null',
     parseTurretDefs(JSON.stringify({ version: 99, data: [] })) === null
     && parseTurretDefs('not-json') === null
     && parseProjectileArts(JSON.stringify({ version: 1, data: {} })) === null,
     'version/badjson/badshape')
   // 无 DOM 环境：import persist 已静默跳过 load（注册表未被改动——由往返断言间接覆盖）
+
+  const oldTurret = { ...TURRET_DEFS[0], rangeMin: 25, rangeMax: 150, projectileSpeed: 400, accuracy: 12, blastRadius: 20, beamWidth: 10,
+    split: { count: 4, spread: 40, at: 'proximity' as const, range: 25 }, onDestroyBlast: { radius: 25, damage: 10 } }
+  const migratedTurret = migrateLegacyTurretMetrics(oldTurret)
+  check('3.2m空间迁移：旧炮塔米制参数按格距等比转换且不修改原对象',
+    migratedTurret.rangeMin === 3.2 && migratedTurret.rangeMax === 19.2 && migratedTurret.projectileSpeed === 51.2
+    && Math.abs((migratedTurret.accuracy ?? 0) - 1.536) < 1e-9 && migratedTurret.blastRadius === 2.56
+    && migratedTurret.beamWidth === 1.28 && migratedTurret.split?.range === 3.2 && migratedTurret.onDestroyBlast?.radius === 3.2
+    && oldTurret.rangeMax === 150)
+  const oldProjectile = { id: 'legacy-metric', name: '旧米制弹丸', kind: 'missile' as const, speed: 400, blastRadius: 25,
+    guideDecel: 15, missileInitSpeed: 20, missileAccel: 80, missileMaxSpeed: 320, split: { count: 4, spread: 40, at: 'proximity' as const, range: 25 } }
+  const migratedProjectile = migrateLegacyProjectileMetrics(oldProjectile)
+  check('3.2m空间迁移：旧弹丸速度、加速度、半径与分裂距离保持原格数',
+    migratedProjectile.speed === 51.2 && migratedProjectile.blastRadius === 3.2 && migratedProjectile.guideDecel === 1.92
+    && migratedProjectile.missileInitSpeed === 2.56 && migratedProjectile.missileAccel === 10.24
+    && migratedProjectile.missileMaxSpeed === 40.96 && migratedProjectile.split?.range === 3.2)
+  const migratedFactoryRocket = migrateProjectileInterception(
+    { id: 'rocket_std', name: '旧标准火箭', kind: 'missile' },
+    PROJECTILE_ARTS.find(item => item.id === 'rocket_std'),
+  )
+  const repairedFactoryRocket = migrateProjectileInterception(
+    { id: 'rocket_std', name: '旧标准火箭', kind: 'missile', interceptable: true, interceptHp: 1 },
+    PROJECTILE_ARTS.find(item => item.id === 'rocket_std'),
+    true,
+  )
+  const migratedCustomRocket = migrateProjectileInterception({ id: 'legacy-custom-rocket', name: '旧自定义导弹', kind: 'missile' })
+  check('导弹拦截迁移：出厂导弹继承新版耐久，自定义导弹采用安全回退',
+    migratedFactoryRocket.interceptable === true && migratedFactoryRocket.interceptHp === 20
+    && repairedFactoryRocket.interceptHp === 20
+    && migratedCustomRocket.interceptable === true && migratedCustomRocket.interceptHp === 1)
+  const migratedMissileAsset = migrateRetiredStandardMissileAsset({ id: 'old-missile', name: '旧导弹', kind: 'missile', projectileAsset: 'upload-1' })
+  check('旧标准导弹固定尾焰贴图引用迁移为现行无固定尾焰弹体',
+    migratedMissileAsset.projectileAsset === 'builtin:library/missile2_s')
+  const oldMgArt = structuredClone(TURRET_DEFS.find(item => item.id === 'mg')!)
+  oldMgArt.art!.barrels![0].muzzle[1] = 0.65
+  oldMgArt.art!.barrels![1].muzzle[1] = 0.65
+  const migratedMgArt = migrateLegacyTurretArt(oldMgArt)
+  const customMgArt = structuredClone(oldMgArt)
+  customMgArt.art!.barrels![0].muzzle[0] = -0.2
+  check('32px美术迁移：只把可识别的旧出厂机枪炮口从12/30格改为12/32格',
+    migratedMgArt.art?.barrels?.every(barrel => barrel.muzzle[1] === 0.625) === true
+    && migrateLegacyTurretArt(customMgArt).art?.barrels?.[0].muzzle[1] === 0.65)
 }
 
 console.log('== 素材集映射验收 ==')
@@ -3071,9 +3499,11 @@ console.log('== 素材集映射验收 ==')
   const gd = { ...mg, art: { ...mg.art, spriteSet: 'generic_direct' } }
   const e1 = turretArtState(gd)
   const e2 = turretArtState(gd)
-  check('通用集按文件夹名共享缓存（多炮塔引用同一集只加载一次）',
-    e1 === e2, // 分层重构后缓存在 src/条目层共享（node 环境均为 FALLBACK 单例）
-    `shared=${e1 === e2}`)
+  const noVisibleLayers = (entry: ReturnType<typeof turretArtState>) => !entry.assets?.base && !entry.assets?.turret && !entry.assets?.barrel && !entry.assets?.flash
+  check('遗留 spriteSet 不再生成四个可见层的默认贴图',
+    e1.status === 'ready' && e2.status === 'ready'
+    && noVisibleLayers(e1) && noVisibleLayers(e2),
+    `first=${e1.status} second=${e2.status}`)
   mg.art = art0
 }
 
@@ -3127,36 +3557,40 @@ console.log('== 配置导出/导入验收 ==')
   const pj = parseConfigSmart(json) // JSON 路径
   const pb = parseConfigSmart(exportConfig()) // base64 口令路径（向后兼容）
   const badJson = parseConfigSmart('{ 破损 JSON')
-  const snapshot = JSON.stringify({ t: TURRET_DEFS, a: PROJECTILE_ARTS, l: LEVEL })
+  const snapshot = JSON.stringify({ t: TURRET_DEFS.map(migrateTurretResourceCapacity), a: PROJECTILE_ARTS, l: LEVEL })
   const ra = applyConfigSmart(json) // 恒等应用（同一份数据，注册表不应变化）
   const after = JSON.stringify({ t: TURRET_DEFS, a: PROJECTILE_ARTS, l: LEVEL })
   check('v2.18：Smart 解析 JSON/base64 双兼容 + JSON 往返恒等 + 坏 JSON 报错',
-    pj.ok && pj.bundle.app === 'td-config' && pj.bundle.version === 6 && Array.isArray(pj.bundle.levelLibrary?.levels) &&
+    pj.ok && pj.bundle.app === 'td-config' && pj.bundle.version === 7 && Array.isArray(pj.bundle.levelLibrary?.levels) &&
     pb.ok && pb.bundle.turretDefs.length === TURRET_DEFS.length &&
     !badJson.ok && ra.ok && snapshot === after,
     `pj=${pj.ok} pb=${pb.ok} bad=${badJson.ok ? 'unexpected-ok' : badJson.error} ra=${ra.ok} same=${snapshot === after}`)
 }
 
-// --- v2.30/v2.62/v2.69：口令 v6 携带模块库版本+关卡库；旧 v3 仍兼容 ---
+// --- v2.30/v2.62/v2.69：口令 v7 携带模块库版本+关卡库；旧 v3 仍兼容 ---
 {
   const json = exportConfigJson()
-  const o = JSON.parse(json) as { version: number; moduleDefs?: unknown }
+  const o = JSON.parse(json) as { version: number; moduleDefs?: unknown; audioConfig?: unknown; gameParameters?: unknown; displayConfig?: unknown }
   const mSnap = JSON.stringify(MODULE_DEFS)
-  const r6 = applyConfigSmart(json) // v6 恒等往返
+  const r7 = applyConfigSmart(json) // v7 恒等往返
   const legacy = JSON.parse(json) as Record<string, unknown>
   legacy.version = 3
   delete legacy.moduleDefs
   delete legacy.levelLibrary
+  delete legacy.audioConfig
+  delete legacy.gameParameters
+  delete legacy.displayConfig
   const r3 = applyConfigSmart(JSON.stringify(legacy)) // v3 导入：moduleDefs undefined → 不动现有模块库
   const bad = parseConfigSmart(JSON.stringify({ ...JSON.parse(json), moduleDefs: 'xxx' }))
-  const badVer = parseConfigSmart(JSON.stringify({ ...JSON.parse(json), version: 7 }))
-  check('v2.30/v2.62/v2.69：口令 v6 携带模块库版本+关卡库（往返恒等）+ v3 兼容 + 非法形状/版本拒收',
-    o.version === 6 && Array.isArray(o.moduleDefs) && (o.moduleDefs as unknown[]).length === MODULE_DEFS.length &&
+  const badVer = parseConfigSmart(JSON.stringify({ ...JSON.parse(json), version: 8 }))
+  check('v2.30/v2.62/v2.69：口令 v7 携带模块库版本、关卡库与运行参数（往返恒等）+ v3 兼容 + 非法形状/版本拒收',
+    o.version === 7 && Array.isArray(o.moduleDefs) && (o.moduleDefs as unknown[]).length === MODULE_DEFS.length &&
     Array.isArray((o as { levelLibrary?: { levels?: unknown[] } }).levelLibrary?.levels) &&
-    r6.ok && JSON.stringify(MODULE_DEFS) === mSnap &&
+    !!o.audioConfig && !!o.gameParameters && !!o.displayConfig &&
+    r7.ok && JSON.stringify(MODULE_DEFS) === mSnap &&
     r3.ok && JSON.stringify(MODULE_DEFS) === mSnap &&
     !bad.ok && !badVer.ok,
-    `v=${o.version} n=${Array.isArray(o.moduleDefs) ? (o.moduleDefs as unknown[]).length : '?'} r6=${r6.ok} r3=${r3.ok} bad=${bad.ok} badVer=${badVer.ok}`)
+    `v=${o.version} n=${Array.isArray(o.moduleDefs) ? (o.moduleDefs as unknown[]).length : '?'} r7=${r7.ok} r3=${r3.ok} bad=${bad.ok} badVer=${badVer.ok}`)
   check('v2.30：出厂模块均无 asset 字段（贴图为可选增强，色块回退兼容）',
     MODULE_DEFS.every(d => d.asset === undefined),
     `withAsset=${MODULE_DEFS.filter(d => d.asset !== undefined).length}`)
@@ -3182,39 +3616,38 @@ console.log('== 弹丸素材集映射验收 ==')
 
 console.log('== 素材库/分层选配/flash 可选验收 ==')
 
-// --- ① 分层解析链：库引用优先于 spriteSet；'none' → null；坏引用 → null ---
+// --- ① 四个可见层只接受显式素材引用；缺省/none/geo/坏引用都不绘制 ---
 {
   const mg = TURRET_DEFS.find(d => d.id === 'mg')!
   const art0 = mg.art
   const upRef = addAsset('解析测试图', 'data:image/png;base64,CCCC', 'turret')
   mg.art = { ...art0, spriteSet: 'legacy_a', baseAsset: upRef.id, flashAsset: 'none', barrelAsset: 'upload-999' }
-  delete mg.art.turretAsset // v1.72：口令出厂带 turretAsset 库引用，删除以测 spriteSet 文件夹候选
+  delete mg.art.turretAsset
   const srcs = turretLayerSrcs(mg)
-  check('分层解析链：库引用 > spriteSet(遗留)/id 文件夹；none/坏引用 → [null]（无通用兜底）',
+  check('炮塔可见层：显式库引用生效；缺省/none/坏引用均为 [null]',
     srcs.base.length === 1 && srcs.base[0] === 'data:image/png;base64,CCCC' // 库引用独占候选
-    && srcs.turret.length === 1 && srcs.turret[0] === '/res/turrets/legacy_a/turret.png' // spriteSet 文件夹单候选
+    && srcs.turret.length === 1 && srcs.turret[0] === null
     && srcs.flash.length === 1 && srcs.flash[0] === null && srcs.barrel.length === 1 && srcs.barrel[0] === null,
     JSON.stringify(srcs))
   removeAsset(upRef.id)
-  // 顺序：无库引用 → id 文件夹优先，通用集兜底
+  // 无库引用：四层都透明，不再按 id 文件夹或几何图形回退。
   mg.art = { ...art0 }
   delete mg.art.spriteSet
   delete mg.art.baseAsset
+  delete mg.art.turretAsset
   delete mg.art.flashAsset
   delete mg.art.barrelAsset
   const dflt = turretLayerSrcs(mg)
-  check('分层解析链顺序：id 文件夹（无通用兜底，缺失即几何绘制）',
-    dflt.base.length === 1
-    && dflt.base[0] === '/res/turrets/mg/base.png',
-    JSON.stringify(dflt.base))
-  // 遗留 spriteSet 数据仍生效（第一候选），通用集兜底
+  check('炮塔可见层缺省：底座/炮身/炮管/火光全部不绘制',
+    Object.values(dflt).every(values => values.length === 1 && values[0] === null),
+    JSON.stringify(dflt))
+  // 遗留 spriteSet 只保留给未退役的可选扩展层，不再影响四个可见层。
   mg.art = { ...art0, spriteSet: 'legacy_set' }
   delete mg.art.baseAsset; delete mg.art.turretAsset; delete mg.art.barrelAsset; delete mg.art.flashAsset // v1.72：清除口令出厂层引用/none，测纯 spriteSet 遗留
   const legacy = turretLayerSrcs(mg)
-  check('遗留 spriteSet 仍生效（单候选，无通用兜底）',
-    legacy.base.length === 1
-    && legacy.base[0] === '/res/turrets/legacy_set/base.png',
-    JSON.stringify(legacy.base))
+  check('遗留 spriteSet 不再为四个可见层提供默认素材',
+    Object.values(legacy).every(values => values.length === 1 && values[0] === null),
+    JSON.stringify(legacy))
   mg.art = art0
 }
 
@@ -3239,48 +3672,44 @@ console.log('== 素材库/分层选配/flash 可选验收 ==')
   ;(globalThis as { Image?: unknown }).Image = RealImage
 }
 
-// --- ②B 逐层降级就绪规则：部分层缺失 → ready + 缺失层几何补绘；三层全缺 → 整体回退 ---
+// --- ②B 显式分层：已选素材照常绘制，未选/失效层保持透明，不补几何图形 ---
 {
   const mg = TURRET_DEFS.find(d => d.id === 'mg')!
   const RealImage = (globalThis as { Image?: unknown }).Image
-  ;(globalThis as { Image?: unknown }).Image = class { // 同步桩：barrel.png 失败，其余成功
+  ;(globalThis as { Image?: unknown }).Image = class {
     onload: (() => void) | null = null
     onerror: (() => void) | null = null
     width = 32
     height = 32
-    set src(v: string) {
-      if (v.includes('barrel.png')) this.onerror?.()
-      else this.onload?.()
-    }
+    set src(v: string) { if (v.includes('BAD')) this.onerror?.(); else this.onload?.() }
   }
-  const fake = { ...mg, id: 'sim_partial_test', art: { spriteSet: 'sim_pt' } } as TurretDef
+  const base = addAsset('炮塔层默认无测试底座', 'data:image/png;base64,BASE', 'base')
+  const turret = addAsset('炮塔层默认无测试炮身', 'data:image/png;base64,TURRET', 'turret')
+  const noVisibleLayers = (entry: ReturnType<typeof turretArtState>) => !entry.assets?.base && !entry.assets?.turret && !entry.assets?.barrel && !entry.assets?.flash
+  const fake = { ...mg, id: 'sim_partial_test', art: { baseAsset: base.id, turretAsset: turret.id, barrelAsset: 'upload-BAD', flashAsset: 'none' } } as TurretDef
   const st = turretArtState(fake)
-  check('逐层降级：仅炮管缺失仍 ready（base/turret 贴图渲染，炮管几何补绘）',
+  check('显式分层：底座/炮身贴图就绪，失效炮管保持透明且不阻止 ready',
     st.status === 'ready' && st.assets?.base !== undefined && st.assets?.turret !== undefined && st.assets?.barrel === undefined,
     `status=${st.status} base=${!!st.assets?.base} turret=${!!st.assets?.turret} barrel=${!!st.assets?.barrel}`)
-  const st2 = turretArtState({ ...mg, id: 'sim_none_test', art: { spriteSet: 'sim_nt', barrelAsset: 'none' } } as TurretDef)
-  check('炮管选配「无」：不参与就绪判定，无炮管层仍 ready',
-    st2.status === 'ready' && st2.assets?.barrel === undefined,
-    `status=${st2.status} barrel=${!!st2.assets?.barrel}`)
-  const st2b = turretArtState({ ...mg, id: 'sim_nobase_test', art: { spriteSet: 'sim_nb', baseAsset: 'none' } } as TurretDef)
-  check('底座选配「无」：不参与就绪判定，无底座层仍 ready',
-    st2b.status === 'ready' && st2b.assets?.base === undefined && st2b.assets?.turret !== undefined,
-    `status=${st2b.status} base=${!!st2b.assets?.base} turret=${!!st2b.assets?.turret}`)
+  const st2 = turretArtState({ ...mg, id: 'sim_none_test', art: { baseAsset: 'none', turretAsset: 'none', barrelAsset: 'none', flashAsset: 'none' } } as TurretDef)
+  check('四层选择「无」：ready 且素材集合为空',
+    st2.status === 'ready' && noVisibleLayers(st2),
+    `status=${st2.status}`)
+  const st2b = turretArtState({ ...mg, id: 'sim_default_none_test', art: {} } as TurretDef)
+  check('四层字段缺省：与「无」相同，不绘制任何层',
+    st2b.status === 'ready' && noVisibleLayers(st2b),
+    `status=${st2b.status}`)
   const st2c = turretArtState({ ...mg, id: 'sim_geobase_test', art: { spriteSet: 'sim_gb', baseAsset: 'geo' } } as TurretDef)
-  check('底座选配「几何」：强制几何色块（不走文件夹贴图，其余层照常）',
-    st2c.status === 'ready' && st2c.assets?.base === undefined && st2c.assets?.turret !== undefined,
-    `status=${st2c.status} base=${!!st2c.assets?.base} turret=${!!st2c.assets?.turret}`)
-  ;(globalThis as { Image?: unknown }).Image = class { // 同步桩：全部失败
-    onload: (() => void) | null = null
-    onerror: (() => void) | null = null
-    width = 32
-    height = 32
-    set src(_v: string) { this.onerror?.() }
-  }
-  const st3 = turretArtState({ ...mg, id: 'sim_allbad_test', art: { spriteSet: 'sim_ab' } } as TurretDef)
-  check('三层全部缺失 → 整体几何回退（未配置素材视觉不变）',
-    st3.status === 'fallback' && st3.assets === undefined,
-    `status=${st3.status}`)
+  check('遗留 geo：按 none 处理，不再强制几何色块',
+    st2c.status === 'ready' && noVisibleLayers(st2c),
+    `status=${st2c.status}`)
+  const migrated = migrateTurretLayerDefaults({ ...mg, art: { spriteSet: 'legacy', baseAsset: 'geo', turretAsset: turret.id } } as TurretDef)
+  check('旧炮塔层迁移：缺省与 geo 统一写为 none，显式设置保持不变',
+    migrated.art?.baseAsset === 'none' && migrated.art?.turretAsset === turret.id
+    && migrated.art?.barrelAsset === 'none' && migrated.art?.flashAsset === 'none',
+    JSON.stringify(migrated.art))
+  removeAsset(base.id)
+  removeAsset(turret.id)
   ;(globalThis as { Image?: unknown }).Image = RealImage
 }
 
@@ -3292,42 +3721,114 @@ console.log('== 素材库/分层选配/flash 可选验收 ==')
   check('素材库增删查：上传可加可删',
     found && removed,
     `found=${found} removed=${removed}`)
-  // 常用素材内置注册（口令沉淀）：15 件全在 / 内置不可删 / 类别正确（v1.71：弹丸 missile_s 删除，炮身 missile_s 改名 MissileLauncher_S；v1.74：新增开火效果 fx_fire_s）/ 不随口令导出
+  const original = addAsset('同名替换测试', 'data:image/png;base64,OLD', 'turret')
+  const replacement = addAsset('同名替换测试', 'data:image/png;base64,NEW', 'turret')
+  const otherCategory = addAsset('同名替换测试', 'data:image/png;base64,OTHER', 'barrel')
+  check('素材上传：同类型同名称沿用原 ID 并替换内容，不同类型同名可并存',
+    replacement.id === original.id
+    && getAsset(original.id)?.src === 'data:image/png;base64,NEW'
+    && otherCategory.id !== original.id
+    && listAssets().filter(asset => asset.name === '同名替换测试').length === 2,
+    `original=${original.id} replacement=${replacement.id} other=${otherCategory.id}`)
+  removeAsset(original.id); removeAsset(otherCategory.id)
+  // 常用素材内置注册：退役旧载具/炮塔素材后，剩余条目全在、不可删且不随口令导出。
   const libBuiltin = listAssets().filter(a => a.builtin)
   const libNames = ['shell_s', 'shell_m', 'shell_l', 'missile2_s',
-    'dualgun_s1', 'midcannon_m1', 'laser_m', 'maincannon_l1', 'dualcannon_l1', 'missile_s_t', 'missilelauncher2_s',
-    'dualgun_s2', 'maincannon_l2', 'midcannon_m2', 'twincannon_l2', 'charge_laser_m', 'fx_fire_s']
+    'dualgun_s1', 'midcannon_m1', 'missile_s_t',
+    'dualgun_s2', 'midcannon_m2', 'fx_fire_s']
   const libAllPresent = libNames.every(n => libBuiltin.some(a => a.id === `builtin:library/${n}`))
   const libProtected = !removeAsset('builtin:library/shell_s') && getAsset('builtin:library/shell_s') !== undefined
   const libCategorized = getAsset('builtin:library/shell_s')?.category === 'projectile'
     && getAsset('builtin:library/dualgun_s1')?.category === 'turret'
     && getAsset('builtin:library/dualgun_s2')?.category === 'barrel' // v1.70 底座→炮管
-    && getAsset('builtin:library/twincannon_l2')?.category === 'barrel'
-    && getAsset('builtin:library/charge_laser_m')?.category === 'charge' // v1.70 新增充能分类
+    && getAsset('builtin:library/twincannon_l2') === undefined
+    && getAsset('builtin:library/charge_laser_m') === undefined
     && getAsset('builtin:library/fixg_s_missile') === undefined // v1.70 已删除
     && getAsset('builtin:library/missile_s') === undefined // v1.71 弹丸 missile_s 已删除
     && getAsset('builtin:library/missile_s_t')?.name === 'MissileLauncher_S' // v1.71 炮身改名
     && getAsset('builtin:library/fx_fire_s')?.category === 'flash' // v1.74 新增开火效果分类内置
     && getAsset('builtin:library/missile2_s')?.category === 'projectile' // v2.17 弹丸内置
-    && getAsset('builtin:library/missilelauncher2_s')?.category === 'turret' // v2.17 炮身内置
-    && getAsset('builtin:library/missilelauncher2_s')?.name === 'MissileLauncher2_S' // v2.17 展示名
+    && getAsset('builtin:library/missilelauncher2_s') === undefined // MissileLauncher2_S 炮身已退役
   const notExported = !uploadsForExport().some(u => u.id.startsWith('builtin:'))
-  check('常用素材内置注册：41 件全在/不可删/类别正确（炮管+充能+效果+护盾+Track01+堡垒底座主体）/不随口令导出',
-    libBuiltin.length === 41 && libAllPresent && libProtected && libCategorized && notExported, // v1.85：+track01；v2.11：15 光束；v2.17：+2；v2.71：+3 护盾；v2.72：+2 堡垒素材
+  check('常用素材内置注册：38 件全在/不可删/类别正确（含载具、图块、任务贴图、BGM 与内置 SE）/不随口令导出',
+    libBuiltin.length === 38 && libAllPresent && libProtected && libCategorized
+    && getAsset('builtin:mission/briefing_default')?.category === 'missionImage'
+    && getAsset('builtin:bgm/briefing_eve')?.category === 'bgm' && !removeAsset('builtin:bgm/briefing_eve')
+    && getAsset('builtin:se/ui_button_click')?.category === 'se' && !removeAsset('builtin:se/ui_button_click')
+    && getAsset('builtin:se/mech_footstep_01')?.category === 'se' && !removeAsset('builtin:se/mech_footstep_01')
+    && getAsset('builtin:se/tracked_move_loop') === undefined && notExported,
     `count=${libBuiltin.length} present=${libAllPresent} protected=${libProtected} cat=${libCategorized} notExported=${notExported}`)
-  check('v2.72：堡垒底座、主体、轮胎独立分类；Track01 转入轮胎且移除吉普素材',
+  check('图块素材：尺寸自动识别独立/静态/动态且内置 RMXP 图块归入图块分类',
+    tileSheetForDimensions(160, 160)?.kind === 'independent'
+    && tileSheetForDimensions(96, 128)?.kind === 'autotileStatic'
+    && tileSheetForDimensions(384, 128)?.kind === 'autotileAnimated'
+    && tileSheetForDimensions(100, 100) === undefined
+    && getAsset('builtin:ground/mid')?.category === 'tile'
+    && getAsset('builtin:ground/mid')?.tileSheet?.kind === 'autotileStatic')
+  const tilePixels = new Uint8ClampedArray(160 * 160 * 4)
+  tilePixels[(1 * 160 + 1) * 4 + 3] = 255
+  tilePixels[(159 * 160 + 159) * 4 + 3] = 1
+  check('独立图块：全透明单元格不计入有效索引，原图索引保持不重排',
+    JSON.stringify(independentTileIndicesFromPixels(tilePixels, 160, 160)) === JSON.stringify([0, 24])
+    && independentTileIndicesFromPixels(new Uint8ClampedArray(160 * 160 * 4), 160, 160).length === 0)
+  const weightedTiles = [0, 7, 9, 12]
+  const weightedPrimaryCount = Array.from({ length: 1000 }, (_, index) => weightedIndependentTileIndex(weightedTiles, () => (index + 0.5) / 1000))
+    .filter(index => index === 0).length
+  check('独立图块随机填充：0号有效图块占95%，其余有效图块均分剩余权重',
+    weightedPrimaryCount === 950
+    && weightedIndependentTileIndex([], () => 0) === undefined
+    && weightedIndependentTileIndex([7], () => 0.99) === 7
+    && weightedIndependentTileIndex(weightedTiles, () => 0.9499) === 0
+    && weightedIndependentTileIndex(weightedTiles, () => 0.95) === 7
+    && weightedIndependentTileIndex(weightedTiles, () => 0.97) === 9
+    && weightedIndependentTileIndex(weightedTiles, () => 0.9999) === 12)
+  check('独立图块随机填充：0号为空图时，其余有效图块均分全部权重',
+    weightedIndependentTileIndex([2, 7, 9, 12], () => 0) === 2
+    && weightedIndependentTileIndex([2, 7, 9, 12], () => 0.2499) === 2
+    && weightedIndependentTileIndex([2, 7, 9, 12], () => 0.25) === 7
+    && weightedIndependentTileIndex([2, 7, 9, 12], () => 0.9999) === 12)
+  const tileSelection = gridCellSelectionRect(4.8, 3.2, 1.1, 0.2, 10, 8)
+  const selectionTiles: LevelTileCell[] = [
+    { x: 0, y: 0, source: 'independent', assetId: 'test', tileIndex: 0, flipX: false, rotation: 0 },
+    { x: 2, y: 2, source: 'independent', assetId: 'test', tileIndex: 0, flipX: false, rotation: 0 },
+    { x: 6, y: 4, source: 'independent', assetId: 'test', tileIndex: 0, flipX: false, rotation: 0 },
+  ]
+  const selectionErased = eraseTileCellsInRect(selectionTiles, tileSelection)
+  const selectionFilled = fillTileCellsInRect(selectionTiles, tileSelection, (x, y) => ({ x, y, source: 'independent', assetId: 'fill', tileIndex: 9, flipX: false, rotation: 0 }))
+  check('关卡编辑器中心格：奇偶尺寸均稳定落在单一地格，偶数尺寸取右下侧中心格',
+    JSON.stringify(levelCenterCell(9, 7)) === JSON.stringify({ x: 4, y: 3 })
+    && JSON.stringify(levelCenterCell(10, 8)) === JSON.stringify({ x: 5, y: 4 }))
+  check('底图/装饰层选择：反向拖拽吸附完整地格，批量擦除与填充只作用于选区',
+    JSON.stringify(tileSelection) === JSON.stringify({ x: 1, y: 0, w: 4, h: 4 })
+    && selectionErased.length === 2
+    && selectionErased.some(tile => tile.x === 0 && tile.y === 0)
+    && selectionErased.some(tile => tile.x === 6 && tile.y === 4)
+    && selectionFilled.length === 18
+    && selectionFilled.filter(tile => tile.assetId === 'fill').length === 16)
+  check('退役生物素材：Infantry01 不再注册进素材库', getAsset('builtin:unit/infantry01') === undefined)
+  check('载具素材统一分类；退役吉普/轻型坦克主体并保留轮胎与履带分类',
     ASSET_CATEGORY_NAME.base === '炮塔底座'
-    && ASSET_CATEGORY_NAME.fortressBase === '堡垒底座'
-    && ASSET_CATEGORY_NAME.fortressBody === '堡垒主体'
+    && ASSET_CATEGORY_NAME.vehicle === '载具'
     && ASSET_CATEGORY_NAME.wheel === '轮胎'
-    && filterAssets('fortressBase').some(a => a.id === 'builtin:fortress/standard/base')
-    && filterAssets('fortressBody').some(a => a.id === 'builtin:fortress/standard/body')
+    && !Object.prototype.hasOwnProperty.call(ASSET_CATEGORY_NAME, 'rotor')
+    && filterAssets('vehicle').some(a => a.id === 'builtin:fortress/standard/body')
+    && getAsset('builtin:vehicle/jeep/main') === undefined
+    && getAsset('builtin:vehicle/lighttank01/body') === undefined
+    && getAsset('builtin:vehicle/lighttank01/turret') === undefined
+    && getAsset('builtin:vehicle/lighttank01/barrel') === undefined
+    && getAsset('builtin:fortress/standard/base') === undefined
+    && getAsset('builtin:vehicle/jeep/chassis') === undefined
     && filterAssets('wheel').some(a => a.id === 'builtin:library/track01')
     && getAsset('builtin:library/track01')?.category === 'wheel'
     && getAsset('builtin:vehicle/jeep-wheel') === undefined
     && getAsset('builtin:vehicle/jeep-wheel-master') === undefined
     && resolveAssetSrc('builtin:fortress/standard/body') === '/res/fortresses/fort_1_01.png',
-    `base=${filterAssets('fortressBase').length} body=${filterAssets('fortressBody').length} wheel=${filterAssets('wheel').length}`)
+    `vehicle=${filterAssets('vehicle').length} wheel=${filterAssets('wheel').length}`)
+  importUploads([{ id: 'sim-legacy-rotor-asset', name: '旧旋翼素材', src: 'data:image/png;base64,AAAA', category: 'rotor' as never }])
+  check('旋翼素材分类退役：旧 rotor 条目导入时自动迁移到轮胎分类',
+    getAsset('sim-legacy-rotor-asset')?.category === 'wheel'
+    && filterAssets('wheel').some(asset => asset.id === 'sim-legacy-rotor-asset'))
+  removeAsset('sim-legacy-rotor-asset')
 }
 
 // --- ④ 口令 v2 含素材库往返 + v1 兼容导入 ---
@@ -3388,9 +3889,9 @@ console.log('== 弹丸本体选配/程序化特效验收 ==')
   const ef = resolveExplosionFx(e)!
   const inf = resolveImpactFx(e)!
   check('程序化参数默认填充：类别色 + 默认值，自定义覆盖',
-    tf.color === '#D9762E' && tf.rate === 60 && tf.life === 0.35 && tf.size === 0.06
-    && ef.duration === 0.4 && ef.sparks === 10 && ef.smoke === 6
-    && inf.spikes === 9 && inf.color === '#112233' && inf.duration === 0.15,
+    tf.color === '#D9762E' && tf.rate === 54 && tf.life === 0.32 && tf.size === 0.055
+    && ef.duration === 0.4 && ef.sparks === 14 && ef.smoke === 7
+    && inf.spikes === 9 && inf.color === '#112233' && inf.duration === 0.12,
     JSON.stringify({ tf, ef, inf }))
   check('未配置段 → null（回退旧帧条/现状）',
     resolveTrailFx(projectileArtDef('shell_std')!) === null, // v1.75：bullet_std 已配尾焰，改用无特效的 shell_std
@@ -3407,9 +3908,11 @@ console.log('== 弹丸本体选配/程序化特效验收 ==')
   const shell = projectileArtDef('shell_std')!
   shell.explosion = { sparks: 12, smoke: 5 } // 粒子段配置
   const art0 = lob.art
-  const blast0 = lob.blastRadius
+  const blast0 = shell.blastRadius
+  const turretBlast0 = lob.blastRadius
   lob.art = { ...art0, projectile: 'shell_std' }
-  delete lob.blastRadius // 未配置爆炸
+  delete shell.blastRadius // 未配置爆炸
+  delete lob.blastRadius
   let s = arena()
   mkTurret(s, 'lob', 6, 20)
   mkEnemy(s, 'walker', 6.5, 12)
@@ -3418,14 +3921,15 @@ console.log('== 弹丸本体选配/程序化特效验收 ==')
   s = run(s, 8, 0.05, g => {
     for (const ex of g.explosions) {
       sawExplosion = true
-      if (ex.ammoId !== undefined) gated = false
+      if (ex.kind !== 'groundImpact' && ex.ammoId !== undefined) gated = false
     }
   })
   check('爆炸门控回归：程序化配置下无 blastRadius 仍不带库引用',
     sawExplosion && gated,
     `saw=${sawExplosion} gated=${gated}`)
   lob.art = art0
-  lob.blastRadius = blast0
+  lob.blastRadius = turretBlast0
+  shell.blastRadius = blast0
   delete shell.explosion
 }
 
@@ -3549,8 +4053,8 @@ console.log('== 粒子系统验收 ==')
   const tf = resolveTrailFx(e)!
   const ef = resolveExplosionFx(e)!
   check('粒子参数默认填充：rate/life/size、sparks/smoke',
-    tf.rate === 60 && tf.life === 0.35 && tf.size === 0.06
-    && ef.sparks === 10 && ef.smoke === 6 && ef.duration === 0.4,
+    tf.rate === 54 && tf.life === 0.32 && tf.size === 0.055
+    && ef.sparks === 14 && ef.smoke === 7 && ef.duration === 0.4,
     JSON.stringify({ tf, ef }))
   delete e.trail
   delete e.explosion
@@ -3569,13 +4073,13 @@ console.log('== 尾焰行为模板验收 ==')
   const tp = resolveTrailFx(e)!
   e.trail = { template: 'smoke', rate: 99, grow: -1 } // 用户覆盖模板默认
   const tc = resolveTrailFx(e)!
-  check('模板默认解析：inertia→inherit 0.9/drag 4，smoke→grow 2/life 1.2/rate 20/暗灰',
-    ti.inherit === 0.9 && ti.drag === 4 && ti.life === 0.5
-    && ts.grow === 2 && ts.life === 1.2 && ts.rate === 20 && ts.size === 0.15 && ts.color === '#6B6560' && ts.inherit === 0.1
-    && tp.template === 'pulse' && tp.rate === 60,
+  check('模板默认解析：inertia→inherit 0.9/drag 4，smoke→grow 1.8/life 1.35/rate 22/暗灰',
+    ti.inherit === 0.9 && ti.drag === 4 && ti.life === 0.55
+    && ts.grow === 1.8 && ts.life === 1.35 && ts.rate === 22 && ts.size === 0.15 && ts.color === '#6B6560' && ts.inherit === 0.1
+    && tp.template === 'pulse' && tp.rate === 72,
     JSON.stringify({ ti: ti.inherit, ts: ts.grow }))
   check('用户显式参数覆盖模板默认',
-    tc.rate === 99 && tc.grow === -1 && tc.life === 1.2 && tc.color === '#6B6560',
+    tc.rate === 99 && tc.grow === -1 && tc.life === 1.35 && tc.color === '#6B6560',
     JSON.stringify({ rate: tc.rate, grow: tc.grow, life: tc.life }))
   delete e.trail
 }
@@ -3671,8 +4175,8 @@ console.log('== 爆炸增强验收 ==')
   e.explosion = { rings: 9, turbulence: 5 }
   const c = resolveExplosionFx(e)!
   check('爆炸新字段默认填充 + 钳制',
-    d.speedJitter === 0.4 && d.lifeJitter === 0.3 && d.turbulence === 0.6
-    && d.rings === 1 && d.ringSpeed === 1 && d.ringWidth === 2
+    d.speedJitter === 0.45 && d.lifeJitter === 0.32 && d.turbulence === 0.65
+    && d.rings === 2 && d.ringSpeed === 1 && d.ringWidth === 2.5
     && c.rings === 4 && c.turbulence === 2,
     JSON.stringify({ rings: c.rings, turb: c.turbulence }))
   delete e.explosion
@@ -3723,15 +4227,15 @@ console.log('== 爆炸方向偏置/速度继承验收 ==')
     `spread=${spread}`)
 }
 
-// --- ④ resolveExplosionFx bias/inherit 默认 0 + 钳制 ---
+// --- ④ resolveExplosionFx bias/inherit 模板默认 + 钳制 ---
 {
   const e = projectileArtDef('shell_std')!
   e.explosion = {}
   const d = resolveExplosionFx(e)!
   e.explosion = { bias: 2, inherit: -1 }
   const c = resolveExplosionFx(e)!
-  check('bias/inherit 默认 0 + 钳制 0–1',
-    d.bias === 0 && d.inherit === 0 && c.bias === 1 && c.inherit === 0,
+  check('bias/inherit 使用中型模板默认值 + 钳制 0–1',
+    d.bias === 0.1 && d.inherit === 0.12 && c.bias === 1 && c.inherit === 0,
     JSON.stringify({ b: c.bias, i: c.inherit }))
   delete e.explosion
 }
@@ -3859,7 +4363,7 @@ console.log('== 挂载位射出/复挂推入验收 ==')
     `d=${d} dot=${dot} ${backX}`)
 }
 
-console.log('== 射速语义迁移验收 ==')
+console.log('== 装填时间语义迁移验收 ==')
 
 // --- v1 持久化数据迁移：fireRate 取倒数；缺失/0 跳过；v2 直通 ---
 {
@@ -4235,7 +4739,7 @@ console.log('== 防御墙九宫贴图分类验收 ==')
   let s = initialState()
   s.gold = 10000
 
-  // ① 摆放校验：界内/旋转/重叠/金币
+  // ① 摆放校验：界内/旋转/重叠/资源
   const gen = moduleDefOf('generator') // 2×2
   check('模块占格旋转互换', moduleFoot(gen, 0).w === 2 && moduleFoot(gen, 1).w === gen.h && moduleFoot(gen, 1).h === gen.w)
   check('界内可放', canPlaceModule(s, 'generator', 0, 0, 0).ok)
@@ -4246,10 +4750,10 @@ console.log('== 防御墙九宫贴图分类验收 ==')
     && canPlaceModule(s, 'battery', FORTRESS_INTERIOR.cols - 1, 0, 0).ok
     && !canPlaceModule(s, 'battery', FORTRESS_INTERIOR.cols - 1, 0, 1).ok)
   s = buildModule(s, 'generator', 0, 0, 0)
-  check('建造扣金币并入列', s.modules.length === 1 && s.gold === 10000 - gen.cost, `gold=${s.gold}`)
+  check('建造扣资源并入列', s.modules.length === 1 && s.gold === 10000 - gen.cost, `gold=${s.gold}`)
   check('重叠不可放', !canPlaceModule(s, 'battery', 1, 1, 0).ok && canPlaceModule(s, 'battery', 2, 0, 0).ok)
   const poor: GameState = { ...s, gold: 0 }
-  check('金币不足不可放', !canPlaceModule(poor, 'battery', 2, 0, 0).ok)
+  check('资源不足不可放', !canPlaceModule(poor, 'battery', 2, 0, 0).ok)
 
   // ② 拆除返半价
   const before = s.gold
@@ -4266,16 +4770,33 @@ console.log('== 防御墙九宫贴图分类验收 ==')
   check('模块加成聚合', mb.energyRegen === 4 && mb.energyCap === 65 && mb.ammoRegen === 2 && mb.ammoCap === 80,
     JSON.stringify(mb))
   check('资源动态上限', caps.energyCap === ENERGY.cap + 65 && caps.ammoCap === AMMO.cap + 80, JSON.stringify(caps))
-  s.phase = 'combat'
+  s.phase = 'prep' // 隔离恢复计量：备战期炮塔不索敌开火
   s.energy = ENERGY.cap + 60 // 超过基础 cap、低于加成后 cap
   s.ammo = AMMO.cap + 70
   const e0 = s.energy
   const a0 = s.ammo
+  const moduleAmmoTurret = mkTurret(s, 'mg', 4, 20)
+  const moduleEnergyTurret = mkTurret(s, 'beam', 5, 20)
+  moduleAmmoTurret.ammo = 0
+  moduleEnergyTurret.energy = 0
+  const moduleAmmoDef = TURRET_DEFS.find(def => def.id === 'mg')!
+  const originalModuleAmmoExchangeRate = moduleAmmoDef.ammoExchangeRate
+  moduleAmmoDef.ammoExchangeRate = 0.5
   s = tick(s, 1)
   check('模块回复加成生效且封顶于动态上限',
     s.energy === Math.min(ENERGY.cap + 65, e0 + ENERGY.regen + 4)
     && s.ammo === Math.min(AMMO.cap + 80, a0 + AMMO.regen + 2),
     `energy=${s.energy} ammo=${s.ammo}`)
+  check('恢复模块作用于玩家每座炮塔的独立弹药/能量池',
+    byId(s.turrets, moduleAmmoTurret.id)!.ammo === 1
+    && byId(s.turrets, moduleEnergyTurret.id)!.energy === 4,
+    `ammo=${byId(s.turrets, moduleAmmoTurret.id)!.ammo} energy=${byId(s.turrets, moduleEnergyTurret.id)!.energy}`)
+  moduleAmmoDef.ammoExchangeRate = originalModuleAmmoExchangeRate
+  let noRecovery = arena()
+  const noRecoveryTurret = mkTurret(noRecovery, 'mg', 6, 20)
+  noRecoveryTurret.ammo = 5
+  noRecovery = tick(noRecovery, 1)
+  check('未安装恢复模块时炮塔弹药不会自动恢复', byId(noRecovery.turrets, noRecoveryTurret.id)!.ammo === 5)
 
   // ④ 散热器直连堡垒（汇聚替代）：功率全额叠加堡垒散热速率，与炮塔数无关
   s = initialState()
@@ -4286,7 +4807,7 @@ console.log('== 防御墙九宫贴图分类验收 ==')
   s.turrets = Array.from({ length: 10 }, (_, i) => mkTurret(s, 'mg', i % 10, 20))
   const c10 = fortressCooling(s)
   check('散热器全额直连堡垒散热（不按炮塔数摊薄）',
-    Math.abs(c2 - (DEFAULT_FORTRESS.heatDissipation + 8)) < 1e-9 && Math.abs(c10 - c2) < 1e-9,
+    Math.abs(c2 - (gameParameters().naturalHeatDissipation + 8)) < 1e-9 && Math.abs(c10 - c2) < 1e-9,
     `c2=${c2} c10=${c10}`)
   const noTurret: GameState = { ...s, turrets: [] }
   check('无炮塔时散热加成依然生效（作用于堡垒而非炮塔）', fortressCooling(noTurret) === c10)
@@ -4391,14 +4912,14 @@ console.log('== 防御墙九宫贴图分类验收 ==')
   s.modules[0].timer = 0.05 // 直接快进到产出点
   const sp = allySpawnPoint(s)
   s = tick(s, 0.1)
-  check('兵营到期产出士兵于出征点', s.allies.length === 1 && s.allies[0].kind === 'soldier'
+  check('机器人模块到期产出无人飞行器于出征点', s.allies.length === 1 && s.allies[0].kind === 'plane' && s.allies[0].unitDefId === 'unit:uav'
     && s.allies[0].producerId === barId && Math.abs(s.allies[0].x - sp.x) < 1e-9 && Math.abs(s.allies[0].y - sp.y) < 1e-9,
     JSON.stringify(s.allies[0] ?? null))
   check('产出后倒计时重置', Math.abs(s.modules[0].timer - 8) < 0.2, `timer=${s.modules[0].timer}`)
-  const capDef = ALLY_DEFS.soldier
+  const capDef = unitDefById('unit:uav')!
   s.allies = Array.from({ length: 6 }, (_, i) => ({
-    id: 9000 + i, kind: 'soldier' as const, producerId: barId, x: 6, y: 5,
-    hp: capDef.hp, maxHp: capDef.hp, cooldown: 0, targetId: null, hitFlash: 0,
+    id: 9000 + i, kind: 'plane' as const, unitDefId: capDef.id, producerId: barId, x: 6, y: 5,
+    hp: capDef.stats.hp, maxHp: capDef.stats.hp, cooldown: 0, targetId: null, hitFlash: 0,
   }))
   s.modules[0].timer = 0.01
   s = tick(s, 0.1)
@@ -4412,10 +4933,11 @@ console.log('== 防御墙九宫贴图分类验收 ==')
   }
   s.allies = [sol]
   const w1 = mkEnemy(s, 'walker', 6.5, 10.4, 60) // 0.4 格：士兵射程（12m=0.48格）内、行尸缠斗距离（0.7）内
+  w1.controller = 'ai'
   w1.mode = 'move'; w1.targetKind = null; w1.targetId = null // 解除钉住，走正常行为（可被友军缠住）
   s = run(s, 8, 0.05)
   check('士兵击杀行尸', !s.enemies.some(e => e.id === w1.id), `enemies=${s.enemies.length}`)
-  check('行尸缠斗友军造成伤害', s.allies.length === 0 || s.allies[0].hp < s.allies[0].maxHp, `allyHp=${s.allies[0]?.hp}`)
+  check('退役生物近战：旧行尸夹具不再强制启用独立缠斗分支', s.allies.length === 0 || s.allies[0].hp === s.allies[0].maxHp, `allyHp=${s.allies[0]?.hp}`)
 
   // ⑤ 飞行友军：地面敌人无法攻击；战斗机可空地双攻击
   s = arena()
@@ -4425,6 +4947,7 @@ console.log('== 防御墙九宫贴图分类验收 ==')
   }
   s.allies = [pl]
   const w2 = mkEnemy(s, 'walker', 6.5, 8.3, 60) // 贴身，但无法攻击飞行单位
+  w2.controller = 'ai'
   w2.mode = 'move'; w2.targetKind = null; w2.targetId = null
   s = run(s, 5, 0.05)
   check('地面敌人无法攻击飞行友军', s.allies.length === 1 && s.allies[0].hp === s.allies[0].maxHp, `hp=${s.allies[0]?.hp}`)
@@ -4450,15 +4973,17 @@ console.log('== 用例 54：移动堡垒验收 ==')
 {
   resetLevel()
   const fd = DEFAULT_FORTRESS
-  fd.hardpoints.push({ id: 'hpT1', x: 2.5, y: 4.5, size: 'S', hidden: true, builtIn: 'mg' }) // v1.72：口令出厂已无内置隐藏炮位；临时注入验证内置机制
-  const s = initialState() // 特意用原始 initialState 验证内置武器预挂
-  check('堡垒初始位置：底部居中、底边留 1 行',
-    Math.abs(s.fortress.x - (COLS - fd.w) / 2) < 1e-9 && Math.abs(s.fortress.y - (LEVEL.rows - fd.h - 1)) < 1e-9,
+  fd.hardpoints.push({ id: 'hpT1', x: 2.5, y: 4.5, size: 'S', builtIn: 'mg' }) // 普通可见炮位也可预装炮塔
+  const s = initialState() // 特意用原始 initialState 验证炮位预装
+  const expectedStartX = Math.max(0, Math.min(LEVEL.cols - fd.w, LEVEL.startZone.x + (LEVEL.startZone.w - fd.w) / 2))
+  const expectedStartY = Math.max(0, Math.min(LEVEL.rows - fd.h, LEVEL.startZone.y + (LEVEL.startZone.h - fd.h) / 2))
+  check('堡垒初始位置：几何中心对齐关卡起点区域并保持在战场内',
+    Math.abs(s.fortress.x - expectedStartX) < 1e-9 && Math.abs(s.fortress.y - expectedStartY) < 1e-9,
     `x=${s.fortress.x} y=${s.fortress.y}`)
   check('船体耐久初始化', s.fortress.hp === fd.hp && s.fortress.maxHp === fd.hp)
   const hpH = fd.hardpoints.find(h => h.id === 'hpT1')!
   const t0 = s.turrets[0]
-  check('内置武器预挂隐藏炮位',
+  check('普通炮位可预装炮塔',
     s.turrets.length === 1 && t0.builtIn === true && t0.hardpointId === 'hpT1' && t0.defId === hpH.builtIn,
     JSON.stringify({ n: s.turrets.length, hp: t0?.hardpointId, def: t0?.defId }))
   check('内置武器世界坐标就位',
@@ -4467,6 +4992,9 @@ console.log('== 用例 54：移动堡垒验收 ==')
   check('移动堡垒无地面墙/基地格/核心', s.walls.length === 0 && LEVEL.buildCells.length === 0 && LEVEL.core === null)
   const d0 = computePathField(s)
   check('距离场以堡垒覆盖格为原点', fortressCells(s).every(c => d0[c.y * COLS + c.x] === 0))
+  const incompatible = structuredClone(fd)
+  incompatible.hardpoints.find(h => h.id === 'hpT1')!.size = 'L'
+  check('炮位预装校验：拒绝炮塔尺寸与炮位尺寸不匹配', validateFortressDef(incompatible).some(error => error.includes('预装炮塔尺寸')))
   fd.hardpoints.splice(fd.hardpoints.findIndex(h => h.id === 'hpT1'), 1) // 还原出厂炮位表
   restoreLevel()
 }
@@ -4531,19 +5059,21 @@ console.log('== 用例 54：移动堡垒验收 ==')
   restoreLevel()
 }
 
-// ④ 挂炮系统：尺寸匹配/隐藏内置/占用/金币/扣款就位/半价返还/内置不可卸/战斗期禁止
+// ④ 挂炮系统：尺寸匹配/隐藏素材不影响装配/占用/资源/扣款就位/半价返还/预装锁定/战斗期禁止
 {
   resetLevel()
-  DEFAULT_FORTRESS.hardpoints.push({ id: 'hpT1', x: 2.5, y: 4.5, size: 'S', hidden: true, builtIn: 'mg' }) // v1.72：临时注入内置隐藏炮位验证挂载规则
+  DEFAULT_FORTRESS.hardpoints.push({ id: 'hpT1', x: 2.5, y: 4.5, size: 'S', hideTurretArt: true })
+  DEFAULT_FORTRESS.hardpoints.push({ id: 'hpT2', x: 2.5, y: 5.5, size: 'S', builtIn: 'mg' })
+  DEFAULT_FORTRESS.hardpoints.push({ id: 'hpT3', x: 3.5, y: 5.5, size: 'S', builtIn: 'mg', lockedTurret: true })
   let s = initialState()
   s.gold = 10000
   check('S 型武器可挂 S 炮位', canMountTurret(s, 'mg', 'hpS1').ok)
   const hid = canMountTurret(s, 'mg', 'hpT1')
-  check('隐藏内置炮位不可挂', !hid.ok && hid.reason === '内置炮位', hid.reason)
+  check('隐藏炮塔素材只影响绘制，不阻止炮位装配', hid.ok, hid.reason)
   const needL = canMountTurret(s, 'mg', 'hpL1')
-  check('尺寸不匹配拒绝（S 武器 vs L 炮位）', !needL.ok && needL.reason === '需要 L 型炮位', needL.reason)
+  check('尺寸不匹配拒绝（S 武器 vs L 炮位）', !needL.ok && needL.reason === '需要 L 尺寸炮位', needL.reason)
   const needS = canMountTurret(s, 'cruise', 'hpS1')
-  check('尺寸不匹配拒绝（L 武器 vs S 炮位）', !needS.ok && needS.reason === '需要 S 型炮位', needS.reason)
+  check('尺寸不匹配拒绝（L 武器 vs S 炮位）', !needS.ok && needS.reason === '需要 S 尺寸炮位', needS.reason)
   check('M 型武器可挂 M 炮位', canMountTurret(s, 'lob', 'hpM1').ok)
   const g0 = s.gold
   const lobCost = TURRET_DEFS.find(d => d.id === 'lob')!.cost
@@ -4555,26 +5085,35 @@ console.log('== 用例 54：移动堡垒验收 ==')
     && Math.abs(mt.x + mt.w / 2 - (s.fortress.x + hpM1def.x)) < 1e-9
     && Math.abs(mt.y + mt.h / 2 - (s.fortress.y + hpM1def.y)) < 1e-9,
     `gold=${s.gold} t=(${mt?.x},${mt?.y})`)
-  const occ = canMountTurret(s, 'pulse', 'hpM1')
+  const occ = canMountTurret(s, 'beam', 'hpM1')
   check('炮位占用后不可再挂', !occ.ok && occ.reason === '炮位已占用', occ.reason)
   const g1 = s.gold
   s = unmountTurret(s, mt.id)
   check('卸炮返还半价',
     !s.turrets.some(t => t.hardpointId === 'hpM1') && s.gold === g1 + Math.floor(lobCost / 2),
     `gold=${s.gold}`)
-  const bt = s.turrets.find(t => t.builtIn)!
+  const bt = s.turrets.find(t => t.hardpointId === 'hpT2')!
   const n0 = s.turrets.length
+  const builtInGold = s.gold
   s = unmountTurret(s, bt.id)
-  check('内置武器不可卸', s.turrets.length === n0 && s.turrets.some(t => t.builtIn))
+  check('预装武器默认可卸且不返还资源', s.turrets.length === n0 - 1 && !s.turrets.some(t => t.hardpointId === 'hpT2') && s.gold === builtInGold)
+  const lockedBuiltIn = s.turrets.find(t => t.hardpointId === 'hpT3')!
+  const lockedCount = s.turrets.length
+  s = unmountTurret(s, lockedBuiltIn.id)
+  check('显式锁定的预装武器不可卸', s.turrets.length === lockedCount && s.turrets.some(t => t.id === lockedBuiltIn.id && t.locked))
   s.gold = 0
   const poor = canMountTurret(s, 'mg', 'hpS1')
-  check('废料不足不可挂', !poor.ok && poor.reason === '废料不足', poor.reason)
+  check('资源不足不可挂', !poor.ok && poor.reason === '资源不足', poor.reason)
   s.gold = 10000
   s.phase = 'combat'
+  s.fortress.x = LEVEL.startZone.x + LEVEL.startZone.w + 2
+  s.fortress.y = LEVEL.startZone.y
   const n1 = s.turrets.length
   s = mountTurret(s, 'mg', 'hpS1')
-  check('战斗中不可挂炮', s.turrets.length === n1)
-  DEFAULT_FORTRESS.hardpoints.splice(DEFAULT_FORTRESS.hardpoints.findIndex(h => h.id === 'hpT1'), 1) // 还原出厂炮位表
+  check('战斗中驶离起点区域不可挂炮', s.turrets.length === n1)
+  DEFAULT_FORTRESS.hardpoints.splice(DEFAULT_FORTRESS.hardpoints.findIndex(h => h.id === 'hpT1'), 1)
+  DEFAULT_FORTRESS.hardpoints.splice(DEFAULT_FORTRESS.hardpoints.findIndex(h => h.id === 'hpT2'), 1) // 还原出厂炮位表
+  DEFAULT_FORTRESS.hardpoints.splice(DEFAULT_FORTRESS.hardpoints.findIndex(h => h.id === 'hpT3'), 1)
   restoreLevel()
 }
 
@@ -4587,28 +5126,73 @@ console.log('== 用例 54：移动堡垒验收 ==')
   const hp0 = s.fortress.hp
   s.fortress.armor.front = 0 // 本用例只验证远程攻击状态，不让概率跳弹干扰
   const e = mkEnemy(s, 'walker', fr.x + fr.w / 2, fr.y - 0.5)
-  e.mode = 'attack'; e.targetKind = 'core'; e.targetId = 0
-  s = tick(s, 0.2)
+  e.controller = 'ai'
+  e.mode = 'attack'; e.targetKind = 'fortress'; e.targetId = 0
+  s = run(s, 1.8, 0.05)
   check('近距敌方直线实弹命中并削减船体', s.fortress.hp < hp0, `hp=${s.fortress.hp}`)
   s.fortress.x += 12 // 驶出行尸 8 格射程
   s = tick(s, 0.1)
   const ee = byId(s.enemies, e.id)!
-  check('堡垒驶出射程后敌人停止射击并重追', ee.targetKind !== 'core' && ee.mode === 'move', `kind=${ee.targetKind} mode=${ee.mode}`)
+  check('堡垒驶出射程后敌人停止射击并重追', ee.targetKind === 'fortress' && ee.mode === 'move', `kind=${ee.targetKind} mode=${ee.mode}`)
   restoreLevel()
 }
 
-// v2.53 堡垒毁灭序列：hp 归零 → dying 演出（不立即判负）→ 内伤小爆 → 主爆 AOE → 演出毕判负（期间不判胜）
+// 玩家与其他阵营共用单位摧毁入口：只播放所选模板，不再触发堡垒专属连锁爆炸或 AOE。
 {
+  check('单位摧毁模板：支持小/中/大/剧烈四档配置',
+    (['small', 'medium', 'large', 'violent'] as const).every(destructionEffect =>
+      !validateFortressDef({ ...DEFAULT_FORTRESS, destructionEffect }).some(error => error.includes('摧毁效果'))), '')
+  check('单位摧毁模板：旧单位按主体尺寸获得兼容默认值',
+    resolveUnitDestructionEffect(undefined, 1, 1) === 'small'
+    && resolveUnitDestructionEffect(undefined, 2, 2) === 'medium'
+    && resolveUnitDestructionEffect(undefined, 4, 3) === 'large'
+    && resolveUnitDestructionEffect(undefined, 6, 4) === 'violent', '')
+  check('单位摧毁模板：显式配置优先于尺寸默认值',
+    resolveUnitDestructionEffect('small', 8, 8) === 'small', '')
+  const destructionSmall = unitDestructionVisualParams('small')
+  const destructionMedium = unitDestructionVisualParams('medium')
+  const destructionLarge = unitDestructionVisualParams('large')
+  const destructionViolent = unitDestructionVisualParams('violent')
+  const wreckageFrames = [0, 1, 2, 3].map(index => wreckageFrameRect(64, 64, index))
+  check('单位摧毁残骸素材：64×64 图集按 2×2 切为四个 32×32 随机残片',
+    wreckageFrames.every(frame => frame.sw === 32 && frame.sh === 32)
+      && wreckageFrames.map(frame => `${frame.sx},${frame.sy}`).join('|') === '0,0|32,0|0,32|32,32')
+  check('单位摧毁残骸素材：游戏参数默认小/中/大/剧烈缩放为50%/100%/150%/180%',
+    destructionSmall.debrisSpriteScale === 0.5
+      && destructionMedium.debrisSpriteScale === 1
+      && destructionLarge.debrisSpriteScale === 1.5
+      && destructionViolent.debrisSpriteScale === 1.8)
+  setUnitDestructionWreckageScalePercent('small', 80)
+  check('单位摧毁残骸素材：游戏参数修改后立即作用于爆炸渲染',
+    unitDestructionVisualParams('small').debrisSpriteScale === 0.8)
+  setUnitDestructionWreckageScalePercent('small', 50)
+  check('单位摧毁表现：小/中/大档直接复用弹丸爆炸模板参数',
+    destructionSmall.explosion.template === 'small'
+    && destructionMedium.explosion.template === 'medium'
+    && destructionLarge.explosion.template === 'large'
+    && destructionMedium.explosion.sparks === 14
+    && destructionLarge.explosion.rings === 3, '')
+  check('单位摧毁表现：剧烈档由大型弹丸爆炸模板增强为四层冲击环',
+    destructionViolent.explosion.template === 'large'
+    && destructionViolent.explosion.rings === 4
+    && destructionViolent.explosion.sparks > destructionLarge.explosion.sparks, '')
+  const mediumDebrisTravel = destructionMedium.debrisSpeed / destructionMedium.debrisDrag
+    * (1 - Math.exp(-destructionMedium.debrisDrag * destructionMedium.debrisLife))
+  check('单位摧毁表现：残骸高速飞散且理论距离超过爆心半径 3.7 倍',
+    destructionMedium.debrisSpeed >= 4.8 && mediumDebrisTravel > 3.7,
+    `distance=${mediumDebrisTravel.toFixed(2)}r`)
+
   resetLevel()
   LEVEL.objects = []
   let s = arena()
   const fr = fortressRect(s)
   s.fortress.hp = 5 // 一击即毁
   const e = mkEnemy(s, 'walker', fr.x + fr.w / 2, fr.y - 0.5)
-  e.mode = 'attack'; e.targetKind = 'core'; e.targetId = 0
-  const e2 = mkEnemy(s, 'walker', fr.x + fr.w / 2, fr.y - 1.5) // 主爆半径内，验证 AOE 波及
+  e.controller = 'ai'
+  e.mode = 'attack'; e.targetKind = 'fortress'; e.targetId = 0
+  const e2 = mkEnemy(s, 'walker', fr.x + fr.w / 2, fr.y - 1.5) // 位于表现范围内，但统一摧毁视觉不造成 AOE
   const hp2 = e2.hp
-  let sawDying = false, sawSmall = false, sawMain = false, aoeHit = false
+  let sawDying = false, sawUnified = false
   let guard = 0
   while (s.phase !== 'lost' && guard++ < 60) {
     s = tick(s, 0.1)
@@ -4616,16 +5200,11 @@ console.log('== 用例 54：移动堡垒验收 ==')
       sawDying = true
       check('v2.53 hp 归零进入毁灭序列（不立即判负）', s.phase !== 'lost', `phase=${s.phase} dyingT=${s.fortress.dyingT}`)
     }
-    if (s.explosions.some(x => x.kind === 'deathSmall')) sawSmall = true
-    if (s.explosions.some(x => x.kind === 'deathMain')) {
-      sawMain = true
-      const e2a = byId(s.enemies, e2.id)
-      if (!e2a || e2a.hp < hp2) aoeHit = true
-    }
+    if (s.explosions.some(x => x.kind === 'unitDeath' && x.deathEffect === 'violent')) sawUnified = true
   }
-  check('v2.53 内伤连锁小爆事件', sawSmall, '')
-  check('v2.53 主爆事件 + AOE 波及周围单位', sawMain && aoeHit, `sawMain=${sawMain} aoeHit=${aoeHit}`)
-  check('v2.53 演出毕判负（且未误判胜）', s.phase === 'lost' && guard < 60, `phase=${s.phase} ticks=${guard} dyingT=${s.fortress.dyingT.toFixed(2)}`)
+  check('玩家摧毁：按主体尺寸进入统一剧烈爆炸模板', sawUnified, '')
+  check('玩家摧毁：视觉模板不再附带堡垒专属 AOE', byId(s.enemies, e2.id)?.hp === hp2, `hp=${byId(s.enemies, e2.id)?.hp}`)
+  check('玩家摧毁：演出毕判负（且未误判胜）', s.phase === 'lost' && guard < 60, `phase=${s.phase} ticks=${guard} dyingT=${s.fortress.dyingT.toFixed(2)}`)
   restoreLevel()
 }
 
@@ -4761,6 +5340,41 @@ console.log('== 用例 54：移动堡垒验收 ==')
     hpS2.arc = bakArc99 // 恢复
   }
 
+  // ④e 战斗 HUD 关闭自动开火：停止索敌并按炮塔转速回到炮位原始朝向
+  {
+    Math.random = zeroRandom
+    let s = arena()
+    s.phase = 'prep'
+    s.gold = 10000
+    s = mountTurret(s, 'mg', 'hpS1')
+    const mounted = s.turrets.find(t => t.hardpointId === 'hpS1')!
+    const rest = mounted.angle
+    mounted.angle = wrapAngle(rest + Math.PI / 2)
+    mounted.targetId = 999
+    s = setTurretAutoFire(s, mounted.id, false)
+    s.phase = 'combat'
+    mkEnemy(s, 'walker', 100, 100) // 保持交战阶段，但位于炮塔射程外
+    const before = Math.abs(wrapAngle(mounted.angle - rest))
+    s = tick(s, 0.1)
+    const afterTick = s.turrets.find(t => t.id === mounted.id)!
+    const after = Math.abs(wrapAngle(afterTick.angle - rest))
+    check('关闭自动开火：立即解除目标并开始向炮位原始朝向回正',
+      afterTick.targetId === null && after < before, `before=${before} after=${after} target=${afterTick.targetId}`)
+    s = run(s, 5, 0.05)
+    const returned = s.turrets.find(t => t.id === mounted.id)!
+    check('关闭自动开火：挂载炮塔最终回到炮位视界中心',
+      Math.abs(wrapAngle(returned.angle - rest)) < 1e-6, `angle=${returned.angle} rest=${rest}`)
+
+    let ground = arena()
+    const groundTurret = mkTurret(ground, 'mg', 6, 20)
+    groundTurret.angle = Math.PI / 2
+    ground = setTurretAutoFire(ground, groundTurret.id, false)
+    mkEnemy(ground, 'walker', 100, 100) // 保持交战阶段，但位于炮塔射程外
+    ground = run(ground, 5, 0.05)
+    check('关闭自动开火：地面炮塔最终回到世界上方0°',
+      Math.abs(wrapAngle(byId(ground.turrets, groundTurret.id)!.angle)) < 1e-6)
+  }
+
   // ⑤b 平移：移动不再改变朝向（仅 A/D 显式转向，速率受速度比率调制）
   s = arena()
   s.moveDir = { x: 0, y: 1 }
@@ -4851,11 +5465,33 @@ console.log('== 用例 54：移动堡垒验收 ==')
   }
   check('环形镂空校验通过', validateFortressDef(ring).length === 0, validateFortressDef(ring).join(';'))
   check('不连通网格被拒绝', validateFortressDef({ ...ring, shape: ['0,0', '2,2'] }).some(e => e.includes('连通')))
-  check('w/h 非包围盒被拒绝', validateFortressDef({ ...ring, w: 4 }).some(e => e.includes('包围盒')))
-  check('内部空间越出形状被拒绝', validateFortressDef({ ...ring, interior: { cols: 2, rows: 2 } }).some(e => e.includes('内部空间')))
+  check('旧载具 w/h 与形状范围不一致时被拒绝', validateFortressDef({ ...ring, w: 4 }).some(e => e.includes('旧载具范围')))
+  check('虚拟内部空间可独立大于旧外部形状', !validateFortressDef({ ...ring, interior: { cols: 4, rows: 4 } }).some(e => e.includes('内部空间')))
   check('炮位不在形状格被拒绝', validateFortressDef({ ...ring, hardpoints: [{ id: 'hpX', x: 1.5, y: 1.5, size: 'S' }] }).some(e => e.includes('炮位')))
   check('炮位类型限制全不勾被拒绝', validateFortressDef({ ...ring, hardpoints: [{ id: 'hpX', x: 1.5, y: 1.5, size: 'S', types: [] }] }).some(e => e.includes('类型限制')))
-  check('耐久/转向半径校验文案改名', validateFortressDef({ ...ring, hp: 100, turnRadius: 99 }).some(e => e.includes('耐久需在')) && validateFortressDef({ ...ring, hp: 100, turnRadius: 99 }).some(e => e.includes('转向半径需在')))
+  check('耐久/移动速度取消旧区间限制',
+    !validateFortressDef({ ...ring, hp: 1, speed: 0 }).some(e => e.includes('耐久') || e.includes('移动速度'))
+    && !validateFortressDef({ ...ring, hp: 1e12, speed: 1e6 }).some(e => e.includes('耐久') || e.includes('移动速度')))
+  check('耐久/移动速度仍拦截无效运行值',
+    validateFortressDef({ ...ring, hp: 0 }).some(e => e.includes('耐久'))
+    && validateFortressDef({ ...ring, speed: -1 }).some(e => e.includes('移动速度'))
+    && validateFortressDef({ ...ring, hp: Number.POSITIVE_INFINITY }).some(e => e.includes('耐久'))
+    && validateFortressDef({ ...ring, speed: Number.NaN }).some(e => e.includes('移动速度')))
+
+  const bodyPixels = new Uint8ClampedArray(64 * 32 * 4)
+  for (let y = 4; y < 28; y++) for (let x = 8; x < 56; x++) bodyPixels[(y * 64 + x) * 4 + 3] = 255
+  const bodyCollision = bodyCollisionFromPixels(bodyPixels, 64, 32, 'test:body')
+  check('主体透明边缘可生成中心相对凸轮廓', !!bodyCollision && bodyCollision.points.length === 4
+    && Math.min(...bodyCollision.points.map(point => point.x)) === -0.75
+    && Math.max(...bodyCollision.points.map(point => point.x)) === 0.75)
+  check('主体轮廓可映射为格寻路兼容占位', !!bodyCollision && bodyCollisionCells({ w: 2, h: 1, bodyCollision }).size === 2)
+  check('主体轮廓存在时忽略遗留 shape 的范围与连通校验', !!bodyCollision && !validateFortressDef({
+    ...ring,
+    w: 2,
+    h: 1,
+    bodyCollision,
+    shape: ['0,0', '9,9'],
+  }).some(error => error.includes('旧形状') || error.includes('旧载具范围')))
 
   // ③ 镂空占地/碰撞
   const typed: FortressDef = {
@@ -4881,8 +5517,8 @@ console.log('== 用例 54：移动堡垒验收 ==')
   s.fortress.y = 12
   s.objects = []
   check('镂空堡垒占地格 = 形状格数（8）', fortressCells(s).length === 8, `n=${fortressCells(s).length}`)
-  check('镂空格不属于堡垒阻挡', blockerAt(s, 11, 13)?.kind !== 'core', `${JSON.stringify(blockerAt(s, 11, 13))}`)
-  check('形状格为堡垒格', blockerAt(s, 10, 12)?.kind === 'core')
+  check('镂空格不属于堡垒阻挡', blockerAt(s, 11, 13)?.kind !== 'fortress', `${JSON.stringify(blockerAt(s, 11, 13))}`)
+  check('形状格为堡垒格', blockerAt(s, 10, 12)?.kind === 'fortress')
 
   // 实心格碰撞挡停
   let s2 = arena()
@@ -4951,17 +5587,33 @@ console.log('== 用例 54：移动堡垒验收 ==')
     setItem: (k: string, v: string) => void store.set(k, String(v)),
     removeItem: (k: string) => void store.delete(k),
   }
-  const libDef: FortressDef = { ...ring, id: 'test-lib', shape: [...ring.shape!] }
+  const libDef: FortressDef = { ...ring, id: 'test-lib', shape: [...ring.shape!], color: '#ff00ff' }
   check('保存自定义堡垒入注册表', saveCustomFortress(libDef) && FORTRESS_DEFS.some(f => f.id === 'test-lib'))
+  check('载具占位颜色：保存时统一为固定 RGB(118,122,110)', FORTRESS_DEFS.find(f => f.id === 'test-lib')?.color === VEHICLE_PLACEHOLDER_COLOR)
   check('非法定义拒绝保存', !saveCustomFortress({} as FortressDef))
   setSelectedFortressId('test-lib')
   const s3 = initialState()
   check('出战堡垒生效于 initialState', s3.fortressDefId === 'test-lib' && s3.fortress.hp === libDef.hp && s3.fortress.maxHp === libDef.hp,
     `${s3.fortressDefId} hp=${s3.fortress.hp}`)
-  const persisted = JSON.parse(store.get('td-fortress-lib-v1') ?? '{}') as { customs?: unknown[]; selectedId?: string }
+  const persisted = JSON.parse(store.get('td-fortress-lib-v1') ?? '{}') as { customs?: FortressDef[]; selectedId?: string }
   check('类型库持久化（customs+selectedId）', persisted.selectedId === 'test-lib' && (persisted.customs?.length ?? 0) === 1)
+  check('载具占位颜色：持久化数据不保留旧自定义颜色', persisted.customs?.[0]?.color === VEHICLE_PLACEHOLDER_COLOR)
   setSelectedFortressId(DEFAULT_FORTRESS.id)
   check('删除自定义堡垒并回落默认出战', deleteCustomFortress('test-lib') && !FORTRESS_DEFS.some(f => f.id === 'test-lib') && getSelectedFortressId() === DEFAULT_FORTRESS.id)
+
+  const legacyGear = structuredClone(DEFAULT_FORTRESS)
+  legacyGear.id = 'test-legacy-running-gear'
+  delete legacyGear.runningGearCoordinateSpace
+  legacyGear.tracks = [{ id: 'legacy-track', x1: 0.5, y1: 0.5, x2: 0.5, y2: 7.5, radius: 0.5, tile: 'builtin:library/track01', overlapPx: 2 }]
+  legacyGear.wheels = [{ id: 'legacy-wheel', x: 0.5, y: 1, unit: 'pair' }]
+  saveCustomFortress(legacyGear)
+  const migratedGear = FORTRESS_DEFS.find(def => def.id === legacyGear.id)!
+  const migratedWheelPair = wheelPlacements(migratedGear, migratedGear.wheels![0])
+  check('旧载具存档：左上原点履带/轮胎坐标自动迁移到几何原点', migratedGear.runningGearCoordinateSpace === 'centered'
+    && migratedGear.tracks?.[0].x1 === -2 && migratedGear.tracks[0].y1 === 3.5
+    && migratedGear.tracks[0].x2 === -2 && migratedGear.tracks[0].y2 === -3.5
+    && migratedWheelPair[0].x === -2 && migratedWheelPair[1].x === 2 && migratedWheelPair.every(point => point.y === 3))
+  deleteCustomFortress(legacyGear.id)
   delete (globalThis as unknown as { localStorage?: unknown }).localStorage
 
   // 清理测试堡垒定义
@@ -5004,7 +5656,7 @@ console.log('== 用例 54：移动堡垒验收 ==')
     hardpoints: [], color: '#888888',
   }
   check('内部自由格阵校验通过', validateFortressDef(carve).length === 0, validateFortressDef(carve).join(';'))
-  check('内部格越出形状被拒', validateFortressDef({ ...carve, interiorCells: ['9,9'] }).some(e => e.includes('内部空间')))
+  check('内部格越出虚拟网格被拒', validateFortressDef({ ...carve, interiorCells: ['9,9'] }).some(e => e.includes('内部空间')))
   check('特殊格越出内部格阵被拒', validateFortressDef({ ...carve, interiorSpecials: [{ x: 2, y: 1, boost: 'hp' }] }).some(e => e.includes('特殊格')))
   FORTRESS_DEFS.push(carve)
   let s = arena()
@@ -5188,27 +5840,30 @@ console.log('== 用例 54：移动堡垒验收 ==')
   const full3w = (() => { const a: string[] = []; for (let x = 0; x < 3; x++) for (let y = 0; y < 3; y++) a.push(`${x},${y}`); return a })()
   const wheelDef: FortressDef = {
     id: 'test-wheel', name: '测试轮式底盘', w: 3, h: 3, shape: [...full3w],
+    runningGearCoordinateSpace: 'centered',
     interior: { cols: 1, rows: 1 },
     hp: 1000, speed: 2, turnSpeed: 90, turnRadius: 0, accel: 20, heatCap: 200, heatDissipation: 10,
     hardpoints: [], color: '#888888', chassis: 'wheeled',
     wheels: [
-      { id: 'wfl', x: 0.5, y: 0.8, r: 0.45, steered: true },
-      { id: 'wfr', x: 2.5, y: 0.8, r: 0.45, steered: true },
-      { id: 'wrl', x: 0.5, y: 2.2, r: 0.45 },
-      { id: 'wrr', x: 2.5, y: 2.2, r: 0.45 },
+      { id: 'wfl', x: -1, y: 0.7, r: 0.45, steered: true },
+      { id: 'wfr', x: 1, y: 0.7, r: 0.45, steered: true },
+      { id: 'wrl', x: -1, y: -0.7, r: 0.45 },
+      { id: 'wrr', x: 1, y: -0.7, r: 0.45 },
     ],
   }
   FORTRESS_DEFS.push(wheelDef)
 
   // ⓪ 校验：底盘参数区间
   check('v2.51 校验：非法底盘类型被拒', validateFortressDef({ ...wheelDef, chassis: 'arcade' as unknown as 'tracked' }).some(e => e.includes('底盘类型')))
-  check('v2.51 校验：履带间距 0/21 被拒', validateFortressDef({ ...wheelDef, trackWidth: 0 }).some(e => e.includes('履带间距')) && validateFortressDef({ ...wheelDef, trackWidth: 21 }).some(e => e.includes('履带间距')))
-  check('v2.51 校验：转向阻力越界被拒', validateFortressDef({ ...wheelDef, turnDrag: -0.1 }).some(e => e.includes('转向阻力')) && validateFortressDef({ ...wheelDef, turnDrag: 0.91 }).some(e => e.includes('转向阻力')))
+  check('v2.51 校验：履带间距 0/21 被拒', validateFortressDef({ ...wheelDef, chassis: 'tracked', trackWidth: 0 }).some(e => e.includes('履带间距')) && validateFortressDef({ ...wheelDef, chassis: 'tracked', trackWidth: 21 }).some(e => e.includes('履带间距')))
+  check('v2.51 校验：转向阻力越界被拒', validateFortressDef({ ...wheelDef, chassis: 'tracked', turnDrag: -0.1 }).some(e => e.includes('转向阻力')) && validateFortressDef({ ...wheelDef, chassis: 'tracked', turnDrag: 0.91 }).some(e => e.includes('转向阻力')))
   check('v2.51 校验：轴距 0/31 被拒', validateFortressDef({ ...wheelDef, wheelbase: 0 }).some(e => e.includes('轴距')) && validateFortressDef({ ...wheelDef, wheelbase: 31 }).some(e => e.includes('轴距')))
   check('v2.51 校验：前轮转角 0/81 被拒', validateFortressDef({ ...wheelDef, steerMax: 0 }).some(e => e.includes('最大前轮转角')) && validateFortressDef({ ...wheelDef, steerMax: 81 }).some(e => e.includes('最大前轮转角')))
   check('v2.51 校验：方向盘转速 0/721 被拒', validateFortressDef({ ...wheelDef, steerRate: 0 }).some(e => e.includes('方向盘转速')) && validateFortressDef({ ...wheelDef, steerRate: 721 }).some(e => e.includes('方向盘转速')))
   check('v2.51 校验：附着上限 0/101 被拒', validateFortressDef({ ...wheelDef, gripMax: 0 }).some(e => e.includes('横向附着上限')) && validateFortressDef({ ...wheelDef, gripMax: 101 }).some(e => e.includes('横向附着上限')))
   check('v2.73 校验：轮胎单位非法值被拒', validateFortressDef({ ...wheelDef, wheels: [{ id: 'wb', x: 1, y: 1, unit: 'triple' as 'pair' }] }).some(e => e.includes('单位仅支持')))
+  check('轮胎帧数校验：0、65 和小数均被拒', [0, 65, 1.5].every(frames =>
+    validateFortressDef({ ...wheelDef, wheels: [{ id: 'wb', x: 1, y: 1, frames }] }).some(e => e.includes('帧数'))))
   check('v2.51 校验：合法轮式配置零报错', validateFortressDef(wheelDef).length === 0)
 
   // ① 静止无转向能力（方向盘语义）：静止按 D 1s → 前轮打到 35° 但朝向不变
@@ -5309,13 +5964,26 @@ console.log('== 用例 54：移动堡垒验收 ==')
 
   // ⑦ 轮子落印列（fortressMarkColumns）：纯轮式 4 轮 = 4 列；半履带布局 1 履带×2 + 2 轮 = 4 列
   check('v2.51 落印列：纯轮式 4 轮 = 4 列', fortressMarkColumns(wheelDef).length === 4)
-  const pairWheel = { id: 'pair-front', x: 0.5, y: 0.8, unit: 'pair' as const, sprite: 'builtin:library/track01', steered: true }
+  const pairWheel = { id: 'pair-front', x: -1, y: 0.7, unit: 'pair' as const, sprite: 'builtin:library/track01', steered: true }
   const pairDef: FortressDef = { ...wheelDef, id: 'test-wheel-pair', wheels: [pairWheel] }
   const pairPlaced = wheelPlacements(pairDef, pairWheel)
-  check('v2.73 轮胎单位“对”：定义侧 x=0.5 自动镜像到 x=2.5',
-    pairPlaced.length === 2 && pairPlaced[0].x === 0.5 && pairPlaced[1].x === 2.5 && pairPlaced.every(p => p.y === 0.8))
+  check('轮胎单位“对”：几何原点左侧 x=-1 自动镜像到 x=1',
+    pairPlaced.length === 2 && pairPlaced[0].x === -1 && pairPlaced[1].x === 1 && pairPlaced.every(p => p.y === 0.7))
+  const pairFromRight = wheelPlacements(pairDef, { ...pairWheel, x: 1 })
+  check('成对轮胎素材朝向：即使从右侧定义，也固定左轮原图、右轮水平反置',
+    pairFromRight[0].x === -1 && !pairFromRight[0].mirror && pairFromRight[1].x === 1 && pairFromRight[1].mirror)
+  const pairCols = fortressMarkColumns(pairDef)
   check('v2.73 成对轮胎落印：一条定义展开左右两列且使用原图零重叠步长',
-    fortressMarkColumns(pairDef).length === 2 && fortressMarkColumns(pairDef).every(c => c.overlapPx === 0))
+    pairCols.length === 2 && pairCols.every(c => c.overlapPx === 0))
+  check('左右对称贴图：成对轮胎的复制侧与落印标记为水平镜像',
+    pairCols[0].spriteMirror === false && pairCols[1].spriteMirror === true)
+  const wheelCircumference = 16 / BASE_CELL * Math.PI
+  check('轮胎横向帧条：单帧素材始终停在第 0 帧', wheelRollFrame(999, 1, 16) === 0)
+  check('轮胎横向帧条：前进按周长推进并在一周后循环',
+    wheelRollFrame(wheelCircumference / 8 * 1.1, 8, 16) === 1 && wheelRollFrame(wheelCircumference, 8, 16) === 0)
+  check('轮胎横向帧条：倒退时反向选帧', wheelRollFrame(-wheelCircumference / 8 * 0.1, 8, 16) === 7)
+  check('内置吉普轮胎旧配置自动迁移为 4 帧，显式帧数优先',
+    wheelFrameCount({ sprite: 'builtin:vehicle/jeep/wheel' }) === 4 && wheelFrameCount({ sprite: 'builtin:vehicle/jeep/wheel', frames: 2 }) === 2)
   const steerVisualState = arena()
   steerVisualState.fortress.vy = -2
   steerVisualState.fortress.turnW = 0.2
@@ -5324,9 +5992,27 @@ console.log('== 用例 54：移动堡垒验收 ==')
     Math.abs(wheelVisualSteerAngle(steerVisualState, steerVisualDef) - Math.atan(0.5)) < 1e-9)
   steerVisualState.fortress.turnW = 0
   check('v2.74 非转弯状态：轮胎视觉偏角归零', wheelVisualSteerAngle(steerVisualState, steerVisualDef) === 0)
-  const halfDef: FortressDef = { ...wheelDef, id: 'test-half', chassis: 'tracked', wheels: [wheelDef.wheels![0], wheelDef.wheels![2]],
-    tracks: [{ id: 'tk0', x1: 0.4, y1: 0.6, x2: 0.4, y2: 2.4, radius: 0.4, tile: 'builtin:library/track01', overlapPx: 2 }] }
+  const halfDef: FortressDef = { ...wheelDef, id: 'test-half', chassis: 'halfTracked', wheels: [wheelDef.wheels![0], wheelDef.wheels![1]],
+    tracks: [{ id: 'tk0', x1: -1.1, y1: 0.2, x2: -1.1, y2: -0.9, radius: 0.4, tile: 'builtin:library/track01', overlapPx: 2 }] }
+  FORTRESS_DEFS.push(halfDef)
+  check('半履带校验：前轮和后履带同时存在时合法', validateFortressDef(halfDef).length === 0, validateFortressDef(halfDef).join(';'))
+  check('半履带校验：缺少前轮或后履带时拒绝保存',
+    validateFortressDef({ ...halfDef, wheels: undefined }).some(error => error.includes('同时配置'))
+    && validateFortressDef({ ...halfDef, tracks: undefined }).some(error => error.includes('同时配置')))
   check('v2.51 落印列：半履带布局 1 履带×2 + 2 轮 = 4 列', fortressMarkColumns(halfDef).length === 4)
+  let sh = arena()
+  sh.fortressDefId = 'test-half'
+  sh.phase = 'prep'
+  sh.turnDir = 1
+  sh = run(sh, 0.5, 0.05)
+  check('半履带运动：静止转向时前轮打角且后履带差速带动车身', sh.fortress.steerAngle > 0 && sh.fortress.heading > 0,
+    `steer=${(sh.fortress.steerAngle / DEG2).toFixed(2)}° heading=${(sh.fortress.heading / DEG2).toFixed(2)}°`)
+  sh.moveDir = { x: 0, y: -1 }
+  sh.moveMag = 1
+  sh = run(sh, 1, 0.05)
+  check('半履带运动：行驶转向同时推进全部履带与前轮相位', Math.hypot(sh.fortress.vx, sh.fortress.vy) > 0.5
+    && sh.fortress.trackPhase.length === 4 && sh.fortress.trackPhase.some((phase, index) => index > 0 && Math.abs(phase - sh.fortress.trackPhase[0]) > 0.01),
+    `v=${Math.hypot(sh.fortress.vx, sh.fortress.vy).toFixed(2)} phases=${sh.fortress.trackPhase.map(value => value.toFixed(2)).join(',')}`)
   let sm = arena()
   sm.fortressDefId = 'test-wheel'
   sm.phase = 'prep'
@@ -5338,7 +6024,7 @@ console.log('== 用例 54：移动堡垒验收 ==')
   check('v2.51 落印列：直行 1s 各轮相位 = 2 格', Math.abs(sm.fortress.trackPhase[0] - 2) < 1e-6 && Math.abs(sm.fortress.trackPhase[3] - 2) < 1e-6, `p=${sm.fortress.trackPhase.map(p => p.toFixed(3)).join(',')}`)
 
   // 清理
-  for (const id of ['test-wheel', 'test-wheel-grip', 'test-wheel-cap', 'test-wheel-coast', 'test-drag']) {
+  for (const id of ['test-wheel', 'test-wheel-grip', 'test-wheel-cap', 'test-wheel-coast', 'test-drag', 'test-half']) {
     const i = FORTRESS_DEFS.findIndex(f => f.id === id)
     if (i >= 0) FORTRESS_DEFS.splice(i, 1)
   }
@@ -5437,6 +6123,8 @@ console.log('== 用例 54：移动堡垒验收 ==')
   // ② 倒退：静止 → 沿船头反方向（船头朝上=向下）加速，极速 = 1.6×0.8=1.28
   let s = arena()
   s.phase = 'prep'
+  // 移到战场中段，隔离倒退运动学与关卡起点/世界边界语义。
+  s.fortress.y = (LEVEL.rows - fortressDef(s).h) / 2
   const h0 = s.fortress.heading
   const y0 = s.fortress.y
   s.reverse = true
@@ -5494,7 +6182,7 @@ console.log('== 用例 54：移动堡垒验收 ==')
   FORTRESS_DEFS.push(in1, in10)
 
   const fullSpeed = (id?: string) => {
-    let s = arena()
+    const s = arena()
     if (id) s.fortressDefId = id
     s.phase = 'prep'
     s.moveDir = { x: 0, y: -1 }
@@ -5782,15 +6470,15 @@ console.log('== 用例 54：移动堡垒验收 ==')
   const rT = simAmmoFx(paT, 'trail', 2)
   check('弹丸预览：飞行（尾焰）持续发射粒子', rT.peak >= 5 && rT.end >= 0, `peak=${rT.peak}`)
 
-  // 配置爆炸：首爆 = 火花10+烟尘6（默认值）
+  // 配置爆炸：首爆 = 火花14+烟尘7（默认值）
   const paE: ProjectileArtDef = { id: 'sim-fx-e', name: '测试爆炸', kind: 'shell', explosion: {} }
   const rE = simAmmoFx(paE, 'explosion', 0.5)
-  check('弹丸预览：爆炸爆发粒子（火花+烟尘=16）', rE.peak === 16, `peak=${rE.peak}`)
+  check('弹丸预览：爆炸爆发粒子（火花+烟尘=21）', rE.peak === 21, `peak=${rE.peak}`)
 
-  // 配置命中：碎屑 5
+  // 配置命中：碎屑 4
   const paI: ProjectileArtDef = { id: 'sim-fx-i', name: '测试命中', kind: 'bullet', impact: {} }
   const rI = simAmmoFx(paI, 'impact', 0.2)
-  check('弹丸预览：命中碎屑粒子（spikes=5）', rI.peak === 5, `peak=${rI.peak}`)
+  check('弹丸预览：命中碎屑粒子（spikes=4）', rI.peak === 4, `peak=${rI.peak}`)
 
   // 可播放性门控与配置一致
   check('弹丸预览：canPlay 与配置一致', canPlay(paT, 'trail') && !canPlay(paT, 'impact') && canPlay(paE, 'explosion') && canPlay(paI, 'impact'))
@@ -5817,8 +6505,8 @@ console.log('== 用例 54：移动堡垒验收 ==')
     const dt = 1 / 60
     fxTick(pa, 'trail', pool, st, dt, 12, 1.6, 0.5) // tailOff=0.5 格
     const pt = pool.parts[0]
-    const expectX = st.px - 0.5 + FX_PREVIEW_SPEED * dt // 发射点 0.5 格后于弹体，本拍再随初速前移
-    check('弹丸预览：尾焰发射点 = 弹体 − 尾偏（贴图底部中间）', pool.parts.length >= 10 && Math.abs(pt.x - expectX) < 0.02, `x=${pt?.x.toFixed(3)} expect≈${expectX.toFixed(3)}`)
+    const expectX = st.px - 0.5 // 发射点在弹体尾端；即使惯性=1，也不得继续向弹头前方移动
+    check('弹丸预览：尾焰从贴图尾端发射且不向弹头前方移动', pool.parts.length >= 10 && Math.abs(pt.x - expectX) < 0.02, `x=${pt?.x.toFixed(3)} expect≈${expectX.toFixed(3)}`)
   }
 
   // v2.34 全程（seq）：单「播放/停止」= 左→右飞行 → 右端命中/爆炸 → 停顿循环
@@ -5829,21 +6517,21 @@ console.log('== 用例 54：移动堡垒验收 ==')
     const paSeq: ProjectileArtDef = { id: 'sim-fx-seq', name: '全程测试', kind: 'missile', trail: {}, explosion: {} }
     const rSeq = simAmmoSeq(paSeq, 10)
     check('v2.34：seq 飞行+爆发+循环', rSeq.bursts >= 2 && rSeq.loops >= 1 && rSeq.peak > 0, JSON.stringify(rSeq))
-    // 到达右端爆发粒子数 = 火花10+烟尘6（爆炸默认；无尾焰排除干扰）
+    // 到达右端爆发粒子数 = 火花14+烟尘7（爆炸默认；无尾焰排除干扰）
     const paSeqE: ProjectileArtDef = { id: 'sim-fx-seqe', name: '全程爆发', kind: 'shell', explosion: {} }
     const poolS = createPool()
     const stS = createFxState()
     const dtS = 1 / 60
     for (let i = 0; i < 60 * 10 && stS.phase === 0; i++) fxTick(paSeqE, 'seq', poolS, stS, dtS, 12, 1.6)
     const burstX = poolS.parts.reduce((m, p) => Math.max(m, p.x), -1)
-    check('v2.34：到达右端爆发（火花+烟尘=16）', stS.phase === 1 && poolS.parts.length === 16, `phase=${stS.phase} parts=${poolS.parts.length}`)
+    check('v2.34：到达右端爆发（火花+烟尘=21）', stS.phase === 1 && poolS.parts.length === 21, `phase=${stS.phase} parts=${poolS.parts.length}`)
     check('v2.34：爆发点在右端命中点（worldW−2=10）', Math.abs(burstX - FX_SEQ_HIT_X(12)) < 1, `x=${burstX.toFixed(2)}`)
-    // 命中+爆炸同配：同帧同时触发（碎屑5+火花10+烟尘6=21）
+    // 命中+爆炸同配：同帧同时触发（碎屑4+火花14+烟尘7=25）
     const paSeqIE: ProjectileArtDef = { id: 'sim-fx-seqie', name: '全程命中爆炸', kind: 'missile', impact: {}, explosion: {} }
     const poolI = createPool()
     const stI = createFxState()
     for (let i = 0; i < 60 * 10 && stI.phase === 0; i++) fxTick(paSeqIE, 'seq', poolI, stI, dtS, 12, 1.6)
-    check('v2.34：命中+爆炸同帧触发（5+10+6=21）', stI.phase === 1 && poolI.parts.length === 21, `parts=${poolI.parts.length}`)
+    check('v2.34：命中+爆炸同帧触发（4+14+7=25）', stI.phase === 1 && poolI.parts.length === 25, `parts=${poolI.parts.length}`)
     // 射线：seq=光束持续发射（无飞行/爆发状态机），粒子三组持续
     check('v2.34：射线 seq=光束持续（无爆发、三组粒子持续）', simAmmoSeq(paRayFx, 2).bursts === 0 && simAmmoFx(paRayFx, 'seq', 2).peak > 0, '')
     // v2.37：射线 seq 发射 5s 后熄灭（phase1 停发粒子），停顿 0.9s 后循环重启；trail 模式不受限
@@ -5880,15 +6568,15 @@ console.log('== 用例 54：移动堡垒验收 ==')
       const stL = createFxState(); stL.t = 0.05
       const stF = createFxState(); stF.t = FX_RAY_SEQ_ON + BEAM_FADE / 2
       const stG = createFxState(); stG.t = FX_RAY_SEQ_ON + BEAM_FADE + 0.01
-      check('v2.38：fxRaySeqLen/fxRaySeqFade 与战场常量同口径（伸展 2400m/s / 消退 0.25s）',
-        Math.abs(fxRaySeqLen(stL, 12) - (0.05 * BEAM_ON_SPEED) / 25) < 1e-9 && fxRaySeqLen(stG, 12) === 11
+      check('v2.38：fxRaySeqLen/fxRaySeqFade 与战场常量同口径（伸展 BEAM_ON_SPEED / 消退 0.25s）',
+        Math.abs(fxRaySeqLen(stL, 12) - (0.05 * BEAM_ON_SPEED) / M_PER_CELL) < 1e-9 && fxRaySeqLen(stG, 12) === 11
         && fxRaySeqFade(stL) === 0 && Math.abs(fxRaySeqFade(stF) - 0.5) < 1e-9 && fxRaySeqFade(stG) === 0,
         `len=${fxRaySeqLen(stL, 12).toFixed(2)} fade=${fxRaySeqFade(stF).toFixed(2)}`)
     }
   }
 }
 
-// --- v2.35 光束起射高速伸展：beamOnAt 起按 BEAM_ON_SPEED(2400m/s) 从炮口伸展到全长，伤害范围同步 ---
+// --- 光束起射高速伸展：beamOnAt 起按 BEAM_ON_SPEED 从炮口伸展到全长，伤害范围同步 ---
 {
   Math.random = zeroRandom
   const beam = TURRET_DEFS.find(d => d.id === 'beam')!
@@ -5958,7 +6646,7 @@ console.log('== 用例 54：移动堡垒验收 ==')
   const s0 = effectParams({ id: 'b', x: 1, y: 1, kind: 'smoke', state: 'both' })
   const o0 = effectParams({ id: 'c', x: 1, y: 1, kind: 'dust', state: 'both', layer: 'air', inherit: 0.8, rate: 30 })
   check('v2.40：特效点缺省参数（尘土=地面+继承0.3 / 烟雾=空中+继承0）与覆盖',
-    d0.layer === 'ground' && d0.inherit === 0.3 && s0.layer === 'air' && s0.inherit === 0
+    d0.layer === 'ground' && d0.inherit === 0.3 && d0.size === 0.14 && s0.layer === 'air' && s0.inherit === 0
     && o0.layer === 'air' && o0.inherit === 0.8 && o0.rate === 30,
     `dust=${d0.layer}/${d0.inherit} smoke=${s0.layer}/${s0.inherit} ovr=${o0.layer}/${o0.rate}`)
   // 世界坐标：随 heading 旋转（右缘中点：heading 0 → 中心+(w/2,0)；heading π/2 → 中心+(0,w/2)）
@@ -6002,33 +6690,34 @@ console.log('== 用例 54：移动堡垒验收 ==')
 // --- v2.41 履带印：按各侧 trackPhase 位移落印（印距=瓦片有效步长、正倒向皆印、过期/容量清理） ---
 {
   Math.random = zeroRandom
-  // 印距：(32−2)/30 = 1 格；下限 0.2 格
-  check('v2.41：印距 = (图高−重叠)/30 格', Math.abs(trackMarkStep(32, 2) - 1) < 1e-9 && trackMarkStep(3, 2) === 0.2, '')
+  // 印距：(32−2)/BASE_CELL = 0.9375 格；下限 0.2 格
+  check('v2.41：印距 = (图高−重叠)/BASE_CELL 格', Math.abs(trackMarkStep(32, 2) - 30 / BASE_CELL) < 1e-9 && trackMarkStep(3, 2) === 0.2, '')
   const s = arena()
-  const fd: FortressDef = { ...fortressDef(s), tracks: [{ id: 'tk1', x1: 0.5, y1: 0.5, x2: 0.5, y2: 2.5, radius: 0.5, tile: 't1', overlapPx: 2 }] }
+  const fd: FortressDef = { ...fortressDef(s), tracks: [{ id: 'tk1', x1: -2, y1: 3.5, x2: -2, y2: 1.5, radius: 0.5, tile: 't1', overlapPx: 2 }] }
   const marks: TrackMark[] = []
   const st: TrackMarkState = { acc: [], prevPhase: [], moving: [] }
   s.fortress.heading = 0
   s.fortress.trackPhase = [0, 0]
-  const tileH = () => 32 // step=1 格
+  const tileH = () => BASE_CELL + 2 // 扣除 2px 重叠后，步长正好为 1 格
   updateTrackMarks(marks, st, s, fd, tileH) // 首次锚定：不产印
   const anchored = marks.length === 0
   s.fortress.trackPhase = [3, 3] // 静止→前进 3 格：每侧 1 启动印 + 3 步进印 = 4 印（v2.42）
   updateTrackMarks(marks, st, s, fd, tileH)
   const fwdOk = marks.length === 8 && marks.every(m => Math.abs(m.angle - 0) < 1e-9 && m.tile === 't1')
+  const mirrorOk = marks.slice(0, 4).every(m => !m.mirror) && marks.slice(4, 8).every(m => m.mirror)
   s.fortress.trackPhase = [3.5, 4.75] // 左侧 +0.5（不足 1 格无印）；右侧 +1.75（1 印，余 0.75）
   updateTrackMarks(marks, st, s, fd, tileH)
   const diffOk = marks.length === 9 && Math.abs(st.acc[0] - 0.5) < 1e-9 && Math.abs(st.acc[1] - 0.75) < 1e-9
   s.fortress.trackPhase = [1.5, 2.75] // 倒退 2 格：左 0.5−2=−1.5（1 印余 −0.5）；右 0.75−2=−1.25（1 印余 −0.25）
   updateTrackMarks(marks, st, s, fd, tileH)
   const revOk = marks.length === 11
-  // 落点 = 速度为 0 时取履带段中点随 heading 的世界坐标（heading 0：局部 (0.5,1.5) / 镜像 (fd.w−0.5,1.5)）
+  // 落点 = 速度为 0 时取履带段中点随 heading 的世界坐标（heading 0：几何原点坐标左 (-2,2.5) / 右 (2,2.5)）
   const fr = fortressRect(s)
   const cx = fr.x + fr.w / 2, cy = fr.y + fr.h / 2
-  const posOk = Math.abs(marks[0].x - (cx + 0.5 - fr.w / 2)) < 1e-9 && Math.abs(marks[0].y - (cy + 1.5 - fr.h / 2)) < 1e-9
-    && Math.abs(marks[4].x - (cx + fd.w - 0.5 - fr.w / 2)) < 1e-9 // marks[0..3]=左侧启动印+3 印（同点连落），marks[4]=镜像侧首印
+  const posOk = Math.abs(marks[0].x - (cx - 2)) < 1e-9 && Math.abs(marks[0].y - (cy - 2.5)) < 1e-9
+    && Math.abs(marks[4].x - (cx + 2)) < 1e-9 // marks[0..3]=左侧启动印+3 印（同点连落），marks[4]=镜像侧首印
   check('v2.41：位移落印（前进/差速/倒退）+ 接地点世界坐标',
-    anchored && fwdOk && diffOk && revOk && posOk,
+    anchored && fwdOk && mirrorOk && diffOk && revOk && posOk,
     `n=${marks.length} acc=${st.acc.map(a => a.toFixed(2))} p0=(${marks[0]?.x.toFixed(1)},${marks[0]?.y.toFixed(1)})`)
   // 过期清理 + 容量上限
   marks.length = 0
@@ -6036,22 +6725,25 @@ console.log('== 用例 54：移动堡垒验收 ==')
   for (let i = 0; i < TRACK_MARK_CAP + 10; i++) marks.push({ x: 0, y: 0, angle: 0, born: s.time, tile: 't1' })
   updateTrackMarks(marks, st, s, fd, tileH)
   check('v2.41：过期印清理 + 容量 600 FIFO', marks.length === TRACK_MARK_CAP && marks.every(m => s.time - m.born <= TRACK_MARK_LIFE), `n=${marks.length}`)
+  check('v2.41：屏幕外履带印不参与绘制，边缘外扩范围仍保留', trackMarkVisibleOnScreen(50, 50, 100, 100, 10)
+    && trackMarkVisibleOnScreen(-8, 50, 100, 100, 10)
+    && !trackMarkVisibleOnScreen(-12, 50, 100, 100, 10))
 }
 
 // --- v2.42 履带印即时可见：静止→移动立即落启动印（不足一印距也印）；接地点 = 履带段运动方向后端（印从船尾缘即时露出） ---
 {
   const s = arena()
-  const fd: FortressDef = { ...fortressDef(s), tracks: [{ id: 'tk1', x1: 0.5, y1: 0.5, x2: 0.5, y2: 2.5, radius: 0.5, tile: 't1', overlapPx: 2 }] }
+  const fd: FortressDef = { ...fortressDef(s), tracks: [{ id: 'tk1', x1: -2, y1: 3.5, x2: -2, y2: 1.5, radius: 0.5, tile: 't1', overlapPx: 2 }] }
   const marks: TrackMark[] = []
   const st: TrackMarkState = { acc: [], prevPhase: [], moving: [] }
-  const tileH = () => 32 // step=1 格
+  const tileH = () => BASE_CELL + 2 // 扣除 2px 重叠后，步长正好为 1 格
   s.fortress.heading = 0
   s.fortress.trackPhase = [0, 0]
   updateTrackMarks(marks, st, s, fd, tileH) // 锚定
   s.fortress.trackPhase = [0.05, 0.05] // 仅动 0.05 格（远不足 1 格印距）
   updateTrackMarks(marks, st, s, fd, tileH)
   const startOk = marks.length === 2 && Math.abs(st.acc[0] - 0.05) < 1e-9 // 启动印：左右各 1，余量不吞
-  // 后端采样：前进（vy=−6，局部 −y 为前）→ 印落段后端 y=2.5；倒退（vy=+6）→ 段前端 y=0.5
+  // 后端采样：前进（vy=−6）→ 印落段后端 y=1.5；倒退（vy=+6）→ 段前端 y=3.5。
   const fr = fortressRect(s)
   const cy = fr.y + fr.h / 2
   const marks2: TrackMark[] = []
@@ -6061,7 +6753,7 @@ console.log('== 用例 54：移动堡垒验收 ==')
   s.fortress.vy = -6
   s.fortress.trackPhase = [0.5, 0.5] // 前进 0.5 格：启动印落在后端
   updateTrackMarks(marks2, st2, s, fd, tileH)
-  const rearOk = marks2.length === 2 && Math.abs(marks2[0].y - (cy + 2.5 - fr.h / 2)) < 1e-9
+  const rearOk = marks2.length === 2 && Math.abs(marks2[0].y - (cy - 1.5)) < 1e-9
   const marks3: TrackMark[] = []
   const st3: TrackMarkState = { acc: [], prevPhase: [], moving: [] }
   s.fortress.vy = 6
@@ -6069,11 +6761,11 @@ console.log('== 用例 54：移动堡垒验收 ==')
   updateTrackMarks(marks3, st3, s, fd, tileH) // 锚定（倒退相位移为负方向）
   s.fortress.trackPhase = [-0.5, -0.5] // 倒退 0.5 格：启动印落在前端
   updateTrackMarks(marks3, st3, s, fd, tileH)
-  const frontOk = marks3.length === 2 && Math.abs(marks3[0].y - (cy + 0.5 - fr.h / 2)) < 1e-9
+  const frontOk = marks3.length === 2 && Math.abs(marks3[0].y - (cy - 3.5)) < 1e-9
   s.fortress.vy = 0
   check('v2.42：静止→移动立即落启动印（0.05 格即印，余量保留）', startOk, `n=${marks.length} acc=${st.acc[0]?.toFixed(2)}`)
   check('v2.42：接地点=运动方向后端（前进印落 y2 端 / 倒退印落 y1 端）', rearOk && frontOk,
-    `rear y=${marks2[0]?.y.toFixed(1)} exp=${(cy + 2.5 - fr.h / 2).toFixed(1)} front y=${marks3[0]?.y.toFixed(1)} exp=${(cy + 0.5 - fr.h / 2).toFixed(1)}`)
+    `rear y=${marks2[0]?.y.toFixed(1)} exp=${(cy - 1.5).toFixed(1)} front y=${marks3[0]?.y.toFixed(1)} exp=${(cy - 3.5).toFixed(1)}`)
 }
 
 // --- v2.57 地面弹坑：爆炸/落地事件首见生成、45s 生命周期、120 FIFO、实弹射程终点小坑 ---
@@ -6082,13 +6774,16 @@ console.log('== 用例 54：移动堡垒验收 ==')
   const seen = new Set<number>()
   const events: ExplosionFx[] = [
     { id: 10, x: 2, y: 3, r: 1, ttl: 0.3 },
-    { id: 11, x: 4, y: 5, r: 3, ttl: 0.6, kind: 'deathMain' },
-    { id: 12, x: 6, y: 7, r: 0.2, ttl: 0.12, kind: 'groundImpact' },
+    { id: 11, x: 4, y: 5, r: 3, ttl: 2.25, max: 2.25, kind: 'unitDeath', deathEffect: 'large' },
+    { id: 12, x: 6, y: 7, r: 0.2, ttl: 0.12, kind: 'groundImpact', projectileSize: 0.6 },
+    { id: 13, x: 8, y: 9, r: 0.35, ttl: 0.24, leavesCrater: false },
   ]
   updateCraters(marks, seen, events, 10)
   updateCraters(marks, seen, events, 10.1) // 同一事件多帧可见，不重复落坑
-  check('v2.57：爆炸首见仅生成一个坑，主爆最大、落地弹固定小坑',
-    marks.length === 3 && craterRadius(events[1]) > craterRadius(events[0]) && craterRadius(events[2]) === 0.2,
+  check('v2.57：爆炸坑维持半径规则，非爆炸落地坑直径等于弹丸显示尺寸',
+    marks.length === 3 && !marks.some(mark => mark.seed === 13)
+      && craterRadius(events[1]) > craterRadius(events[0]) && craterRadius(events[2]) === 0.3
+      && craterRadius({ r: 1, kind: undefined, projectileSize: 10 }) === 0.75,
     `n=${marks.length} r=${marks.map(m => m.r.toFixed(2))}`)
 
   const many: ExplosionFx[] = Array.from({ length: CRATER_CAP + 10 }, (_, i) => ({ id: 100 + i, x: i, y: 0, r: 1, ttl: 0.3 }))
@@ -6113,9 +6808,30 @@ console.log('== 用例 54：移动堡垒验收 ==')
   })
   s = tick(s, 0.05)
   const landing = s.explosions.find(ex => ex.kind === 'groundImpact')
-  check('v2.57：未命中实弹射程耗尽产生无伤害落地小坑事件',
-    s.projectiles.length === 0 && landing?.r === 0.2 && landing.ammoId === undefined,
+  check('v2.57：未命中实弹射程耗尽产生携带弹丸尺寸来源的无伤害落地坑事件',
+    s.projectiles.length === 0 && landing?.r === 0.2 && landing.ammoId === 'bullet_std'
+      && landing.projectileSize === 5 / BASE_CELL,
     `projectiles=${s.projectiles.length} landing=${JSON.stringify(landing)}`)
+}
+
+// --- 地图边缘命中：弹丸中心越界前，必须先结算本帧线段穿过的贴边敌人 ---
+{
+  let s = arena()
+  s.objects = []
+  const edgeEnemy = mkEnemy(s, 'walker', 0.1, 5, 100)
+  s.projectiles.push({
+    id: s.nextId++, kind: 'bullet', defId: 'mg', level: 1,
+    x: 0.35, y: 5, px: 0.35, py: 5, heading: -Math.PI / 2,
+    damage: 10, traveled: 0, maxTravel: 1000, shooter: 0, hitIds: [],
+    t: 0, flightTime: 0, sx: 0, sy: 0, tx: 0, ty: 0,
+    speed: 0, turnRate: 0, guided: false, targetId: null,
+    lockX: 0, lockY: 0, lostLock: false, prevDist: -1, weavePhase: 0,
+  })
+  s = tick(s, 0.05) // mg 51.2m/s = 0.8格/帧，弹丸中心从 x=0.35 推进到 x=-0.45
+  const after = s.enemies.find(enemy => enemy.id === edgeEnemy.id)
+  check('地图边缘：高速实弹中心越界时仍结算线段穿过的敌人',
+    after !== undefined && after.hp < edgeEnemy.hp && s.projectiles.length === 0,
+    `hp=${after?.hp}/${edgeEnemy.hp} projectiles=${s.projectiles.length}`)
 }
 
 // --- v2.44 预览大力喷射补弹种门控：仅导弹吃 ×3 爆发，实弹/榴弹预览与实战一致（无爆发） ---
@@ -6141,7 +6857,7 @@ console.log('== 用例 54：移动堡垒验收 ==')
   const spdBk = ENEMY_DEFS.walker.speed
   ENEMY_DEFS.walker.speed = 0 // 钉住，保证波及关系不随时间漂移
   const base = TURRET_DEFS.find(d => d.id === 'mg')!
-  TURRET_DEFS.push({ ...base, id: 'test-blast', accuracy: 0, pierce: { count: 0, decay: 0 }, blastRadius: 50, blastEffect: { damage: 10 } }) // 50m=2 格
+  TURRET_DEFS.push({ ...base, id: 'test-blast', accuracy: 0, pierce: { count: 0, decay: 0 }, blastRadius: legacyMeters(50), blastEffect: { damage: 10 } }) // 保持旧配置 2 格爆炸半径
   let s = arena()
   s.objects = [] // 清掉 LEVEL 默认物体：(5,8) 油桶会被子弹爆炸 9999 波及殉爆、燃烧区干扰伤害断言
   mkTurret(s, 'test-blast', 6, 13) // 中心 (6.5,13.5) 朝上直射
@@ -6186,7 +6902,7 @@ console.log('== 用例 54：移动堡垒验收 ==')
   const mg0 = TURRET_DEFS.find(d => d.id === 'mg')!
   // 测试塔模板：精度 0、免弹药（隔离资源标签语义）、可对空、零穿透、射程拉满
   const mk = (id: string, tags: TurretTag[]) =>
-    TURRET_DEFS.push({ ...mg0, id, accuracy: 0, ammoPerShot: 0, canAir: true, pierce: { count: 0, decay: 0 }, rangeMin: 0, rangeMax: 2000, tags })
+    TURRET_DEFS.push({ ...mg0, id, accuracy: 0, ammoCapacity: 100, canAir: true, pierce: { count: 0, decay: 0 }, rangeMin: 0, rangeMax: 2000, tags })
   const drop = (id: string) => TURRET_DEFS.splice(TURRET_DEFS.findIndex(d => d.id === id), 1)
   const fcX = (s: GameState) => { const r = fortressRect(s); return r.x + r.w / 2 }
 
@@ -6253,12 +6969,12 @@ console.log('== 用例 54：移动堡垒验收 ==')
   // F. resource·弹药低于 50% 禁火（硬开关；弹药恢复后解禁）
   mk('t-rammo', [{ kind: 'resource', res: 'ammo', op: 'lt', value: 50 }])
   let sF = arena(); sF.objects = []
-  mkTurret(sF, 't-rammo', 6, 13)
+  const rT = mkTurret(sF, 't-rammo', 6, 13)
   const rE = mkEnemy(sF, 'walker', 6.5, 8, 100000)
-  sF.ammo = 40 // 25% < 50%（含回复 3/s×2s=46 仍 <80）
+  rT.ammo = 40 // 炮塔独立弹药池：40% < 50%
   sF = run(sF, 2, 0.05)
   const hpLow = byId(sF.enemies, rE.id)!.hp
-  sF.ammo = 160
+  byId(sF.turrets, rT.id)!.ammo = 100
   sF = run(sF, 3, 0.05)
   check('v2.49：资源·弹药低于50%禁火——低弹药停火、补足后恢复开火',
     hpLow === 100000 && byId(sF.enemies, rE.id)!.hp < 100000,
@@ -6327,8 +7043,18 @@ console.log('== v2.58：关卡目标系统 ==')
     delete legacy.objective
     const migrated = parseLevel(JSON.stringify(legacy))
     check('旧关卡缺少 objective 时迁移为 6 波保卫', migrated.objective.type === 'defend' && migrated.objective.waves === 6)
+    const legacyDirections = defaultLevel()
+    legacyDirections.version = 17
+    const legacyStage = legacyDirections.stages[0]
+    if (legacyStage.objective.type === 'defend') {
+      delete (legacyStage.objective as { spawnRegions?: unknown }).spawnRegions
+      legacyStage.objective.spawnDirections = ['left', 'right']
+    }
+    const migratedDirections = parseLevel(JSON.stringify(legacyDirections))
+    const migratedRegions = migratedDirections.stages[0].objective.type === 'defend' ? migratedDirections.stages[0].objective.spawnRegions : []
+    check('出生区域迁移：旧左右方向转换为两个编号边缘区域', migratedRegions.length === 2 && migratedRegions[0].id === 1 && migratedRegions[1].id === 2 && migratedRegions.every(region => region.cells.length > 0))
 
-    LEVEL.objective = { type: 'defend', waves: 1 }
+    configureObjective(LEVEL, { type: 'defend', waves: 1 })
     let defend = arena()
     defend.phase = 'combat'
     defend.spawnQueue = []
@@ -6336,7 +7062,7 @@ console.log('== v2.58：关卡目标系统 ==')
     defend = tick(defend, 0.1)
     check('保卫目标：清空配置的最后一波后判胜', defend.phase === 'won')
 
-    LEVEL.objective = { type: 'survive', duration: 10 }
+    configureObjective(LEVEL, { type: 'survive', duration: 10 })
     let survive = arena()
     survive.phase = 'combat'
     survive.objectiveElapsed = 9.95
@@ -6356,20 +7082,171 @@ console.log('== v2.58：关卡目标系统 ==')
   }
 }
 
+console.log('== 关卡起点统一出生规则 ==')
+{
+  const savedLevel = structuredClone(LEVEL)
+  try {
+    LEVEL.startZone = { x: 4, y: 5, w: 10, h: 12 }
+    configureObjective(LEVEL, { type: 'defend', waves: 1 })
+    const state = initialState()
+    const rect = fortressRect(state)
+    const centerX = rect.x + rect.w / 2
+    const centerY = rect.y + rect.h / 2
+    check('防守任务：玩家战车也在关卡起点区域中心出生',
+      Math.abs(centerX - (LEVEL.startZone.x + LEVEL.startZone.w / 2)) < 1e-9
+      && Math.abs(centerY - (LEVEL.startZone.y + LEVEL.startZone.h / 2)) < 1e-9,
+      `center=(${centerX.toFixed(2)},${centerY.toFixed(2)}) start=(${LEVEL.startZone.x + LEVEL.startZone.w / 2},${LEVEL.startZone.y + LEVEL.startZone.h / 2})`)
+
+    const assemblyState = structuredClone(state)
+    assemblyState.phase = 'combat'
+    assemblyState.gold = 9999
+    assemblyState.modules = []
+    check('起点装配：交战阶段以载具几何中心判断仍位于起点区域', fortressInStartZone(assemblyState) && fortressAssemblyAllowed(assemblyState))
+    const shieldDef = MODULE_DEFS.find(module => module.id === 'shield_generator')!
+    let moduleSpot: { x: number; y: number; rot: 0 | 1 } | undefined
+    for (const rot of [0, 1] as const) for (let y = 0; y < fortressDef(assemblyState).interior.rows; y++) for (let x = 0; x < fortressDef(assemblyState).interior.cols; x++) {
+      if (!moduleSpot && canPlaceModule(assemblyState, shieldDef.id, x, y, rot).ok) moduleSpot = { x, y, rot }
+    }
+    const withModule = moduleSpot ? buildModule(assemblyState, shieldDef.id, moduleSpot.x, moduleSpot.y, moduleSpot.rot) : assemblyState
+    check('起点装配：交战中可在起点区域配置模块', !!moduleSpot && withModule.modules.some(module => module.defId === shieldDef.id))
+
+    const turretDef = TURRET_DEFS.find(turret => turret.id === 'mg')!
+    const hardpoint = fortressDef(assemblyState).hardpoints.find(point => point.size === turretDef.mount
+      && (!point.types || point.types.includes(turretDef.type))
+      && !assemblyState.turrets.some(turret => turret.hardpointId === point.id))
+    const withTurret = hardpoint ? mountTurret(assemblyState, turretDef.id, hardpoint.id) : assemblyState
+    check('起点装配：交战中可在起点区域配置炮塔', !!hardpoint && withTurret.turrets.length === assemblyState.turrets.length + 1)
+
+    const outside = structuredClone(assemblyState)
+    outside.fortress.x = LEVEL.startZone.x + LEVEL.startZone.w + 2
+    outside.fortress.y = LEVEL.startZone.y
+    check('起点装配：驶离起点区域后立即关闭普通装配权限', !fortressInStartZone(outside) && !fortressAssemblyAllowed(outside))
+    const rejectedModule = moduleSpot ? buildModule(outside, shieldDef.id, moduleSpot.x, moduleSpot.y, moduleSpot.rot) : outside
+    check('起点装配：区域外引擎入口同样拒绝配置', rejectedModule.modules.length === outside.modules.length)
+
+    const finished = structuredClone(assemblyState)
+    finished.phase = 'won'
+    check('起点装配：关卡结束后即使仍在起点也不可继续配置', fortressInStartZone(finished) && !fortressAssemblyAllowed(finished))
+  } finally {
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== 堡垒防御系统 ==')
+{
+  const savedLevel = structuredClone(LEVEL)
+  try {
+    const legacyLevel = defaultLevel()
+    delete (legacyLevel.stages[0].waves[0] as Partial<typeof legacyLevel.stages[0].waves[0]>).enemyDamageMultiplier
+    const normalizedLegacy = parseLevel(JSON.stringify(legacyLevel))
+    const configuredLevel = defaultLevel()
+    configuredLevel.stages[0].waves[0].enemyDamageMultiplier = 1.5
+    const normalizedConfigured = parseLevel(JSON.stringify(configuredLevel))
+    check('波次敌人强度：旧关卡缺省为 1，配置 1.5 后保持 1.5',
+      normalizedLegacy.stages[0].waves[0].enemyDamageMultiplier === 1
+      && normalizedConfigured.stages[0].waves[0].enemyDamageMultiplier === 1.5)
+    const originalState = initialState()
+    const originalDefId = originalState.fortressDefId
+    const defenseDef = playableVehicleDefs().find(def => def.id !== originalDefId) ?? playableVehicleDefs()[0]
+    const objective = {
+      type: 'fortressDefense' as const, waves: 1, waveWait: true, restTime: 5, overlapTime: 2,
+      spawnRegions: [
+        { id: 1, cells: ['1,1'] }, { id: 2, cells: ['3,1'] },
+        { id: 3, cells: ['5,1'] }, { id: 4, cells: ['7,1'] },
+      ],
+      fortressDefId: defenseDef.id, fortressPoint: { x: 9.5, y: 10.5 }, returnPoint: { x: 6.5, y: 7.5 },
+    }
+    LEVEL.mode = 'defend'
+    configureObjective(LEVEL, { ...objective, spawnRegions: structuredClone(objective.spawnRegions) })
+    const playerBaseUnit = unitLibrary().find(unit => !!unit.vehiclePlatform || unit.legacy?.registry === 'fortress')!
+    const playerBasePlatform = playerBaseUnit.vehiclePlatform ?? (playerBaseUnit.legacy?.registry === 'fortress' ? playerBaseUnit.legacy.def : undefined)!
+    const playerBaseUnitId = playerBaseUnit.id
+    LEVEL.initialUnits.push({
+      id: 987654, unitDefId: playerBaseUnitId, faction: 'player', controller: 'ai',
+      x: 3.5, y: 3.5, rotation: 0, lockMovement: true, lockRotation: true, behavior: 'static',
+    })
+    const stage = LEVEL.stages[0]
+    const enemyUnit = unitLibrary().find(unit => unit.type === 'vehicle') ?? unitLibrary()[0]
+    stage.waves[0].enemyDamageMultiplier = 1.5
+    stage.waves[0].entries = [
+      { id: 'fortress-region-specified', unitDefId: enemyUnit.id, count: 1, delay: 0, interval: 0, spawnRegionId: 3 },
+      { id: 'fortress-region-random', unitDefId: enemyUnit.id, count: 1, delay: 0, interval: 0 },
+    ]
+    let state = initialState()
+    state.enemies = []
+    state.ambushQueue = []
+    const center = fortressRect(state)
+    check('堡垒防御进入：玩家载具完整快照被保存并切换关卡指定堡垒',
+      state.fortressDefenseSnapshot?.fortressDefId === originalDefId && state.fortressDefId === defenseDef.id)
+    check('堡垒防御位置：堡垒几何中心使用任务阶段坐标',
+      Math.abs(center.x + center.w / 2 - 9.5) < 1e-6 && Math.abs(center.y + center.h / 2 - 10.5) < 1e-6)
+    state.moveDir = { x: 0, y: -1 }; state.moveMag = 1
+    state = tick(state, 0.25)
+    const locked = fortressRect(state)
+    check('堡垒防御机动：即使收到移动输入也保持原位', Math.abs(locked.x + locked.w / 2 - 9.5) < 1e-6 && Math.abs(locked.y + locked.h / 2 - 10.5) < 1e-6)
+    state.gold = 999
+    const groundPlacementRejected = placeTurret(state, 'mg', 3, 3)
+    const playerBase = state.allies.find(ally => ally.placementId === 987654)!
+    const baseLoadout = playerUnitCombatLoadout(state, playerBase.id)!
+    const editableHardpoint = playerBasePlatform.hardpoints.find(point => !point.lockedTurret)!
+    const compatibleTurret = TURRET_DEFS.find(turret => turret.mount === editableHardpoint.size && (!editableHardpoint.types || editableHardpoint.types.includes(turret.type)))!
+    const emptied = { ...baseLoadout, turrets: baseLoadout.turrets.filter(item => item.hardpointId !== editableHardpoint.id) }
+    state = applyPlayerUnitCombatLoadout(state, playerBase.id, emptied)
+    const installPreset = { ...emptied, turrets: [...emptied.turrets, { hardpointId: editableHardpoint.id, turretDefId: compatibleTurret.id }] }
+    const installCost = playerUnitLoadoutChangeCost(state, playerBase.id, installPreset)
+    const beforeInstallGold = state.gold
+    state = applyPlayerUnitCombatLoadout(state, playerBase.id, installPreset)
+    const fixedTurret = state.allies.find(ally => ally.id === playerBase.id)?.vehicle?.turrets?.find(turret => turret.hardpointId === editableHardpoint.id)
+    check('堡垒固定火力点：地面槽位建造关闭，锁定车体的玩家单位炮位在准备阶段消耗资源整备',
+      groundPlacementRejected === state || groundPlacementRejected.turrets.length === state.turrets.length
+      ? !!fixedTurret && installCost !== null && state.gold === Math.max(0, beforeInstallGold - installCost)
+      : false)
+    const fixedTurretId = fixedTurret?.id
+    state = startWave(state, 0)
+    check('编号出生区域：波次队列保留指定区域，随机条目不锁定编号', state.spawnQueue[0]?.spawnRegionId === 3 && state.spawnQueue[1]?.spawnRegionId === undefined)
+    check('波次敌人强度：整波队列携带 1.5 倍攻击伤害系数', state.spawnQueue.every(item => item.damageMultiplier === 1.5))
+    const specifiedSpawn = defenseWaveSpawnPoint(state.objective, 3, state.nextId)
+    check('编号出生区域：指定区域从对应区域格中心生成', specifiedSpawn.regionId === 3 && specifiedSpawn.x === 5.5 && specifiedSpawn.y === 1.5)
+    const randomSpawn = defenseWaveSpawnPoint(state.objective, undefined, state.nextId)
+    check('编号出生区域：随机模式只会从当前阶段的非空区域生成', objective.spawnRegions.some(region => region.id === randomSpawn.regionId && region.cells.some(key => { const [x, y] = key.split(',').map(Number); return randomSpawn.x === x + 0.5 && randomSpawn.y === y + 0.5 })))
+    state.spawnTimer = 0
+    state = tick(state, 0.01)
+    check('波次敌人强度：生成后的敌人实例保留 1.5 倍系数', state.enemies.some(enemy => enemy.damageMultiplier === 1.5))
+    state.spawnQueue = []; state.enemies = []; state.eventQueue = []; state.ambushQueue = []
+    state = tick(state, 0.1)
+    const restored = fortressRect(state)
+    check('堡垒防御退出：恢复原载具且朝向重置，并在指定返回点出现',
+      state.phase === 'won' && state.fortressDefId === originalDefId && !state.fortressDefenseSnapshot && state.fortress.heading === 0
+      && Math.abs(restored.x + restored.w / 2 - 6.5) < 1e-6 && Math.abs(restored.y + restored.h / 2 - 7.5) < 1e-6)
+    const defenseUnitId = defenseDef.unitId ?? fortressUnitId(defenseDef.id)
+    check('堡垒防御退出：存活堡垒转为友方单位，玩家单位炮位永久留场',
+      state.allies.some(ally => ally.unitDefId === defenseUnitId)
+      && state.allies.some(ally => ally.placementId === 987654 && ally.vehicle?.turrets?.some(turret => turret.id === fixedTurretId)),
+      JSON.stringify({ defenseUnitId, allies: state.allies.map(ally => [ally.unitDefId, ally.placementId, ally.vehicle?.turrets?.map(turret => turret.id)]) }))
+  } finally {
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
 console.log('== v2.59：推进模式骨架 ==')
 {
   const savedLevel = structuredClone(LEVEL)
   try {
     LEVEL.mode = 'advance'
-    LEVEL.objective = { type: 'reach' }
     LEVEL.startZone = { x: 12, y: LEVEL.rows - 6, w: 8, h: 5 }
     LEVEL.finishZone = { x: 4, y: 0, w: LEVEL.cols - 8, h: 6 }
+    const stageFinish = { x: 2, y: 8, w: 3, h: 2 }
+    configureObjective(LEVEL, { type: 'reach', finishZone: stageFinish })
 
     const opened = initialState()
     const openedCenter = fortressRect(opened)
     const ocx = openedCenter.x + openedCenter.w / 2
     const ocy = openedCenter.y + openedCenter.h / 2
-    check('推进模式：开局直接交战且首波已入队', opened.phase === 'combat' && opened.prepLeft === 0 && opened.spawnQueue.length > 0)
+    check('推进模式：开局直接交战且不暗中生成防守波次', opened.phase === 'combat' && opened.prepLeft === 0 && opened.spawnQueue.length === 0)
     check('推进模式：堡垒中心出生在玩家起点区域',
       ocx >= LEVEL.startZone.x && ocx <= LEVEL.startZone.x + LEVEL.startZone.w
       && ocy >= LEVEL.startZone.y && ocy <= LEVEL.startZone.y + LEVEL.startZone.h,
@@ -6378,16 +7255,25 @@ console.log('== v2.59：推进模式骨架 ==')
     let reached = structuredClone(opened)
     reached.spawnQueue = [{ kind: 'walker', delay: 10 }]
     reached.spawnTimer = 10
-    reached.fortress.x = LEVEL.finishZone.x + LEVEL.finishZone.w / 2 - fortressRect(reached).w / 2
-    reached.fortress.y = 0
-    check('reach 目标：堡垒中心进入终点区域可被检测', fortressReachedFinish(reached))
+    reached.fortress.x = stageFinish.x + stageFinish.w / 2 - fortressRect(reached).w / 2
+    reached.fortress.y = stageFinish.y + stageFinish.h / 2 - fortressRect(reached).h / 2
+    check('reach 目标：每个任务阶段使用自己的终点而非关卡全局终点', fortressReachedFinish(reached))
     reached = tick(reached, 0.1)
     check('reach 目标：进入终点后判胜', reached.phase === 'won')
 
+    const disconnected = structuredClone(opened)
+    disconnected.objective = { type: 'reach', finishCells: ['2,8', '3,8', '10,12'] }
+    disconnected.fortress.x = 6.5 - fortressRect(disconnected).w / 2
+    disconnected.fortress.y = 8.5 - fortressRect(disconnected).h / 2
+    check('reach 不规则区域：两块终点之间的空白不会误判完成', !fortressReachedFinish(disconnected))
+    disconnected.fortress.x = 10.5 - fortressRect(disconnected).w / 2
+    disconnected.fortress.y = 12.5 - fortressRect(disconnected).h / 2
+    check('reach 不相连区域：进入任一独立终点块都可完成', fortressReachedFinish(disconnected))
+
     let destroyedAtFinish = structuredClone(opened)
     destroyedAtFinish.spawnQueue = [{ kind: 'walker', delay: 10 }]
-    destroyedAtFinish.fortress.x = LEVEL.finishZone.x + LEVEL.finishZone.w / 2 - fortressRect(destroyedAtFinish).w / 2
-    destroyedAtFinish.fortress.y = 0
+    destroyedAtFinish.fortress.x = stageFinish.x + stageFinish.w / 2 - fortressRect(destroyedAtFinish).w / 2
+    destroyedAtFinish.fortress.y = stageFinish.y + stageFinish.h / 2 - fortressRect(destroyedAtFinish).h / 2
     destroyedAtFinish.fortress.hp = 0
     destroyedAtFinish = tick(destroyedAtFinish, 0.1)
     check('reach 目标：同 tick 堡垒被毁时毁灭序列优先', destroyedAtFinish.phase !== 'won' && destroyedAtFinish.fortress.dyingT >= 0)
@@ -6399,14 +7285,23 @@ console.log('== v2.59：推进模式骨架 ==')
     nextWave.enemies = []
     const oldWave = nextWave.wave
     nextWave = tick(nextWave, 0.1)
-    check('推进模式：清场后无整备停顿并自动接续下一波',
-      nextWave.phase === 'combat' && nextWave.wave === oldWave + 1 && nextWave.spawnQueue.length > 0)
+    check('推进模式：清场后保持当前阶段，等待关卡事件或抵达终点',
+      nextWave.phase === 'combat' && nextWave.wave === oldWave && nextWave.spawnQueue.length === 0)
 
-    check('边缘带相机：安全带内不动、越界才卷动并钳制世界边界',
-      edgeBandView(0, 10, 20, 100) === 0
-      && edgeBandView(0, 18, 20, 100) > 0
-      && edgeBandView(50, 60, 20, 100) === 50
-      && edgeBandView(70, 99, 20, 100) === 80)
+    const cameraCell = 10
+    const cameraCanvas = 200
+    const topLeftCamera = unboundedCenteredView(1, 1, cameraCell, cameraCanvas, cameraCanvas)
+    const bottomRightCamera = unboundedCenteredView(LEVEL.cols - 1, LEVEL.rows - 1, cameraCell, cameraCanvas, cameraCanvas)
+    check('玩家中心相机：场景边缘仍严格居中并允许视口越界',
+      topLeftCamera.x === -9
+      && topLeftCamera.y === -9
+      && bottomRightCamera.x === LEVEL.cols - 11
+      && bottomRightCamera.y === LEVEL.rows - 11)
+    check('编辑器相机：仍钳制在关卡边界内',
+      clampViewX(-10, cameraCell, cameraCanvas) === 0
+      && clampViewY(-10, cameraCell, cameraCanvas) === 0
+      && clampViewX(LEVEL.cols, cameraCell, cameraCanvas) === LEVEL.cols - 20
+      && clampViewY(LEVEL.rows, cameraCell, cameraCanvas) === LEVEL.rows - 20)
   } finally {
     for (const k of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[k]
     Object.assign(LEVEL, savedLevel)
@@ -6425,6 +7320,7 @@ console.log('== v2.60：区域伏击触发器 ==')
       x: 2, y: 2, w: 8, h: 6,
       activationLimit: 2, cooldown: 1, delay: 0.2, interval: 0.3,
       enemies: { walker: 2, runner: 0, rusher: 0, brute: 0, flyer: 0 },
+      units: { 'unit:uav': 2 },
     }]
 
     const setCenter = (s: GameState, x: number, y: number) => {
@@ -6484,7 +7380,7 @@ console.log('== v2.60：区域伏击触发器 ==')
     check('区域伏击：待刷伏击队列会阻止波次提前结束', pending.phase === 'combat' && pending.ambushQueue.length === 1)
 
     const migrated = parseLevel(JSON.stringify({ version: 8 }))
-    check('区域伏击：v8 旧关卡迁移到 v10 并补空触发器/交互物', migrated.version === 10 && migrated.triggers.length === 0 && migrated.interactables.length === 0)
+    check('区域伏击：v8 旧关卡迁移到 v18 并补空分层/统一事件', migrated.version === 18 && migrated.triggers.length === 0 && migrated.interactables.length === 0 && migrated.events.length === 0 && migrated.initialUnits.length === 0)
   } finally {
     for (const k of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[k]
     Object.assign(LEVEL, savedLevel)
@@ -6498,7 +7394,7 @@ console.log('== v2.62：多关卡库 ==')
   try {
     const legacy = defaultLevel(36, 24)
     legacy.mode = 'advance'
-    legacy.objective = { type: 'reach' }
+    configureObjective(legacy as typeof LEVEL, { type: 'reach' })
     const migrated = parseLevelLibrary(null, JSON.stringify(legacy))
     check('多关卡库：旧单关卡存档迁移为关卡 01 且内容保留',
       migrated.version === 1 && migrated.activeId === 'level-1' && migrated.levels.length === 1
@@ -6506,7 +7402,7 @@ console.log('== v2.62：多关卡库 ==')
 
     const a = defaultLevel(40, 30)
     const b = defaultLevel(48, 32)
-    b.mode = 'advance'; b.objective = { type: 'reach' }
+    b.mode = 'advance'; configureObjective(b as typeof LEVEL, { type: 'reach' })
     const library = defaultLevelLibrary(a)
     library.levels.push({ id: 'level-2', name: '推进测试', level: b })
     library.activeId = 'level-2'
@@ -6578,23 +7474,159 @@ console.log('== v2.64：通用事件 / 交互物 / Boss / 关卡链 ==')
     s = tick(s, 0.3)
     check('通用事件：等待结束继续执行奖励', s.gold === waitGold + 20 && s.eventQueue.length === 0)
 
+    check('次要目标：新一局开始时两个完成标记都未达成', !s.secondaryObjectivesCompleted[0] && !s.secondaryObjectivesCompleted[1])
+    s.eventQueue.push({ id: s.nextId++, sourceId: 0, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [
+      { type: 'taskResult', target: 'secondary1', state: 'complete' },
+      { type: 'taskResult', target: 'secondary2', state: 'complete' },
+    ], index: 0, waitLeft: 0 })
+    s = tick(s, 0.1)
+    check('次要目标：事件动作分别完成次要目标 1/2', s.secondaryObjectivesCompleted[0] && s.secondaryObjectivesCompleted[1])
+    const normalizedSecondaryActions = normalizeEventActions([{ type: 'completeSecondary1' }, { type: 'completeSecondary2' }])
+    const normalizedAudioActions = normalizeEventActions([{ type: 'sound', presetId: 'sound-alert' }, { type: 'music', assetId: 'bgm-boss', mode: 'override' }, { type: 'music', assetId: '', mode: 'restore' }])
+    check('音频动作：声音预设、临时 BGM 与恢复关卡 BGM 可随统一事件协议保存', normalizedAudioActions.length === 3
+      && normalizedAudioActions[0]?.type === 'sound' && normalizedAudioActions[0].presetId === 'sound-alert'
+      && normalizedAudioActions[1]?.type === 'music' && normalizedAudioActions[1].mode === 'override'
+      && normalizedAudioActions[2]?.type === 'music' && normalizedAudioActions[2].mode === 'restore')
+    check('次要目标：旧完成动作迁移到统一任务结果指令', normalizedSecondaryActions[0]?.type === 'taskResult' && normalizedSecondaryActions[0].target === 'secondary1' && normalizedSecondaryActions[1]?.type === 'taskResult' && normalizedSecondaryActions[1].target === 'secondary2')
+    s.globalVariables = { 'global:rescued': 1 }
+    s.eventQueue.push({ id: s.nextId++, sourceId: 0, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [
+      { type: 'globalVariable', operation: 'set', variableId: 'global:rescued', value: 4 },
+      { type: 'globalVariable', operation: 'add', variableId: 'global:rescued', value: 3 },
+    ], index: 0, waitLeft: 0 })
+    s = tick(s, 0.1)
+    check('全局变量：设置与增减动作写入独立运行时值', s.globalVariables['global:rescued'] === 7)
+    const normalizedGlobalActions = normalizeEventActions([{ type: 'setGlobalVariable', variableId: 'global:rescued', value: true }, { type: 'addGlobalVariable', variableId: 'global:count', value: 2 }])
+    check('全局变量：旧设置/增减动作迁移到统一指令', normalizedGlobalActions[0]?.type === 'globalVariable' && normalizedGlobalActions[0].operation === 'set' && normalizedGlobalActions[1]?.type === 'globalVariable' && normalizedGlobalActions[1].operation === 'add')
+
+    s.gold = 5; s.ammo = 3; s.energy = 2
+    const suppliedAmmoTurret = mkTurret(s, 'mg', 4, 20); suppliedAmmoTurret.ammo = 5
+    const suppliedEnergyTurret = mkTurret(s, 'beam', 5, 20); suppliedEnergyTurret.energy = 4
+    s.eventQueue.push({ id: s.nextId++, sourceId: 0, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [{ type: 'supply', gold: -50, ammo: -20, energy: -10 }], index: 0, waitLeft: 0 })
+    s = tick(s, 0.1)
+    check('增减补给：负数扣除资源与每座玩家炮塔储量且最低为 0',
+      s.gold === 0 && s.ammo === 0 && s.energy === 0
+      && byId(s.turrets, suppliedAmmoTurret.id)!.ammo === 0 && byId(s.turrets, suppliedEnergyTurret.id)!.energy === 0)
+    const exchangeAmmoDef = TURRET_DEFS.find(def => def.id === 'mg')!
+    const originalExchangeRate = exchangeAmmoDef.ammoExchangeRate
+    exchangeAmmoDef.ammoExchangeRate = 0.5
+    s.phase = 'prep'
+    s.eventQueue.push({ id: s.nextId++, sourceId: 0, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [{ type: 'supply', gold: 0, ammo: 2, energy: 0 }], index: 0, waitLeft: 0 })
+    s = tick(s, 0.1)
+    check('弹药汇率：增减补给输入2单位、汇率0.5时只恢复1发',
+      byId(s.turrets, suppliedAmmoTurret.id)!.ammo === 1)
+    exchangeAmmoDef.ammoExchangeRate = originalExchangeRate
+
+    const normalizedSupplyZone = normalizeEventActions([{ type: 'supplyZone', ammoEnabled: true, ammoPerSec: 12, energyEnabled: false, energyPerSec: 9999 }])
+    check('功能区域协议：旧补给区自动迁移，并分别钳制各项效率',
+      normalizedSupplyZone[0]?.type === 'functionalArea' && normalizedSupplyZone[0].ammoEnabled && normalizedSupplyZone[0].ammoPerSec === 12
+      && !normalizedSupplyZone[0].energyEnabled && normalizedSupplyZone[0].energyPerSec === 1000 && !normalizedSupplyZone[0].repairEnabled && !normalizedSupplyZone[0].assemblyEnabled)
+    LEVEL.events = [{
+      id: 204, name: '炮塔补给区', category: 'flow', enabled: true, activationLimit: 0, cooldown: 0,
+      conditions: { mode: 'all', conditions: [] }, trigger: { type: 'regionStay', cells: ['4,4'] },
+      actions: [{ type: 'functionalArea', ammoEnabled: true, ammoPerSec: 10, energyEnabled: true, energyPerSec: 20, repairEnabled: true, structurePerSec: 30, armorPerSec: 40, assemblyEnabled: true }],
+    }]
+    let supplyState = initialState(); supplyState.phase = 'prep'; supplyState.enemies = []; supplyState.allies = []; supplyState.spawnQueue = [{ kind: 'walker', delay: 100 }]; supplyState.spawnTimer = 100
+    const zoneAmmoTurret = mkTurret(supplyState, 'mg', 4, 20); zoneAmmoTurret.ammo = 0
+    const zoneEnergyTurret = mkTurret(supplyState, 'beam', 5, 20); zoneEnergyTurret.energy = 0
+    exchangeAmmoDef.ammoExchangeRate = 0.5
+    setCenter(supplyState, 4.5, 4.5)
+    supplyState = tick(supplyState, 0.1)
+    const ammoBeforeZoneTick = byId(supplyState.turrets, zoneAmmoTurret.id)!.ammo ?? 0
+    const energyBeforeZoneTick = byId(supplyState.turrets, zoneEnergyTurret.id)!.energy ?? 0
+    const hpBeforeZoneTick = supplyState.fortress.hp = supplyState.fortress.maxHp - 100
+    supplyState.fortress.armor.front = Math.max(0, supplyState.fortress.maxArmor.front - 100)
+    const armorBeforeZoneTick = supplyState.fortress.armor.front
+    supplyState = tick(supplyState, 1)
+    check('功能区域：停留区域内补充炮塔资源并修理结构/装甲',
+      supplyState.functionalAreas.length === 1
+      && Math.abs((byId(supplyState.turrets, zoneAmmoTurret.id)!.ammo ?? 0) - ammoBeforeZoneTick - 5) < 1e-6
+      && Math.abs((byId(supplyState.turrets, zoneEnergyTurret.id)!.energy ?? 0) - energyBeforeZoneTick - 20) < 1e-6
+      && Math.abs(supplyState.fortress.hp - hpBeforeZoneTick - 30) < 1e-6
+      && Math.abs(supplyState.fortress.armor.front - armorBeforeZoneTick - Math.min(40, supplyState.fortress.maxArmor.front - armorBeforeZoneTick)) < 1e-6,
+      JSON.stringify({ zones: supplyState.functionalAreas, ammoBeforeZoneTick, ammo: byId(supplyState.turrets, zoneAmmoTurret.id)!.ammo, energyBeforeZoneTick, energy: byId(supplyState.turrets, zoneEnergyTurret.id)!.energy }))
+    const activeSupply = fortressSupplyStatus(supplyState)
+    check('功能区域反馈：可汇总补弹、充能、修理与整备',
+      activeSupply.inside && activeSupply.ammo && activeSupply.energy && activeSupply.repair && activeSupply.assembly
+      && activeSupply.ammoPerSec === 10 && activeSupply.energyPerSec === 20 && activeSupply.structurePerSec === 30 && activeSupply.armorPerSec === 40)
+    check('服务区域显示：可从停留事件直接取得不规则功能区域',
+      levelServiceZones(supplyState).some(zone => zone.service === 'functional' && zone.cells.includes('4,4') && zone.ammoEnabled && zone.energyEnabled && zone.repairEnabled && zone.assemblyEnabled))
+    setCenter(supplyState, 8.5, 8.5)
+    const ammoOutside = byId(supplyState.turrets, zoneAmmoTurret.id)!.ammo ?? 0
+    const energyOutside = byId(supplyState.turrets, zoneEnergyTurret.id)!.energy ?? 0
+    supplyState = tick(supplyState, 1)
+    check('功能区域：离开区域后立即停止补充',
+      byId(supplyState.turrets, zoneAmmoTurret.id)!.ammo === ammoOutside
+      && byId(supplyState.turrets, zoneEnergyTurret.id)!.energy === energyOutside,
+      JSON.stringify({ ammoOutside, ammo: byId(supplyState.turrets, zoneAmmoTurret.id)!.ammo, energyOutside, energy: byId(supplyState.turrets, zoneEnergyTurret.id)!.energy }))
+    check('功能区域反馈：离开区域后立即结束工作状态', !fortressSupplyStatus(supplyState).inside)
+    exchangeAmmoDef.ammoExchangeRate = originalExchangeRate
+
+    LEVEL.events = [{
+      id: 205, name: '战车整备区', category: 'flow', enabled: true, activationLimit: 0, cooldown: 0,
+      conditions: { mode: 'all', conditions: [] }, trigger: { type: 'regionStay', cells: ['6,6', '7,6', '6,7'] },
+      actions: [{ type: 'assembly' }],
+    }]
+    const assemblyZoneState = initialState(); assemblyZoneState.phase = 'combat'; setCenter(assemblyZoneState, 6.5, 6.5)
+    check('整备区：进入不规则停留区域后开放整备权限', fortressInAssemblyZone(assemblyZoneState) && fortressAssemblyAllowed(assemblyZoneState))
+    setCenter(assemblyZoneState, LEVEL.startZone.x + LEVEL.startZone.w / 2, LEVEL.startZone.y + LEVEL.startZone.h / 2)
+    check('整备区：关卡已配置整备区时不再把起点视为整备区', !fortressInAssemblyZone(assemblyZoneState) && !fortressAssemblyAllowed(assemblyZoneState))
+
+    const stateTestObjects = structuredClone(LEVEL.objects)
+    const stateObjectId = 9100
+    LEVEL.objects = [{ id: stateObjectId, kind: 'rock', defId: 'object:rock', x: 30, y: 30, w: 1, h: 1, hp: -1, blockMove: false, blockProjectile: false, height: 0, state: 'default' }]
     LEVEL.triggers = []
+    LEVEL.interactables = []
+    LEVEL.events = [
+      { id: 201, name: '写入物体状态', category: 'flow', enabled: true, activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] }, trigger: { type: 'missionStart' }, actions: [{ type: 'setObjectState', objectId: stateObjectId, state: 'powered' }] },
+      { id: 202, name: '读取物体状态', category: 'flow', enabled: true, activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [{ kind: 'objectState', objectId: stateObjectId, operator: 'eq', state: 'powered' }] }, trigger: { type: 'automatic' }, actions: [{ type: 'reward', gold: 17 }] },
+    ]
+    s = initialState(); s.phase = 'combat'; s.spawnQueue = [{ kind: 'walker', delay: 100 }]; s.spawnTimer = 100
+    const stateGold = s.gold
+    for (let i = 0; i < 4; i++) s = tick(s, 0.1)
+    check('物体状态：设置动作与触发条件读写同一实例状态', s.objectStates[stateObjectId] === 'powered' && s.gold === stateGold + 17)
+
+    const stateWorldTypes = snapshotWorldTypeLibrary()
+    const stateWallDef = { ...newObjectType(), id: 'object:state-wall', name: '状态围墙', asset: 'builtin:ground/mid', states: ['default', 'open'], blockMove: true, blockProjectile: true }
+    saveObjectType(stateWallDef)
+    LEVEL.objects = [
+      { id: 9201, kind: 'rock', defId: stateWallDef.id, x: 30, y: 30, w: 1, h: 1, hp: -1, blockMove: true, blockProjectile: true, height: 1, renderLayer: 3, state: 'default' },
+      { id: 9202, kind: 'rock', defId: stateWallDef.id, x: 31, y: 30, w: 1, h: 1, hp: -1, blockMove: true, blockProjectile: true, height: 1, renderLayer: 3, state: 'default' },
+      { id: 9203, kind: 'rock', defId: stateWallDef.id, x: 32, y: 30, w: 1, h: 1, hp: -1, blockMove: true, blockProjectile: true, height: 1, renderLayer: 3, state: 'default' },
+      { id: 9204, kind: 'rock', defId: stateWallDef.id, x: 35, y: 30, w: 1, h: 1, hp: -1, blockMove: true, blockProjectile: true, height: 1, renderLayer: 3, state: 'default' },
+    ]
+    LEVEL.events = [{ id: 203, name: '打开连续围墙', category: 'flow', enabled: true, activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] }, trigger: { type: 'missionStart' }, actions: [{ type: 'setObjectState', objectId: 9202, state: 'open' }] }]
+    s = initialState(); s.phase = 'combat'; s.spawnQueue = [{ kind: 'walker', delay: 100 }]; s.spawnTimer = 100
+    for (let i = 0; i < 3; i++) s = tick(s, 0.1)
+    check('物体状态：Autotile 连通组选择任意一格会同步整组', [9201, 9202, 9203].every(id => s.objectStates[id] === 'open') && s.objectStates[9204] === 'default')
+    check('物体状态：连通组打开时统一解除阻挡，非连通同类不受影响', [9201, 9202, 9203].every(id => { const object = s.objects.find(item => item.id === id); return object && !object.blockMove && !object.blockProjectile }) && !!s.objects.find(item => item.id === 9204)?.blockMove)
+    restoreWorldTypeLibrary(stateWorldTypes)
+    LEVEL.objects = stateTestObjects
+
+    LEVEL.triggers = []
+    LEVEL.events = []
     LEVEL.interactables = [
       { id: 7, name: '测试补给', kind: 'supply', enabled: true, once: true, x: 3, y: 3, w: 3, h: 3, actions: [
         { type: 'reward', gold: 30 },
-        { type: 'objective', objective: { type: 'survive', duration: 30 } },
-        { type: 'toggle', interactableId: 8, enabled: false },
+        { type: 'levelVariable', operation: 'set', variableId: 'var:interacted', value: 1 },
       ] },
       { id: 8, name: '关闭目标', kind: 'target', enabled: true, once: false, x: 8, y: 8, w: 2, h: 2, actions: [] },
     ]
     s = initialState(); s.phase = 'combat'; s.spawnQueue = [{ kind: 'walker', delay: 100 }]; s.spawnTimer = 100; setCenter(s, 20, 20); s = tick(s, 0.1); setCenter(s, 4, 4); const itemGold = s.gold; s = tick(s, 0.1); s = tick(s, 0.1)
     check('场景交互物：进入激活、仅一次并执行动作', s.gold === itemGold + 30 && s.interactableStates.find(x => x.id === 7)?.activations === 1)
-    check('通用事件：目标动作即时替换运行时任务', s.objective.type === 'survive' && s.objective.duration === 30)
-    check('通用事件：开关动作可禁用指定交互物', s.interactableStates.find(x => x.id === 8)?.enabled === false)
+    check('通用事件：统一关卡变量指令可写入数值', s.levelVariables['var:interacted'] === 1)
 
-    LEVEL.interactables = [{ id: 9, name: '撤离点', kind: 'checkpoint', enabled: true, once: true, x: 3, y: 3, w: 3, h: 3, actions: [{ type: 'complete' }] }]
+    const jumpStage = defaultStage({ type: 'survive', duration: 30 }); jumpStage.id = 'stage-jump'; jumpStage.name = '跳转测试阶段'
+    LEVEL.stages = [LEVEL.stages[0], jumpStage]
+    LEVEL.interactables = [{ id: 9, name: '阶段门', kind: 'checkpoint', enabled: true, once: true, x: 3, y: 3, w: 3, h: 3, actions: [{ type: 'stageJump', stageId: jumpStage.id }] }]
     s = initialState(); s.phase = 'combat'; s.spawnQueue = [{ kind: 'walker', delay: 100 }]; s.spawnTimer = 100; setCenter(s, 20, 20); s = tick(s, 0.1); setCenter(s, 4, 4); s = tick(s, 0.1)
-    check('通用事件：完成动作可立即结束当前关卡', s.phase === 'won')
+    check('任务阶段跳转：切换指定阶段并重新初始化目标计时', s.activeStageId === jumpStage.id && s.objective.type === 'survive' && s.objectiveElapsed === 0)
+    s.eventQueue.push({ id: s.nextId++, sourceId: 0, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [{ type: 'taskResult', target: 'primary', state: 'complete' }], index: 0, waitLeft: 0 })
+    s = tick(s, 0.1)
+    check('任务结果：主要目标完成会立即判定整关胜利并固化主要目标', s.phase === 'won' && s.levelVariables['builtin:primaryObjectiveCompleted'] === true)
+    let failed = initialState(); failed.phase = 'combat'; failed.spawnQueue = [{ kind: 'walker', delay: 100 }]; failed.spawnTimer = 100
+    failed.eventQueue.push({ id: failed.nextId++, sourceId: 0, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [{ type: 'taskResult', target: 'primary', state: 'failed' }], index: 0, waitLeft: 0 })
+    failed = tick(failed, 0.1)
+    check('任务结果：主要目标失败会立即判定整关失败', failed.phase === 'lost')
 
     const chain = defaultLevelLibrary(defaultLevel())
     chain.levels[0].nextId = 'level-2'; chain.levels[0].reward = 120
@@ -6611,11 +7643,13 @@ console.log('== v2.64：通用事件 / 交互物 / Boss / 关卡链 ==')
 console.log('== v2.65：涂装与徽记 ==')
 {
   const painted = structuredClone(DEFAULT_FORTRESS)
-  painted.paint = { base: '#556B52', accent: '#D0A544' }
+  painted.paint = { base: '#556B52', accent: '#D0A544', turret: '#8A7654' }
   painted.decals = [{ id: 'badge-1', asset: 'builtin:library/track01', x: 2.5, y: 2, size: 0.8, angle: 15 }]
-  check('涂装：主体色、强调色与徽记锚点通过堡垒定义校验', validateFortressDef(painted).length === 0)
+  check('涂装：主体色、强调色、炮塔色与徽记锚点通过堡垒定义校验', validateFortressDef(painted).length === 0)
   const badPaint = structuredClone(painted); badPaint.paint!.base = 'red'
   check('涂装：非法颜色被保存校验拦截', validateFortressDef(badPaint).some(x => x.includes('主体色')))
+  const badTurretPaint = structuredClone(painted); badTurretPaint.paint!.turret = 'red'
+  check('涂装：非法炮塔色被保存校验拦截', validateFortressDef(badTurretPaint).some(x => x.includes('炮塔色')))
   const badDecal = structuredClone(painted); badDecal.decals![0].x = painted.w + 1
   check('徽记：越界锚点被保存校验拦截', validateFortressDef(badDecal).some(x => x.includes('锚点超出')))
 }
@@ -6672,9 +7706,11 @@ console.log('== v2.69：防御能量罩 ==')
   check('护盾：未安装发生器时容量为 0', shieldStats(s).max === 0 && s.fortress.maxShield === 0)
   const shieldTiles = shieldHexLayout(60, 100, 24)
   check('护盾瓦片：覆盖护罩且边缘瓦片产生压缩', shieldTiles.length > 20 && shieldTiles.some(t => t.edge < 0.5 && (t.squashX < 0.8 || t.squashY < 0.8)))
-  check('护盾瓦片：一次受击仅向紧邻一圈扩散且命中格及时熄灭', shieldHexRipple(0, 0) === 1
-    && shieldHexRipple(0.2, 1) > 0 && shieldHexRipple(0.2, 2) === 0
-    && shieldHexRipple(0.3, 0) === 0 && shieldHexRipple(0.8, 0) === 0)
+  check('护盾瓦片：一次受击向外扩散两圈、逐圈衰减且命中格及时熄灭', shieldHexRipple(0, 0) === 1
+    && shieldHexRipple(0.2, 1) > 0 && shieldHexRipple(0.3, 2) > 0
+    && shieldHexRipple(0.14, 1) < shieldHexRipple(0, 0)
+    && shieldHexRipple(0.28, 2) < shieldHexRipple(0.14, 1)
+    && shieldHexRipple(0.3, 0) === 0 && shieldHexRipple(0.8, 2) === 0)
   const edgeSamples = shieldPerimeterSamples(60, 100, 10)
   const shieldRadius = shieldCornerRadius(60, 100)
   check('护盾外缘：柔光素材沿圆角矩形轮廓近似等距覆盖', edgeSamples.length > 50
@@ -6685,19 +7721,37 @@ console.log('== v2.69：防御能量罩 ==')
         || (Math.abs(p.y) === 100 && Math.abs(p.x) <= 60 - shieldRadius)
         || (Math.abs(p.x) === 60 && Math.abs(p.y) <= 100 - shieldRadius)
     }))
+  const rawVehicleMask = new Uint8Array(9 * 7)
+  for (let y = 2; y <= 4; y++) for (let x = 2; x <= 6; x++) rawVehicleMask[y * 9 + x] = 1
+  rawVehicleMask[3 * 9] = 1; rawVehicleMask[3 * 9 + 8] = 1
+  const fittedVehicleMask = dilateShieldMask(rawVehicleMask, 9, 7, 1)
+  const fittedContours = traceShieldMaskContours(fittedVehicleMask, 9, 7)
+  const fittedInterior = sampleShieldMaskInterior(fittedVehicleMask, 9, 7, -4.5, -3.5, 1.5)
+  check('贴身护盾：主体与两侧行走部件扩张后形成可描边的底盘体系轮廓', fittedContours.length === 1
+    && fittedContours[0].points.some(point => point.x === 0)
+    && fittedContours[0].points.some(point => point.x === 9))
+  check('贴身护盾：破盾内部采样只落在 Alpha 轮廓有效区域', fittedInterior.length > 0
+    && fittedInterior.every(point => {
+      const x = Math.floor(point.x + 4.5), y = Math.floor(point.y + 3.5)
+      return x >= 0 && x < 9 && y >= 0 && y < 7 && fittedVehicleMask[y * 9 + x] > 0
+    }))
   check('护盾开展：从 50% 渐显、极限轻微回弹后稳定在完整场体', shieldUnfoldProgress(0) === 0
     && shieldUnfoldProgress(0.5) > 0.8 && shieldUnfoldProgress(1) === 1
     && shieldUnfoldScale(0) === 0.5 && shieldUnfoldScale(0.86) > 1 && shieldUnfoldScale(1) === 1)
   const edgePulseSamples = Array.from({ length: 80 }, (_, i) => shieldEdgePulse(i * 0.125))
   check('护盾外缘：常态亮度与线宽做可辨识的连续波动', edgePulseSamples.some((v, i) => i > 0 && Math.abs(v.alpha - edgePulseSamples[i - 1].alpha) > 0.003)
     && edgePulseSamples.every(v => v.alpha >= 0.84 && v.alpha <= 1.16 && v.width >= 0.93 && v.width <= 1.07))
+  const flowAt0 = Array.from({ length: 100 }, (_, i) => shieldEdgeFlowGain(0, i / 100))
+  const flowAt4 = Array.from({ length: 100 }, (_, i) => shieldEdgeFlowGain(4, i / 100))
+  check('护盾外缘：局部亮度波峰沿闭合周长移动且保留柔和拖尾', Math.max(...flowAt0) > 1.6
+    && Math.min(...flowAt0) >= 0.81 && flowAt0.indexOf(Math.max(...flowAt0)) !== flowAt4.indexOf(Math.max(...flowAt4)))
   check('护盾破裂：整场闪光快速衰减并及时交给碎片演出', shieldBreakEnvelope(0) === 1
     && shieldBreakEnvelope(0.2) > 0 && shieldBreakEnvelope(0.5) === 0 && shieldBreakEnvelope(1) === 0)
   const field0 = shieldFieldMotion(0, 60, 100), field1 = shieldFieldMotion(1, 60, 100)
   check('护盾内部场体：双层纹理持续反向漂移并错峰明灭', field0.x1 !== field1.x1 && field0.y2 !== field1.y2
     && field0.r1 !== field1.r1 && field0.a1 !== field0.a2)
   check('护盾碎片：尺寸随护盾短边增长并保持可读范围', shieldShardSize(1, 2) === 0.2
-    && shieldShardSize(3, 5) > shieldShardSize(2, 5) && shieldShardSize(10, 12) === 0.55)
+    && shieldShardSize(3, 5) > shieldShardSize(2, 5) && shieldShardSize(10, 12) === 0.6)
   const migrated = migrateModuleDefs(MODULE_DEFS.filter(d => !d.id.startsWith('shield_')), 0)
   check('旧模块库迁移：保留原模块并补入三件护盾模块', ['shield_generator', 'shield_capacitor', 'shield_amplifier'].every(id => migrated.some(d => d.id === id)))
   const legacyLimit = MODULE_DEFS.map(d => ({ ...d }))
@@ -6709,10 +7763,13 @@ console.log('== v2.69：防御能量罩 ==')
   MODULE_DEFS.push({ id: limitedId, name: '测试限装模块', desc: '', cost: 0, w: 1, h: 1, maxCount: 2, color: '#888888' })
   let limited = initialState()
   limited.gold = 999
+  limited.modules = []
+  limited.phase = 'prep'
   limited = buildModule(limited, limitedId, 1, 1, 0)
   limited = buildModule(limited, limitedId, 2, 1, 0)
   const thirdLimited = canPlaceModule(limited, limitedId, 1, 2, 0)
-  check('通用数量上限：任意模块达到配置数量后拒绝继续装配', limited.modules.filter(m => m.defId === limitedId).length === 2 && !thirdLimited.ok && thirdLimited.reason === '测试限装模块装配上限 2')
+  check('通用数量上限：任意模块达到配置数量后拒绝继续装配', limited.modules.filter(m => m.defId === limitedId).length === 2 && !thirdLimited.ok && thirdLimited.reason === '测试限装模块装配上限 2',
+    `built=${limited.modules.filter(m => m.defId === limitedId).length} ok=${thirdLimited.ok} reason=${thirdLimited.reason}`)
   MODULE_DEFS.splice(MODULE_DEFS.findIndex(d => d.id === limitedId), 1)
 
   s = buildModule(s, 'shield_generator', 1, 1, 0)
@@ -6727,6 +7784,22 @@ console.log('== v2.69：防御能量罩 ==')
   const hp0 = s.fortress.hp
   const absorbed = damageFortress(s, 100, { x: hx, y: hy, kind: 'projectile', armorPen: 1, armorDamage: 50 })
   check('护盾承伤：穿甲对护盾无效且本体/装甲不受伤', absorbed.shieldDamage === 100 && absorbed.structureDamage === 0 && s.fortress.hp === hp0 && s.fortress.armor.front === s.fortress.maxArmor.front)
+  const shieldNoRicochet = structuredClone(s)
+  shieldNoRicochet.fortress.shield = 5; shieldNoRicochet.fortress.hp = 1000; shieldNoRicochet.fortress.armor.front = 20
+  const ricochetSuppressed = damageFortress(shieldNoRicochet, 10, { x: hx, y: hy, kind: 'projectile', penetration: 0 })
+  check('护盾承伤：击破护盾的同一发不会触发跳弹，溢出按普通装甲格挡',
+    ricochetSuppressed.shieldBroken && !ricochetSuppressed.ricochet && ricochetSuppressed.structureDamage === 0
+    && ricochetSuppressed.armorDamage === 0 && shieldNoRicochet.fortress.armor.front === 20 && shieldNoRicochet.fortress.hp === 1000)
+  const shieldNoPierce = structuredClone(s)
+  shieldNoPierce.fortress.shield = 5; shieldNoPierce.fortress.hp = 1000; shieldNoPierce.fortress.armor.front = 20
+  const pierceSuppressed = damageFortress(shieldNoPierce, 10, { x: hx, y: hy, kind: 'projectile', armorPen: 1, armorDamage: 20 })
+  const pierceRestored = damageFortress(shieldNoPierce, 10, { x: hx, y: hy, kind: 'projectile', armorPen: 1, armorDamage: 20 })
+  check('护盾承伤：护盾命中禁用穿甲与削甲，破盾后的下一发恢复穿甲',
+    pierceSuppressed.structureDamage === 0 && pierceSuppressed.armorDamage === 0
+    && pierceRestored.structureDamage === 10 && pierceRestored.armorDamage === 20
+    && shieldNoPierce.fortress.hp === 990 && shieldNoPierce.fortress.armor.front === 0,
+    `first=${JSON.stringify(pierceSuppressed)} second=${JSON.stringify(pierceRestored)} hp=${shieldNoPierce.fortress.hp} armor=${shieldNoPierce.fortress.armor.front}`)
+  check('装甲提示文字：玩家载具与其他阵营共用击穿文字规则', shieldNoPierce.floats.at(-1)?.text === '击穿' && shieldNoPierce.floats.at(-1)?.visualKind === 'penetration')
   const energy0 = s.energy
   s = tick(s, 1)
   check('护盾回复：未破盾时持续回复并按点耗电', s.fortress.shield === 212 && Math.abs(s.energy - (Math.min(ENERGY.cap, energy0 + ENERGY.regen) - 4.2)) < 1e-9, `shield=${s.fortress.shield} energy=${s.energy}`)
@@ -6753,17 +7826,23 @@ console.log('== v2.70：防守波次自动节奏 ==')
   check('旧防守目标迁移：默认等待波次、休整60秒、接踵5秒', migrated.type === 'defend' && migrated.waveWait === true && migrated.restTime === 60 && migrated.overlapTime === 5)
 
   LEVEL.mode = 'defend'
-  LEVEL.objective = { type: 'defend', waves: 3, waveWait: true, restTime: 7, overlapTime: 5 }
+  configureObjective(LEVEL, { type: 'defend', waves: 3, waveWait: true, restTime: 7, overlapTime: 5 })
   let s = initialState()
   check('等待模式：首波自动进入部署倒计时且无需手动开波', s.phase === 'prep' && s.prepLeft === 7)
+  check('等待模式 HUD：首波部署显示现有引擎倒计时', defenseWaveCountdown(s) === 7)
   s.phase = 'combat'; s.wave = 1; s.spawnQueue = []; s.enemies = []; s.ambushQueue = []; s.eventQueue = []
+  check('等待模式 HUD：交战中没有下一波计时则隐藏', defenseWaveCountdown(s) === null)
   s = tick(s, 0.1)
   check('等待模式：清场后进入配置的休整时间', s.phase === 'prep' && s.wave === 2 && s.prepLeft === 7)
+  check('等待模式 HUD：波间休整继续显示倒计时', defenseWaveCountdown(s) === 7)
 
-  LEVEL.objective = { type: 'defend', waves: 2, waveWait: false, restTime: 999, overlapTime: 5 }
+  configureObjective(LEVEL, { type: 'defend', waves: 2, waveWait: false, restTime: 999, overlapTime: 5 })
+  LEVEL.stages[0].waves[0].entries = [{ id: 'v270-wave-1', unitDefId: 'unit:uav', count: 1, delay: 0, interval: 0 }]
+  LEVEL.stages[0].waves[1].entries = [{ id: 'v270-wave-2', unitDefId: 'unit:uav', count: 1, delay: 0, interval: 0 }]
   s = initialState()
   check('接踵模式：首波直接开战且休整时间不生效', s.phase === 'combat' && s.spawnQueue.length > 0 && s.prepLeft === 0)
   s.spawnQueue = []; s.enemies = []; s.ambushQueue = []; s.eventQueue = []; s.nextWaveLeft = 5; s.wave = 1
+  check('接踵模式 HUD：最后一名敌人出场后显示接踵倒计时', defenseWaveCountdown(s) === 5)
   s = tick(s, 4.9)
   check('接踵模式：倒计时结束前不提前进入下波或休整', s.phase === 'combat' && s.wave === 1 && s.nextWaveLeft !== null && s.nextWaveLeft > 0)
   s = tick(s, 0.11)
@@ -6771,6 +7850,11 @@ console.log('== v2.70：防守波次自动节奏 ==')
   s.spawnQueue = []; s.enemies = []; s.ambushQueue = []; s.eventQueue = []; s.nextWaveLeft = null
   s = tick(s, 0.1)
   check('接踵模式：最后一波清场后正常胜利', s.phase === 'won')
+  check('防御模式 HUD：关卡结算后隐藏倒计时', defenseWaveCountdown(s) === null)
+
+  s.objective = { type: 'fortressDefense', waves: 3, waveWait: true, restTime: 7, overlapTime: 5, spawnRegions: [], fortressDefId: s.fortressDefId, fortressPoint: { x: 10, y: 10 }, returnPoint: { x: 5, y: 5 } }
+  s.phase = 'prep'; s.wave = 2; s.prepLeft = 3.25; s.nextWaveLeft = null
+  check('堡垒防御 HUD：与普通防守共用波间倒计时口径', defenseWaveCountdown(s) === 3.25)
   Object.assign(LEVEL, oldLevel)
 }
 
@@ -6780,35 +7864,44 @@ console.log('== v2.75：堡垒战损痕迹 ==')
   const r = fortressRect(s), cx = r.x + r.w / 2
   s.fortress.maxShield = 50; s.fortress.shield = 50
   damageFortress(s, 20, { x: cx, y: r.y - 1, kind: 'projectile' })
-  check('战损：护盾完全吸收时不生成主体贴花、火花或白闪', s.fortress.damageMarks.length === 0 && s.fortressHits.length === 0 && s.fortress.hitFlash === 0)
+  check('战损：护盾完全吸收时不生成主体贴花或火花', s.fortress.damageMarks.length === 0 && s.unitHits.length === 0 && s.fortress.hitFlash === 0)
 
   s.fortress.maxShield = 0; s.fortress.shield = 0
   s.fortress.armor.front = 20
   damageFortress(s, 5, { x: cx, y: r.y - 2, kind: 'projectile' })
-  const scratch = s.fortress.damageMarks.at(-1)
-  check('战损：装甲格挡留下边缘擦痕并触发瞬时反馈', scratch?.kind === 'scratch' && scratch.y <= 0.081 && s.fortressHits.length === 1 && s.fortress.hitFlash === 0.08)
+  check('战损屏蔽：装甲格挡不再生成擦痕，但瞬时受击火花保留且单位本体不泛白',
+    s.fortress.damageMarks.length === 0 && s.unitHits.length === 1 && s.fortress.hitFlash === 0)
 
-  damageFortress(s, 10, { x: cx, y: r.y - 1, kind: 'projectile', armorPen: 0.6 })
-  check('战损：穿透实弹留下弹孔', s.fortress.damageMarks.at(-1)?.kind === 'bullet')
+  damageFortress(s, 10, { x: cx, y: r.y - 1, kind: 'projectile', armorPen: 0.6, projectileSize: 0.4 })
+  check('战损：穿透实弹不再生成主体弹孔贴花', !s.fortress.damageMarks.some(mark => mark.kind === 'bullet'))
   s.fortress.armor.front = 0
   damageFortress(s, 8, { x: cx, y: r.y - 1, kind: 'aoe' })
-  check('战损：爆炸伤及结构时留下焦痕', s.fortress.damageMarks.at(-1)?.kind === 'scorch')
+  check('战损：爆炸伤及结构不再生成主体焦痕贴花', !s.fortress.damageMarks.some(mark => mark.kind === 'scorch'))
+  check('战损屏蔽：弹孔、焦痕与装甲擦痕全部不可见',
+    !unitDamageMarkVisible('bullet') && !unitDamageMarkVisible('scorch') && !unitDamageMarkVisible('scratch'))
 
   s.fortress.heading = Math.PI / 2
   const local = fortressDamageLocalPoint(s, r.x + r.w + 2, r.y + r.h / 2)
   check('战损：旋转车体的世界命中点正确反算到车头局部边缘', local.y <= 0.081 && local.x > r.w * 0.4 && local.x < r.w * 0.6)
 
-  s.fortress.heading = 0; s.fortress.hp = 10000; s.fortress.maxHp = 10000
+  s.fortress.heading = 0; s.fortress.hp = 10000; s.fortress.maxHp = 10000; s.fortress.armor.front = 10000
   for (let i = 0; i < FORTRESS_DAMAGE_MARK_CAP + 5; i++) {
     s.time += 0.01
     damageFortress(s, 1, { x: cx, y: r.y - 1, kind: 'projectile' })
   }
-  check('战损：主体贴花按 60 条上限 FIFO 回收', s.fortress.damageMarks.length === FORTRESS_DAMAGE_MARK_CAP)
-  check('战损：结构阶段按 75%/50%/25% 阈值递进', fortressDamageStage(100, 100) === 0 && fortressDamageStage(74, 100) === 1
-    && fortressDamageStage(49, 100) === 2 && fortressDamageStage(24, 100) === 3)
+  check('战损屏蔽：连续受击也不再累积任何永久主体贴花', s.fortress.damageMarks.length === 0)
+  check('载具结构阶段：50%及以上正常、低于50%整车变暗、低于25%追加深色烟', UNIT_BODY_DAMAGE_VISUALS_ENABLED
+    && fortressDamageStage(100, 100) === 0 && fortressDamageStage(50, 100) === 0
+    && fortressDamageStage(49, 100) === 1 && fortressDamageStage(25, 100) === 1
+    && fortressDamageStage(24, 100) === 2)
+  check('载具结构阶段：变暗亮度随结构降低且永久贴花继续关闭', vehicleDamageBrightness(50, 100) === 1
+    && vehicleDamageBrightness(49, 100) < 1 && vehicleDamageBrightness(10, 100) < vehicleDamageBrightness(49, 100)
+    && !UNIT_BODY_DECALS_ENABLED)
+  check('载具结构阶段：深色烟源数量按载具尺寸增加并设置上限', vehicleDamageSmokeSourceCount(2, 2) < vehicleDamageSmokeSourceCount(5, 8)
+    && vehicleDamageSmokeSourceCount(100, 100) === 6)
 
   s = tick(s, 0.2)
-  check('战损：白闪与船体火花事件按 TTL 正常回收', s.fortress.hitFlash === 0 && s.fortressHits.length === 0)
+  check('战损：船体火花事件按 TTL 正常回收且全程无白闪', s.fortress.hitFlash === 0 && s.unitHits.length === 0)
 }
 
 console.log('== v2.76：敌方直线实弹与装甲跳弹 ==')
@@ -6817,6 +7910,11 @@ console.log('== v2.76：敌方直线实弹与装甲跳弹 ==')
     d.attackRange > 0 && d.attackInterval > 0 && d.projectileSpeed > 0 && d.projectileDamage > 0 && d.penetration > 0))
   check('穿深概率：低穿深按比例、达到装甲必穿、零穿深保留最低5%', fortressPenetrationChance(3, 6) === 0.5
     && fortressPenetrationChance(6, 6) === 1 && fortressPenetrationChance(0, 6) === 0.05 && fortressPenetrationChance(3, 0) === 1)
+  const smallRicochet = ricochetVisualScale(GEOMETRIC_BULLET_VISUAL_SIZE, 0.5)
+  const largeRicochet = ricochetVisualScale(GEOMETRIC_BULLET_VISUAL_SIZE * 4, 0.5)
+  check('通用跳弹口径：大弹丸同时增加亮线宽度与飞出距离',
+    largeRicochet.width > smallRicochet.width && largeRicochet.range > smallRicochet.range,
+    JSON.stringify({ smallRicochet, largeRicochet }))
 
   let s = arena()
   const r = fortressRect(s), cx = r.x + r.w / 2
@@ -6824,9 +7922,14 @@ console.log('== v2.76：敌方直线实弹与装甲跳弹 ==')
   let ricochetSeed = 1
   while (eventRandom(ricochetSeed, 91) < 0.5) ricochetSeed++
   s.nextId = ricochetSeed
-  const bounced = damageFortress(s, 10, { x: cx, y: r.y - 1, kind: 'projectile', penetration: 3 })
+  const bounced = damageFortress(s, 10, {
+    x: cx, y: r.y - 1, kind: 'projectile', penetration: 3,
+    incomingDx: 0, incomingDy: 1, ammoId: 'custom_ammo_3', projectileSize: 0.6,
+  })
+  const fortressRicochetFx = s.unitHits.at(-1)
   check('概率装甲：穿深不足且判定失败时跳弹、结构不受伤并生成跳弹事件', bounced.ricochet && bounced.blocked
-    && s.fortress.hp === 1000 && s.fortressHits.at(-1)?.ricochet === true)
+    && s.fortress.hp === 1000 && fortressRicochetFx?.ricochet === true
+    && fortressRicochetFx.ammoId === 'custom_ammo_3' && fortressRicochetFx.projectileSize === 0.6)
   const pierced = damageFortress(s, 10, { x: cx, y: r.y - 1, kind: 'projectile', penetration: 6 })
   check('概率装甲：穿深达到装甲时必定穿透并造成完整单发伤害', !pierced.ricochet && pierced.structureDamage === 10 && s.fortress.hp === 990)
 
@@ -6834,14 +7937,18 @@ console.log('== v2.76：敌方直线实弹与装甲跳弹 ==')
   const fr = fortressRect(s), ex = fr.x + fr.w / 2, ey = fr.y - 1
   s.fortress.armor.front = 0
   const enemy = mkEnemy(s, 'walker', ex, ey)
+  enemy.controller = 'ai'
   enemy.attackCooldown = 0
   const dist = fortressDistanceToPoint(s, enemy.x, enemy.y)
   s = tick(s, 0.01)
   check('敌方远程攻击：进入射程后停车并生成独立直线实弹', dist <= ENEMY_DEFS.walker.attackRange
     && byId(s.enemies, enemy.id)?.mode === 'attack' && s.enemyProjectiles.length === 1)
   const hp0 = s.fortress.hp
-  s = tick(s, 0.5)
-  check('敌方远程攻击：高速线段命中堡垒且不会跨帧穿模', s.enemyProjectiles.length === 0 && s.fortress.hp === hp0 - ENEMY_DEFS.walker.projectileDamage)
+  const shotDamage = s.enemyProjectiles[0]?.damage ?? 0
+  byId(s.enemies, enemy.id)!.attackCooldown = 999 // 隔离首发弹：大 dt 验高速跨帧时不再生成第二发
+  s = tick(s, 2)
+  check('敌方远程攻击：高速线段命中堡垒且不会跨帧穿模', s.enemyProjectiles.length === 0 && s.fortress.hp === hp0 - shotDamage,
+    `projectiles=${JSON.stringify(s.enemyProjectiles)} hp=${s.fortress.hp}/${hp0}`)
 
   s = arena(); s.fortress.heading = Math.PI / 2
   const rr = fortressRect(s), cy = rr.y + rr.h / 2
@@ -6856,10 +7963,3299 @@ console.log('== v2.76：敌方直线实弹与装甲跳弹 ==')
   const ar = fortressRect(s), ay = ar.y + ar.h / 2
   const transparentPass = enemyProjectileFortressHit(s, ar.x + ar.w + 1, ay, ar.x + ar.w - 1, ay)
   const bodyHit = enemyProjectileFortressHit(s, ar.x + ar.w + 1, ay, ar.x + ar.w / 2, ay)
+  const deepHit = enemyProjectileFortressHit(s, ar.x + ar.w + 1, ay, ar.x + ar.w / 2, ay, 0.6)
   check('敌方实弹碰撞：轮胎与履带所在的主体透明外侧带不阻挡弹丸', transparentPass === null)
   check('敌方实弹碰撞：弹丸越过外侧带后在主体首个不透明像素命中', bodyHit !== null
     && bodyHit.x < ar.x + ar.w - 1.4 && bodyHit.x > ar.x + ar.w / 2)
+  check('敌方实弹碰撞：随机深入命中点仍在主体不透明像素且明显深于边缘', deepHit !== null && bodyHit !== null
+    && deepHit.x < bodyHit.x - 0.5 && deepHit.x > ar.x + ar.w / 2)
   clearFortressBodyAlpha(bodyRef)
+}
+
+console.log('== v2.77：统一单位数据层与目标类别拆分 ==')
+{
+  const units = unitLibrary()
+  check('统一单位库：现有堡垒与无人飞行器均生成稳定单位 id',
+    FORTRESS_DEFS.every(d => units.some(u => u.id === fortressUnitId(d.id) && u.type === 'vehicle'))
+      && units.some(u => u.id === 'unit:uav' && u.type === 'rotorcraft'))
+
+  const rangedEnemy = unitDefById(enemyUnitId('walker'))!
+  check('统一单位 AI：战斗配置收口为首选目标、站位与移动，攻击仍属于战斗参数', rangedEnemy.ai?.preferredTarget === 'playerControlled'
+    && rangedEnemy.ai.positioning === 'longestRange' && rangedEnemy.ai.movement === 'stop'
+    && rangedEnemy.combat?.profile === 'projectile' && rangedEnemy.type === 'vehicle')
+
+  const migratedAI = normalizeUnitAI({
+    targeting: { profile: 'fortress' },
+    movement: { profile: 'rangeEdge' },
+    attack: { profile: 'projectile' },
+  })
+  check('战斗 AI 迁移：旧堡垒索敌/射程游走自动转为主控目标/最远站位/环绕', migratedAI.preferredTarget === 'playerControlled'
+    && migratedAI.positioning === 'longestRange' && migratedAI.movement === 'orbit')
+
+  check('目标迁移：旧 core/building/ally 分别迁移为 fortress/fixedBuilding/combatUnit', migrateLegacyTargetKind('core') === 'fortress'
+    && migrateLegacyTargetKind('building') === 'fixedBuilding' && migrateLegacyTargetKind('ally') === 'combatUnit'
+    && migrateLegacyTargetKind('???') === null)
+
+  let s = arena()
+  s.phase = 'combat'; s.spawnQueue = [{ kind: 'walker', delay: 0 }]; s.spawnTimer = 0
+  s = tick(s, 0.01)
+  check('运行时单位引用：新生成敌人携带统一 unitDefId', s.enemies.some(e => e.kind === 'walker' && e.unitDefId === enemyUnitId('walker')))
+}
+
+console.log('== v2.78：三字段战斗 AI 运行时决策 ==')
+{
+  const weaponRanges = [{ min: 0, max: 100 }, { min: 30, max: 80 }, { min: 50, max: 120 }]
+  const longest = computeAIStandingRange(weaponRanges, 'longestRange')
+  const shortest = computeAIStandingRange(weaponRanges, 'shortestRange')
+  const optimal = computeAIStandingRange(weaponRanges, 'optimalRange')
+  check('最远射程：最长武器按 75%～95% 建带，目标 85%', longest.min === 90 && longest.max === 114 && longest.desired === 102)
+  check('最近射程：最短武器按 40%～60% 建带，目标 50%', shortest.min === 32 && shortest.max === 48 && shortest.desired === 40)
+  check('最优射程：选择三件武器同时覆盖的 50～80 区间', optimal.min === 50 && optimal.max === 80 && optimal.desired === 65 && optimal.overlap === 3)
+  check('移动决策：过远接近、带内环绕、过近后退', aiRangeDecision(121, longest, 'orbit') === 'approach'
+    && aiRangeDecision(100, longest, 'orbit') === 'orbit' && aiRangeDecision(80, longest, 'orbit') === 'retreat')
+  check('远离/抵近：在站位带内分别靠向外沿和内沿', aiRangeDecision(100, longest, 'keepFar') === 'retreat'
+    && aiRangeDecision(100, longest, 'closeIn') === 'approach')
+  check('撞击回退：可达时直冲；空中或不可碰撞按停止站位；不可达原地保持', aiRangeDecision(100, longest, 'ram', 'available') === 'ram'
+    && aiRangeDecision(100, longest, 'ram', 'ineligible') === 'hold'
+    && aiRangeDecision(121, longest, 'ram', 'ineligible') === 'approach'
+    && aiRangeDecision(121, longest, 'ram', 'unreachable') === 'hold')
+}
+
+console.log('== v2.79：可持久化单位库与内置覆盖 ==')
+{
+  const custom = {
+    id: 'unit:sim-neutral', name: '测试中立建筑', type: 'building' as const,
+    targetClasses: ['combatUnit' as const],
+    stats: { hp: 80, speed: 0, size: 0.3, air: false },
+    ai: { preferredTarget: 'allHostile' as const, positioning: 'optimalRange' as const, movement: 'stop' as const, special: { profile: 'none' as const } },
+  }
+  check('单位库持久化：可保存无旧注册表来源的自定义单位', saveCustomUnitDef(custom)
+    && unitDefById(custom.id)?.type === 'building' && unitLibraryForExport().customs.some(unit => unit.id === custom.id))
+
+  const walkerOverride = structuredClone(unitDefById(enemyUnitId('walker'))!)
+  walkerOverride.ai!.movement = 'orbit'
+  walkerOverride.combat!.preferredRangeRatio = 0.9
+  walkerOverride.combat!.rangeTolerance = 0.08
+  check('单位库收口：旧敌人载具快照不能写入独立单位库存储', !saveCustomUnitDef(walkerOverride)
+    && enemyUnitDef('walker').ai?.movement === 'stop')
+  check('单位库收口：旧适配单位继续保持只读迁移来源', !deleteCustomUnitDef(walkerOverride.id)
+    && enemyUnitDef('walker').ai?.movement === 'stop')
+  check('单位库删除：自定义单位删除后不再出现在统一列表', deleteCustomUnitDef(custom.id) && !unitLibrary().some(unit => unit.id === custom.id))
+}
+
+console.log('== v2.80：单位几何中心统一 ==')
+{
+  check('几何中心：奇数与偶数包围盒均严格使用宽高除以二', geometryCenter(5, 8).x === 2.5
+    && geometryCenter(5, 8).y === 4 && geometryCenter(4, 6).x === 2 && geometryCenter(4, 6).y === 3)
+  check('世界中心：左上角偏移后仍保持同一几何中心', rectGeometryCenter({ x: 10, y: 20, w: 5, h: 8 }).x === 12.5
+    && rectGeometryCenter({ x: 10, y: 20, w: 5, h: 8 }).y === 24)
+  const sprite = centeredRect(100, 80, 30, 50)
+  check('贴图中心：任意原图尺寸均以自身中心对齐单位几何中心', sprite.x === 85 && sprite.y === 55
+    && sprite.x + sprite.w / 2 === 100 && sprite.y + sprite.h / 2 === 80)
+  check('堡垒局部原点：与全单位几何中心规则同源', fortressLocalCenter({ w: 4, h: 7 }).x === 2
+    && fortressLocalCenter({ w: 4, h: 7 }).y === 3.5)
+  const insetVehicleCenter = fortressLocalCenter({ w: 2, h: 5, shape: ['0,2', '1,2', '0,3', '1,3', '0,4', '1,4'] })
+  check('载具有效中心：外框含空白边距时仍按实际占格中心对齐主体、履带与炮位', insetVehicleCenter.x === 1 && insetVehicleCenter.y === 3.5)
+  const insetOrigin = fortressShapeOrigin({ w: 2, h: 5, shape: ['0,2', '1,2', '0,3', '1,3', '0,4', '1,4'] }, 10, 12)
+  check('载具碰撞原点：有效占格中心锚定完整外框中心', insetOrigin.x === 10 && insetOrigin.y === 11)
+
+  const legacyInset: FortressDef = {
+    ...structuredClone(DEFAULT_FORTRESS),
+    id: 'test-origin-normalize', name: '测试原点归零', w: 2, h: 5,
+    shape: ['0,2', '1,2', '0,3', '1,3', '0,4', '1,4'],
+    interior: { cols: 2, rows: 3 }, interiorCells: ['0,2', '1,2', '0,3', '1,3', '0,4', '1,4'],
+    hardpoints: [{ id: 'center', x: 1, y: 3.5, size: 'S' }],
+    effects: [{ id: 'smoke', x: 1, y: 4, kind: 'smoke', state: 'both' }],
+    tracks: [{ id: 'track', x1: -0.8, y1: 1, x2: -0.8, y2: -1, radius: 0.3, tile: 'builtin:vehicle/lighttank01/track' }],
+    wheels: [], runningGearCoordinateSpace: 'centered',
+  }
+  saveCustomFortress(legacyInset)
+  const normalizedInset = FORTRESS_DEFS.find(def => def.id === legacyInset.id)!
+  check('载具库存档迁移：顶部空行自动归零为真实 2×3 外框', normalizedInset.w === 2 && normalizedInset.h === 3
+    && normalizedInset.shape?.includes('0,0') && normalizedInset.shape?.includes('1,2'))
+  check('载具库存档迁移：炮位、特效与内部格同步平移，居中履带坐标保持不变', normalizedInset.hardpoints[0]?.y === 1.5
+    && normalizedInset.effects?.[0]?.y === 2 && normalizedInset.interiorCells?.includes('0,0')
+    && normalizedInset.tracks?.[0]?.y1 === 1 && normalizedInset.tracks?.[0]?.y2 === -1)
+  deleteCustomFortress(legacyInset.id)
+
+  const insetDef: FortressDef = {
+    ...structuredClone(DEFAULT_FORTRESS),
+    id: 'test-inset-movement', name: '测试内缩车体', w: 2, h: 5,
+    shape: ['0,2', '1,2', '0,3', '1,3', '0,4', '1,4'],
+    hardpoints: [], tracks: [], wheels: [],
+  }
+  FORTRESS_DEFS.push(insetDef)
+  let insetState = arena()
+  insetState.fortressDefId = insetDef.id
+  insetState.fortress.x = 10
+  insetState.fortress.y = 12
+  insetState.fortress.vx = 0
+  insetState.fortress.vy = 0
+  insetState.objects = [{
+    id: 98001, kind: 'rock', x: 10, y: 16, w: 2, h: 1,
+    hp: -1, maxHp: -1, blockMove: true, blockProjectile: false,
+  } as BattleObject]
+  check('载具占格查询：不会把外框空白边距误判为车体', blockerAt(insetState, 10, 16)?.kind !== 'fortress')
+  insetState.moveDir = { x: 0, y: -1 }
+  insetState = run(insetState, 0.5, 0.05)
+  check('载具起点移动：外框空白边距不会形成隐形碰撞并卡住战车', insetState.fortress.y < 11.9, `y=${insetState.fortress.y.toFixed(3)}`)
+  FORTRESS_DEFS.splice(FORTRESS_DEFS.findIndex(def => def.id === insetDef.id), 1)
+}
+
+console.log('== v2.81：单位视觉、碰撞与攻击参数接入运行时 ==')
+{
+  check('单位库存档：三字段战斗 AI 使用当前 v19 协议', unitLibraryForExport().version === 19)
+  const obsoleteDeathSound = structuredClone(unitDefById('unit:uav')!) as ReturnType<typeof structuredClone> & { sounds?: { movement?: string; fire?: string; death?: string } }
+  obsoleteDeathSound.id = 'unit:sim-obsolete-death-sound'
+  obsoleteDeathSound.sounds = { movement: 'move-test', death: 'retired-death-test' }
+  saveCustomUnitDef(obsoleteDeathSound)
+  const cleanedDeathSound = unitLibraryForExport().customs.find(def => def.id === obsoleteDeathSound.id)?.sounds as { movement?: string; death?: string } | undefined
+  check('单位音效迁移：旧死亡音效字段被删除且移动音效保留', cleanedDeathSound?.movement === 'move-test' && cleanedDeathSound.death === undefined)
+  deleteCustomUnitDef(obsoleteDeathSound.id)
+  const invalid = structuredClone(unitDefById(enemyUnitId('walker'))!)
+  invalid.visual = { width: 0, height: 1 }
+  check('单位定义校验：拒绝零尺寸主体素材', validateUnitDef(invalid).some(error => error.includes('显示宽高')))
+
+  const walker = structuredClone(unitDefById(enemyUnitId('walker'))!)
+  walker.stats.hp = 321
+  walker.stats.speed = 0.42
+  walker.stats.size = 0.27
+  walker.visual = { bodyAsset: 'sim:unit-body', width: 0.8, height: 1.1, muzzleOffsetX: 0, muzzleOffsetY: BASE_CELL }
+  walker.combat = { profile: 'projectile', range: 12, interval: 0.75, projectileId: 'bullet_std' }
+  const bullet = PROJECTILE_ARTS.find(item => item.id === 'bullet_std')!
+  const savedBullet = structuredClone(bullet)
+  bullet.damage = 37; bullet.speed = 1; bullet.penetration = 11; bullet.projectileAsset = 'sim:enemy-round'
+  saveCustomUnitDef(walker)
+
+  let spawned = arena()
+  spawned.phase = 'combat'; spawned.spawnQueue = [{ kind: 'walker', delay: 0 }]; spawned.spawnTimer = 0
+  spawned = tick(spawned, 0.01)
+  const created = spawned.enemies.find(enemy => enemy.kind === 'walker')
+  check('旧敌人适配器：拒绝写入第二份载具快照并保持迁移源生命', created?.maxHp === ENEMY_DEFS.walker.hp)
+
+  let firing = arena()
+  const rect = fortressRect(firing)
+  const enemy = mkEnemy(firing, 'walker', rect.x + rect.w / 2, rect.y - 2, 321)
+  enemy.controller = 'ai'
+  enemy.attackCooldown = 0
+  firing = tick(firing, 0.01)
+  const shot = firing.enemyProjectiles[0]
+  check('敌方远程攻击：弹速、伤害、穿深和素材引用均读取统一参数', shot?.speed === 1
+    && shot.damage === 37 && shot.penetration === 11 && shot.assetRef === 'sim:enemy-round'
+    && shot.ammoId === 'bullet_std' && shot.kind === 'bullet' && shot.sourceSide === 'enemy')
+  check('单位开火音效：实际生成弹丸时同步产生单位开火声音事件', firing.audioSignals?.some(signal => signal.kind === 'unitFire' && signal.defId === walker.id) === true)
+  check('旧敌人适配器：不再读取被拒绝快照中的开火点偏移', !!shot
+    && Math.abs(shot.x - (firing.enemies.find(item => item.id === enemy.id)?.x ?? enemy.x)) < 1e-9
+    && Math.abs(shot.y - (firing.enemies.find(item => item.id === enemy.id)?.y ?? enemy.y)) < 1e-9
+    && Math.abs(shot.px - shot.x) < 1e-9 && Math.abs(shot.py - shot.y) < 1e-9,
+    shot ? `visible=(${shot.x.toFixed(3)},${shot.y.toFixed(3)}) live=(${firing.enemies.find(item => item.id === enemy.id)?.x.toFixed(3)},${firing.enemies.find(item => item.id === enemy.id)?.y.toFixed(3)})` : '未生成弹丸')
+  deleteCustomUnitDef(walker.id)
+  Object.assign(bullet, savedBullet)
+  check('单位内置覆盖：专项测试结束后恢复内置参数', enemyUnitDef('walker').stats.hp === ENEMY_DEFS.walker.hp)
+}
+
+console.log('== v2.82：关卡、Boss 与生产模块统一引用单位 ID ==')
+{
+  const savedLevel = structuredClone(LEVEL)
+  const customEnemy = {
+    id: 'unit:sim-event-enemy', name: '事件自定义旋翼机', type: 'rotorcraft' as const, faction: 'enemy' as const,
+    controller: 'ai' as const, targetClasses: ['combatUnit' as const],
+    stats: { hp: 444, speed: 0.4, size: 0.28, air: true },
+    visual: { width: 0.7, height: 0.8 },
+    combat: { profile: 'projectile' as const, range: 8, interval: 1, projectileId: 'bullet_std', damage: 12, projectileSpeed: 20, penetration: 2 },
+    ai: { targeting: { profile: 'fortress' as const, allowedTargets: ['fortress' as const] }, movement: { profile: 'holdRange' as const }, attack: { profile: 'projectile' as const } },
+  }
+  const customAlly = {
+    id: 'unit:sim-produced-ally', name: '生产自定义友军旋翼机', type: 'rotorcraft' as const, faction: 'ally' as const,
+    controller: 'ai' as const, targetClasses: ['combatUnit' as const],
+    stats: { hp: 555, speed: 1.1, size: 0.22, air: true },
+    visual: { width: 0.5, height: 0.7 },
+    combat: { profile: 'hitscan' as const, range: 5, interval: 0.7, projectileId: 'ray_std', damage: 9, projectileSpeed: 0, penetration: 0 },
+    ai: { targeting: { profile: 'closestHostile' as const, allowedTargets: ['combatUnit' as const] }, movement: { profile: 'holdRange' as const }, attack: { profile: 'hitscan' as const } },
+  }
+  const tempModuleId = 'sim_unit_factory'
+  try {
+    saveCustomUnitDef(customEnemy)
+    saveCustomUnitDef(customAlly)
+    LEVEL.mode = 'defend'; LEVEL.objective = { type: 'defend', waves: 99 }; LEVEL.interactables = []; LEVEL.triggers = []
+    LEVEL.events = [{
+      id: 982, name: '统一单位触发', category: 'region', enabled: true,
+      activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] },
+      trigger: { type: 'regionEnter', cells: Array.from({ length: 16 }, (_, index) => `${2 + index % 4},${2 + Math.floor(index / 4)}`) }, actions: [
+        { type: 'spawn', enemies: { walker: 0, runner: 0, rusher: 0, brute: 0, flyer: 0 }, units: { [customEnemy.id]: 1 }, interval: 0 },
+        { type: 'boss', boss: { kind: 'walker', unitDefId: customEnemy.id, name: '自定义 Boss', hpScale: 2, sizeScale: 1.5, phases: [], defeatActions: [] } },
+      ],
+    }]
+    const setCenter = (state: GameState, x: number, y: number) => {
+      const r = fortressRect(state); state.fortress.x = x - r.w / 2; state.fortress.y = y - r.h / 2
+    }
+    let eventState = initialState(); eventState.phase = 'combat'; eventState.spawnQueue = [{ kind: 'walker', delay: 100 }]; eventState.spawnTimer = 100
+    setCenter(eventState, 20, 20); eventState = tick(eventState, 0.1); setCenter(eventState, 3, 3); eventState = tick(eventState, 0.1)
+    const customEnemies = eventState.enemies.filter(enemy => enemy.unitDefId === customEnemy.id)
+    check('关卡刷怪：自定义敌人按 unitDefId 生成并读取自定义生命', customEnemies.some(enemy => !enemy.bossName && enemy.maxHp === 444))
+    check('Boss 动作：自定义单位 ID、倍率和名称共同生效', customEnemies.some(enemy => enemy.bossName === '自定义 Boss' && enemy.maxHp === 888 && enemy.bossSizeScale === 1.5))
+
+    MODULE_DEFS.push({ id: tempModuleId, name: '单位工厂测试', desc: '', cost: 0, w: 1, h: 1, color: '#888', produce: { kind: 'soldier', unitDefId: customAlly.id, interval: 1, cap: 2 } })
+    let production = initialState(); production.phase = 'combat'; production.spawnQueue = [{ kind: 'walker', delay: 100 }]; production.spawnTimer = 100
+    production.modules = [{ id: production.nextId++, defId: tempModuleId, x: 0, y: 0, rot: 0, timer: 0 }]
+    production = tick(production, 0.1)
+    check('生产模块：按 unitDefId 产出自定义友军并读取自定义生命', production.allies.some(ally => ally.unitDefId === customAlly.id && ally.maxHp === 555))
+
+    const legacyModule = { id: 'legacy_factory', name: '旧兵营', desc: '', cost: 0, w: 1, h: 1, color: '#888', produce: { kind: 'tank' as const, interval: 5, cap: 1 } }
+    check('模块迁移：旧 produce.kind 自动迁入统一载具单位 ID', migrateModuleDefs([legacyModule], 6)[0].produce?.unitDefId === 'fortress:standard')
+
+    const migratedLevel = parseLevel(JSON.stringify({ version: 10, triggers: [{ id: 1, name: '旧伏击', enabled: true, x: 1, y: 1, w: 2, h: 2, activationLimit: 1, cooldown: 0, delay: 0, interval: 0, enemies: { walker: 2 } }] }))
+    const migratedEvent = migratedLevel.events[0]
+    const migratedSpawn = migratedEvent?.actions.find(action => action.type === 'spawn')
+    check('关卡迁移：退役敌人枚举不再生成步兵单位引用', migratedLevel.version === 18 && migratedEvent?.trigger.type === 'regionEnter'
+      && migratedSpawn?.type === 'spawn' && Object.keys(migratedSpawn.units ?? {}).length === 0)
+  } finally {
+    deleteCustomUnitDef(customEnemy.id); deleteCustomUnitDef(customAlly.id)
+    const moduleIndex = MODULE_DEFS.findIndex(module => module.id === tempModuleId)
+    if (moduleIndex >= 0) MODULE_DEFS.splice(moduleIndex, 1)
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== v2.83：关卡初始友军与中立单位 ==')
+{
+  const savedLevel = structuredClone(LEVEL)
+  const neutral = {
+    id: 'unit:sim-neutral-observer', name: '中立观察建筑', type: 'building' as const, faction: 'neutral' as const,
+    controller: 'static' as const, targetClasses: ['combatUnit' as const],
+    stats: { hp: 777, speed: 0, size: 0.3, air: false }, visual: { width: 0.8, height: 0.9 },
+    combat: { range: 0, interval: 1, damage: 0, projectileSpeed: 0, penetration: 0 },
+    ai: { targeting: { profile: 'none' as const }, movement: { profile: 'stationary' as const }, attack: { profile: 'none' as const } },
+  }
+  try {
+    saveCustomUnitDef(neutral)
+    LEVEL.initialUnits = [
+      { id: 1, unitDefId: 'ally:tank', faction: 'ally', x: 8.5, y: 20.5, flipX: true, rotation: 90 },
+      { id: 2, unitDefId: neutral.id, faction: 'neutral', x: 11.5, y: 18.5 },
+    ]
+    let state = initialState()
+    const tank = state.allies.find(unit => unit.unitDefId === 'ally:tank')
+    const observer = state.allies.find(unit => unit.unitDefId === neutral.id)
+    check('初始单位：友军和中立单位按稳定 ID、中心坐标、实例变换与生命生成', tank?.x === 8.5 && tank.y === 20.5
+      && tank.flipX === true && Math.abs((tank.initialHeading ?? 0) - Math.PI / 2) < 1e-9
+      && observer?.x === 11.5 && observer.y === 18.5 && observer.maxHp === 777)
+    state.phase = 'combat'; state.spawnQueue = [{ kind: 'walker', delay: 100 }]; state.spawnTimer = 100
+    state = tick(state, 0.5)
+    const neutralAfter = state.allies.find(unit => unit.unitDefId === neutral.id)
+    check('中立单位：保持静止且不参与索敌', neutralAfter?.faction === 'neutral' && neutralAfter.x === 11.5 && neutralAfter.y === 18.5 && neutralAfter.targetId === null)
+
+    const migrated = parseLevel(JSON.stringify({ version: 11, rows: 20, cols: 20, initialUnits: [
+      { id: 4, unitDefId: 'ally:soldier', faction: 'ally', x: -5, y: 99, flipX: true, rotation: 270 },
+      { id: 4, unitDefId: neutral.id, faction: 'neutral', x: 5.5, y: 6.5, rotation: 45 },
+      { id: 8, unitDefId: '', faction: 'ally', x: 1, y: 1 },
+    ] }))
+    check('关卡迁移：v11 清理退役/空单位引用并保留有效中立实例', migrated.version === 18 && migrated.initialUnits.length === 1
+      && migrated.initialUnits[0].unitDefId === neutral.id && migrated.initialUnits[0].x === 5.5 && migrated.initialUnits[0].y === 6.5
+      && migrated.initialUnits[0].rotation === 0)
+  } finally {
+    deleteCustomUnitDef(neutral.id)
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== v2.84：独立核心建筑与攻城索敌 ==')
+{
+  const savedLevel = structuredClone(LEVEL)
+  try {
+    LEVEL.core = { x: 4, y: 6 }
+    LEVEL.buildCells = []; LEVEL.initialWalls = []; LEVEL.buildings = []; LEVEL.objects = []
+    configureObjective(LEVEL, { type: 'defend', waves: 1, protectTarget: 'core' })
+    const siege = { profile: 'siege' as const, allowedTargets: ['coreBuilding' as const, 'fixedBuilding' as const, 'wall' as const] }
+    let state = initialState()
+    const core = state.core
+    check('核心实体：按关卡坐标和 CORE 独立耐久生成', core?.x === 4 && core.y === 6 && core.w === CORE.w && core.h === CORE.h && core.hp === CORE.hp)
+    check('核心阻挡：完好时以 coreBuilding 进入单位占格查询', blockerAt(state, 4, 6)?.kind === 'coreBuilding')
+    const target = selectSiegeTarget(state, 4, 2, siege)
+    check('攻城索敌：严格选择独立核心且不把移动堡垒当核心', target?.kind === 'coreBuilding' && target.id === core?.id)
+
+    if (core) state.enemyProjectiles.push({
+      id: state.nextId++, shooterId: 9001, x: core.x + core.w / 2, y: core.y + core.h / 2,
+      px: core.x + core.w / 2, py: core.y + core.h / 2, heading: 0, speed: 0,
+      damage: CORE.hp + 10, penetration: 999, traveled: 0, maxTravel: 100,
+      targetKind: 'coreBuilding', targetId: core.id, targetX: core.x + core.w / 2, targetY: core.y + core.h / 2,
+    })
+    state.phase = 'combat'; state.spawnQueue = [{ kind: 'walker', delay: 100 }]; state.spawnTimer = 100
+    state = tick(state, 0.1)
+    check('核心摧毁：远程实弹扣尽耐久、释放占格并立即判负', state.core?.hp === 0 && state.phase === 'lost' && blockerAt(state, 4, 6) === null,
+      `hp=${state.core?.hp} phase=${state.phase} blocker=${blockerAt(state, 4, 6)?.kind ?? 'none'}`)
+  } finally {
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== 防守任务：物体/单位实例保护目标 ==')
+{
+  const savedLevel = structuredClone(LEVEL)
+  try {
+    LEVEL.core = null; LEVEL.buildCells = []; LEVEL.initialWalls = []; LEVEL.buildings = []
+    LEVEL.objects = [
+      { id: 77, kind: 'barrel', x: 6, y: 8, w: 1, h: 1, hp: 10, blockMove: true, blockProjectile: false, height: 1 },
+      { id: 78, kind: 'barrel', x: 7, y: 8, w: 1, h: 1, hp: 10, blockMove: true, blockProjectile: false, height: 1 },
+    ]
+    LEVEL.initialUnits = []
+    configureObjective(LEVEL, { type: 'defend', waves: 1, protectTarget: { type: 'object', objectIds: [77, 78] } })
+    let objectState = initialState()
+    objectState.phase = 'combat'; objectState.spawnQueue = [{ kind: 'walker', delay: 100 }]; objectState.spawnTimer = 100
+    objectState.objects[0].hp = 0
+    objectState = tick(objectState, 0.1)
+    check('防守保护 Autotile 组合：仍有一个连接图块存活时目标仍存在', objectState.phase === 'combat')
+    objectState.objects.find(object => object.id === 78)!.hp = 0
+    objectState = tick(objectState, 0.1)
+    check('防守保护 Autotile 组合：全部连接图块摧毁后进入失败分支', objectState.phase === 'lost')
+
+    LEVEL.objects = []
+    LEVEL.initialUnits = [{ id: 88, unitDefId: 'unit:uav', faction: 'ally', controller: 'ai', x: 8, y: 10, events: [] }]
+    configureObjective(LEVEL, { type: 'defend', waves: 1, protectTarget: { type: 'unit', unitPlacementId: 88 } })
+    let unitState = initialState()
+    unitState.phase = 'combat'; unitState.spawnQueue = [{ kind: 'walker', delay: 100 }]; unitState.spawnTimer = 100
+    unitState.allies.find(unit => unit.placementId === 88)!.hp = 0
+    unitState = tick(unitState, 0.1)
+    check('防守保护单位：所选已放置单位摧毁后立即进入失败分支', unitState.phase === 'lost')
+  } finally {
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== v2.85：组合式 AI 自爆攻击 ==')
+{
+  const legacyKamikaze = structuredClone(unitDefById(enemyUnitId('walker'))!)
+  legacyKamikaze.ai = {
+    targeting: { profile: 'fortress' }, movement: { profile: 'direct' }, attack: { profile: 'kamikaze' }, special: { profile: 'none' },
+  } as never
+  legacyKamikaze.combat!.profile = 'kamikaze'
+  legacyKamikaze.combat!.range = 8
+  delete legacyKamikaze.combat!.kamikaze
+  const migrated = normalizeKamikazeConfig(legacyKamikaze)
+  check('自爆迁移：旧草稿补 0.5 格引爆距离、1.5 格半径与被击毁不爆默认值', migrated.combat?.range === 0.5
+    && migrated.combat.kamikaze?.radius === 1.5 && migrated.combat.kamikaze.destroyedMode === 'none')
+
+  const kamikazeId = 'unit:sim-kamikaze'
+  const kamikaze = {
+    id: kamikazeId, name: '测试自爆旋翼机', type: 'rotorcraft' as const, faction: 'enemy' as const,
+    controller: 'ai' as const, targetClasses: ['fortress' as const, 'coreBuilding' as const, 'fixedBuilding' as const, 'wall' as const],
+    stats: { hp: 40, speed: 2, size: 0.25, air: true },
+    visual: { width: 0.5, height: 0.5 },
+    combat: { profile: 'kamikaze' as const, range: 0.5, interval: 1, damage: 100, projectileSpeed: 0, penetration: 0, kamikaze: { radius: 1.5, destroyedMode: 'none' as const } },
+    ai: { preferredTarget: 'playerControlled' as const, positioning: 'shortestRange' as const, movement: 'closeIn' as const, special: { profile: 'none' as const } },
+  }
+  try {
+    const kamikazeSaved = saveCustomUnitDef(kamikaze)
+    let arrival = arena()
+    arrival.spawnQueue = [{ kind: 'walker', delay: 100 }]; arrival.spawnTimer = 100
+    arrival.fortress.maxShield = 0; arrival.fortress.shield = 0
+    arrival.fortress.armor = { front: 0, rear: 0, left: 0, right: 0 }
+    const rect = fortressRect(arrival)
+    const arriving = mkEnemy(arrival, 'walker', rect.x + rect.w / 2, rect.y + rect.h / 2, 40)
+    arriving.controller = 'ai'
+    arriving.unitDefId = kamikazeId; arriving.mode = 'move'; arriving.targetKind = null; arriving.targetId = null
+    const hpBefore = arrival.fortress.hp, goldBefore = arrival.gold
+    arrival = tick(arrival, 0.05)
+    const arrivalExploded = arrival.explosions.some(explosion => explosion.r === 1.5)
+    const arrivalResolved = arrival.enemies.some(enemy => enemy.id === arriving.id && enemy.hp === 0 && enemy.kamikazeArrival)
+    arrival = run(arrival, 2, 0.1)
+    check('自爆抵达：进入引爆距离恒造成满额范围伤害并移除自身', arrival.fortress.hp === hpBefore - 100
+      && arrivalResolved && !arrival.enemies.some(enemy => enemy.id === arriving.id) && arrivalExploded,
+      `saved=${kamikazeSaved} hp=${arrival.fortress.hp}/${hpBefore} resolved=${arrivalResolved} alive=${arrival.enemies.some(enemy => enemy.id === arriving.id)} exploded=${arrivalExploded}`)
+    check('自爆抵达：主动引爆不计玩家击杀且不发放赏金', arrival.kills === 0 && arrival.gold === goldBefore)
+
+    let destroyed = arena()
+    destroyed.spawnQueue = [{ kind: 'walker', delay: 100 }]; destroyed.spawnTimer = 100
+    destroyed.core = { id: -1000, name: '测试核心', x: 2, y: 2, w: 1, h: 1, hp: 500, maxHp: 500, color: '#fff' }
+    destroyed.buildings = [{ id: 9201, name: '测试建筑', x: 2, y: 2, w: 1, h: 1, hp: 100, maxHp: 100, color: '#fff' }]
+    destroyed.walls = [{ id: 9202, cells: [{ x: 2, y: 2 }], hp: 100, maxHp: 100, state: 'intact' }]
+    destroyed.allies = [{ id: 9203, kind: 'soldier', producerId: -1, x: 2.5, y: 2.5, hp: 100, maxHp: 100, cooldown: 99, targetId: null, hitFlash: 0 }]
+    const killed = mkEnemy(destroyed, 'walker', 2.5, 2.5, 0)
+    killed.unitDefId = kamikazeId
+    destroyed = tick(destroyed, 0.05)
+    check('自爆被击毁：不爆档位不会产生爆炸或波及附近目标', destroyed.core?.hp === 500
+      && destroyed.buildings[0]?.hp === 100 && destroyed.walls[0]?.hp === 100 && destroyed.allies[0]?.hp === 100)
+
+    kamikaze.combat.kamikaze.destroyedMode = 'half'
+    saveCustomUnitDef(kamikaze)
+    let half = arena()
+    half.spawnQueue = [{ kind: 'walker', delay: 100 }]; half.spawnTimer = 100
+    half.core = { id: -1000, name: '测试核心', x: 2, y: 2, w: 1, h: 1, hp: 500, maxHp: 500, color: '#fff' }
+    half.buildings = [{ id: 9301, name: '测试建筑', x: 2, y: 2, w: 1, h: 1, hp: 100, maxHp: 100, color: '#fff' }]
+    half.walls = [{ id: 9302, cells: [{ x: 2, y: 2 }], hp: 100, maxHp: 100, state: 'intact' }]
+    half.allies = [{ id: 9303, kind: 'soldier', producerId: -1, x: 2.5, y: 2.5, hp: 100, maxHp: 100, cooldown: 99, targetId: null, hitFlash: 0 }]
+    const halfKilled = mkEnemy(half, 'walker', 2.5, 2.5, 0)
+    halfKilled.unitDefId = kamikazeId
+    half = tick(half, 0.05)
+    check('自爆被击毁：半额档位以 50% 伤害同时波及核心、建筑、墙和友军', half.core?.hp === 450
+      && half.buildings[0]?.hp === 50 && half.walls[0]?.hp === 50 && half.allies[0]?.hp === 50)
+    check('自爆被击毁：爆炸只结算一次且仍按正常击杀发放赏金', half.explosions.filter(explosion => explosion.r === 1.5).length === 1
+      && half.kills === 1 && half.gold > 100000)
+
+    check('新版战斗目标：自爆单位使用首选玩家主控单位，不再保留旧静态攻城目标分支',
+      unitDefById(kamikazeId)?.ai?.preferredTarget === 'playerControlled')
+  } finally {
+    deleteCustomUnitDef(kamikazeId)
+  }
+}
+
+console.log('== v2.87：单位类型专属参数与飞行器拆分 ==')
+{
+  const retiredInfantry = normalizeKamikazeConfig({
+    id: 'unit:sim-retired-infantry', name: '退役步兵', type: 'infantry', targetClasses: ['combatUnit'],
+    stats: { hp: 50, speed: 1, size: 0.2, air: false },
+  } as never)
+  const rotorBase = normalizeKamikazeConfig({
+    id: 'unit:sim-rotor-base', name: '测试旋翼机', type: 'rotorcraft', targetClasses: ['combatUnit'],
+    stats: { hp: 50, speed: 3, size: 0.2, air: true },
+  })
+  const legacyRotorId = 'unit:sim-legacy-rotor-coordinate'
+  importUnitLibrary({ version: 15, customs: [{
+    ...structuredClone(rotorBase), id: legacyRotorId,
+    typeConfig: {
+      kind: 'rotorcraft', rotors: [{ id: 'legacy-pair', asset: 'builtin:library/prop01', unit: 'pair', x: 0.5, y: -0.25, speed: 600 }],
+      altitude: 0.8, minAltitude: 0.2, maxAltitude: 3, climbRate: 1, accel: 4, turnSpeed: 180,
+    },
+  }] })
+  const migratedRotorConfig = unitTypeConfig(unitDefById(legacyRotorId)!)
+  check('旋翼坐标迁移：v15 被输入框误除以32的坐标恢复为真实像素值',
+    migratedRotorConfig?.kind === 'rotorcraft'
+      && migratedRotorConfig.rotors?.[0]?.x === 16
+      && migratedRotorConfig.rotors?.[0]?.y === -8
+      && migratedRotorConfig.rotors?.[0]?.layer === 'above',
+    JSON.stringify(migratedRotorConfig?.kind === 'rotorcraft' ? migratedRotorConfig.rotors : migratedRotorConfig))
+  deleteCustomUnitDef(legacyRotorId)
+  const aircraft = normalizeKamikazeConfig({ ...rotorBase, id: 'unit:sim-aircraft-default', type: 'aircraft', stats: { ...rotorBase.stats, air: true } } as unknown as typeof rotorBase)
+  const fixedWing = normalizeKamikazeConfig({
+    ...rotorBase, id: 'unit:sim-fixed-wing', type: 'fixedWingAircraft', stats: { ...rotorBase.stats, speed: 3, air: true },
+    typeConfig: { kind: 'fixedWingAircraft', altitude: 1.2, minAltitude: 0.5, maxAltitude: 4, climbRate: 0.75, accel: 3, turnSpeed: 90, minSpeed: 1, turnRadius: 2.5 },
+  })
+  const vehicle = normalizeKamikazeConfig({ ...rotorBase, id: 'unit:sim-vehicle-default', type: 'vehicle', stats: { ...rotorBase.stats, air: false } })
+  const staleRotor = normalizeKamikazeConfig({ ...rotorBase, id: 'unit:sim-stale-rotor-air', stats: { ...rotorBase.stats, air: false } })
+  const staleFixedWing = normalizeKamikazeConfig({ ...fixedWing, id: 'unit:sim-stale-fixed-wing-air', stats: { ...fixedWing.stats, air: false } })
+  check('类型迁移：步兵已停用、旧飞行器无损迁移为旋翼飞行器，现有类型补安全默认值', validateUnitDef(retiredInfantry).some(error => error.includes('单位类型已停用'))
+    && aircraft.type === 'rotorcraft' && unitTypeConfig(aircraft)?.kind === 'rotorcraft' && unitAltitude(aircraft) === 0.8
+    && unitTypeConfig(vehicle)?.kind === 'vehicle' && unitTypeConfig(vehicle)?.chassis === 'tracked')
+  check('飞行寻路：旋翼与固定翼以单位类型修正空中标记，敌方挂炮飞行器不会进入地面距离场',
+    staleRotor.stats.air && staleFixedWing.stats.air
+      && !unitUsesGroundApproachPath(staleRotor) && !unitUsesGroundApproachPath(staleFixedWing)
+      && unitUsesGroundApproachPath(vehicle))
+  const aircraftConfig = unitTypeConfig(aircraft)
+  const singleRotor = rotorPlacements({ id: 'single', asset: 'rotor', unit: 'single', x: 11, y: -7, speed: 720 })
+  const pairedRotors = rotorPlacements({ id: 'pair', asset: 'rotor', unit: 'pair', x: 11, y: -7, speed: 720 })
+  check('旋翼坐标：单个保留配置坐标；一对按 X 左右镜像并使用相反旋向',
+    singleRotor.length === 1 && singleRotor[0].x === 11 && singleRotor[0].y === -7 && singleRotor[0].speed === 720
+      && pairedRotors.length === 2
+      && pairedRotors[0].x === -11 && pairedRotors[1].x === 11
+      && pairedRotors.every(rotor => rotor.y === -7)
+      && pairedRotors[0].speed === 720 && pairedRotors[1].speed === -720,
+    `single=${JSON.stringify(singleRotor)} pair=${JSON.stringify(pairedRotors)}`)
+  const layeredRotor = normalizeKamikazeConfig({
+    ...rotorBase,
+    id: 'unit:sim-layered-rotor',
+    typeConfig: {
+      kind: 'rotorcraft', rotors: [{ id: 'lower', asset: 'rotor', layer: 'below', unit: 'single', x: 0, y: 0, speed: 720 }],
+      altitude: 0.8, minAltitude: 0.2, maxAltitude: 3, climbRate: 1, accel: 4, turnSpeed: 180,
+    },
+  })
+  check('旋翼层级：旧数据默认在上，显式“下”配置可持久保留',
+    aircraftConfig?.kind === 'rotorcraft'
+      && (aircraftConfig.rotors ?? []).every(rotor => (rotor.layer ?? 'above') === 'above')
+      && unitTypeConfig(layeredRotor)?.kind === 'rotorcraft'
+      && unitTypeConfig(layeredRotor)?.rotors?.[0]?.layer === 'below')
+  const aircraftHost = { x: 5, y: 5, aircraft: { heading: 0, vx: 0, vy: 0, altitude: 0.8, targetAltitude: 0.8, verticalSpeed: 0 } }
+  for (let index = 0; index < 10; index++) moveUnitAircraftToward(aircraftHost, aircraft, 10, 5, 0.1)
+  check('旋翼飞行器：旧参数保留，单位按受限转向连续加速且阴影由高度自动推导',
+    aircraftConfig?.kind === 'rotorcraft' && aircraftConfig.accel === 4 && aircraftConfig.turnSpeed === 180
+      && aircraftHost.x > 5 && Math.hypot(aircraftHost.aircraft.vx, aircraftHost.aircraft.vy) <= aircraft.stats.speed + 1e-6
+      && unitShadowScale(aircraft) < 1)
+  const strafingRotorHost = {
+    id: 705, x: 8, y: 8,
+    aircraft: { heading: 0, vx: 0, vy: 0, altitude: 0.8, targetAltitude: 0.8, verticalSpeed: 0 },
+    vehicle: { heading: 0, vx: 0, vy: 0 },
+  }
+  for (let index = 0; index < 10; index++) moveUnitAircraftToward(strafingRotorHost, aircraft, 12, 8, 0.1, 0.62, 0)
+  check('旋翼战斗环绕：受限炮位可保持机头朝向，同时沿环绕切线持续侧飞',
+    strafingRotorHost.x > 8.2
+      && Math.abs(wrapAngle(strafingRotorHost.aircraft.heading)) < 1e-9
+      && Math.abs(wrapAngle(strafingRotorHost.vehicle.heading)) < 1e-9
+      && strafingRotorHost.aircraft.vx > 0.1,
+    `pos=${strafingRotorHost.x.toFixed(2)},${strafingRotorHost.y.toFixed(2)} heading=${strafingRotorHost.aircraft.heading.toFixed(2)} vx=${strafingRotorHost.aircraft.vx.toFixed(2)}`)
+  const fixedHost = { id: 13, x: 8, y: 8, aircraft: { heading: 0, vx: 0, vy: -1, altitude: 1.2, targetAltitude: 1.2, verticalSpeed: 0 } }
+  const fixedStart = { x: fixedHost.x, y: fixedHost.y }
+  for (let index = 0; index < 30; index++) moveUnitAircraftToward(fixedHost, fixedWing, 8, 8, 0.1, 0)
+  const fixedSpeed = Math.hypot(fixedHost.aircraft.vx, fixedHost.aircraft.vy)
+  check('固定翼飞行器：无推进或抵达目标后仍保持最低航速并围绕目标盘旋',
+    fixedSpeed >= 1 - 1e-6 && Math.hypot(fixedHost.x - fixedStart.x, fixedHost.y - fixedStart.y) > 0.2
+      && Math.abs(fixedHost.aircraft.heading) > 0.05,
+    `speed=${fixedSpeed.toFixed(2)} pos=${fixedHost.x.toFixed(2)},${fixedHost.y.toFixed(2)} heading=${fixedHost.aircraft.heading.toFixed(2)}`)
+  const edgeRotorHost = {
+    id: 707, x: LEVEL.cols / 2, y: LEVEL.rows - 0.1,
+    aircraft: { heading: Math.PI, vx: 0, vy: 0, altitude: 0.8, targetAltitude: 0.8, verticalSpeed: 0 },
+  }
+  for (let index = 0; index < 12; index++) moveUnitAircraftToward(edgeRotorHost, aircraft, edgeRotorHost.x, LEVEL.rows + 4, 0.1)
+  const rotorLeftBattlefield = edgeRotorHost.y > LEVEL.rows
+  for (let index = 0; index < 45; index++) moveUnitAircraftToward(edgeRotorHost, aircraft, LEVEL.cols / 2, LEVEL.rows - 4, 0.1)
+  check('飞行边界：旋翼机可以越过战场边缘继续转向，并按后续目标自主返回',
+    rotorLeftBattlefield && edgeRotorHost.y < LEVEL.rows,
+    `left=${rotorLeftBattlefield} returnPos=${edgeRotorHost.x.toFixed(2)},${edgeRotorHost.y.toFixed(2)}`)
+  const edgeFixedHost = {
+    id: 709, x: LEVEL.cols / 2, y: LEVEL.rows - 0.1,
+    aircraft: { heading: Math.PI, vx: 0, vy: 1, altitude: 1.2, targetAltitude: 1.2, verticalSpeed: 0 },
+  }
+  for (let index = 0; index < 15; index++) moveUnitAircraftToward(edgeFixedHost, fixedWing, edgeFixedHost.x, LEVEL.rows + 3, 0.1, 1)
+  const fixedLeftBattlefield = edgeFixedHost.y > LEVEL.rows
+  for (let index = 0; index < 120; index++) moveUnitAircraftToward(edgeFixedHost, fixedWing, LEVEL.cols / 2, LEVEL.rows - 5, 0.1, 1)
+  check('飞行边界：固定翼越界后仍保持最低航速和转向能力，不会被边界钳成静止',
+    fixedLeftBattlefield && edgeFixedHost.y < LEVEL.rows,
+    `left=${fixedLeftBattlefield} returnPos=${edgeFixedHost.x.toFixed(2)},${edgeFixedHost.y.toFixed(2)} speed=${Math.hypot(edgeFixedHost.aircraft.vx, edgeFixedHost.aircraft.vy).toFixed(2)}`)
+  let offMapShotState = arena()
+  offMapShotState.phase = 'prep'
+  offMapShotState.prepLeft = 99
+  offMapShotState.enemyProjectiles = []
+  const offMapTarget = fortressRect(offMapShotState)
+  const offMapTargetX = offMapTarget.x + offMapTarget.w / 2
+  const offMapTargetY = offMapTarget.y + offMapTarget.h / 2
+  const offMapShotId = offMapShotState.nextId++
+  const offMapHpBefore = offMapShotState.fortress.hp
+  offMapShotState.enemyProjectiles.push({
+    id: offMapShotId, shooterId: -707,
+    x: -1, y: offMapTargetY, px: -1, py: offMapTargetY,
+    heading: Math.PI / 2, speed: 32, damage: 10, penetration: 999,
+    traveled: 0, maxTravel: 200, targetKind: 'fortress', targetId: 0,
+    targetX: offMapTargetX, targetY: offMapTargetY,
+    sourceSide: 'enemy', sourceFaction: 'enemy',
+  })
+  offMapShotState = tick(offMapShotState, 0.05)
+  const shotSurvivedOutside = offMapShotState.enemyProjectiles.some(projectile => projectile.id === offMapShotId && projectile.x < 0)
+  offMapShotState = run(offMapShotState, 5, 0.05)
+  const remainingOffMapShot = offMapShotState.enemyProjectiles.find(projectile => projectile.id === offMapShotId)
+  check('飞行边界：场外飞行器发射的弹丸不会被地图边缘删除，可飞回场内正常命中',
+    shotSurvivedOutside && offMapShotState.fortress.hp < offMapHpBefore,
+    `survived=${shotSurvivedOutside} hp=${offMapShotState.fortress.hp}/${offMapHpBefore} target=${offMapTargetX.toFixed(2)},${offMapTargetY.toFixed(2)} projectile=${remainingOffMapShot?.x.toFixed(2)},${remainingOffMapShot?.y.toFixed(2)}`)
+  setUnitAircraftTargetAltitude(fixedHost, fixedWing, 99)
+  updateUnitAircraftAltitude(fixedHost, fixedWing, 1)
+  check('动态高度：目标高度按模板上下限钳制，并以爬升速度逐帧接近', fixedHost.aircraft.targetAltitude === 4
+    && Math.abs(currentUnitAltitude(fixedHost, fixedWing) - 1.95) < 1e-6
+    && Math.abs(fixedHost.aircraft.verticalSpeed - 0.75) < 1e-6)
+  setUnitAircraftTargetAltitude(fixedHost, fixedWing, -99)
+  updateUnitAircraftAltitude(fixedHost, fixedWing, 4)
+  check('动态高度：下降同样遵守最低高度和下降速度', fixedHost.aircraft.targetAltitude === 0.5
+    && Math.abs(currentUnitAltitude(fixedHost, fixedWing) - 0.5) < 1e-6)
+  const crashingRotor = {
+    id: 701, x: 7, y: 7,
+    aircraft: { heading: 0, vx: 1.2, vy: -0.4, altitude: 1.6, targetAltitude: 1.6, verticalSpeed: 0 },
+  }
+  const rotorCrashStarted = beginUnitAircraftCrash(crashingRotor, aircraft, 12)
+  const rotorCrashStart = { x: crashingRotor.x, y: crashingRotor.y, heading: crashingRotor.aircraft.heading }
+  for (let index = 0; index < 5; index++) advanceUnitAircraftCrash(crashingRotor, aircraft, 0.1)
+  const rejectedCrashAltitudeChange = !setUnitAircraftTargetAltitude(crashingRotor, aircraft, 3)
+  updateUnitAircraftAltitude(crashingRotor, aircraft, 1)
+  check('旋翼坠毁：结构归零后自转、保留水平惯性并持续下降，普通高度指令不再接管', rotorCrashStarted
+    && crashingRotor.aircraft.altitude < 1.6
+    && Math.abs(crashingRotor.aircraft.heading - rotorCrashStart.heading) > 0.2
+    && Math.hypot(crashingRotor.x - rotorCrashStart.x, crashingRotor.y - rotorCrashStart.y) > 0.1
+    && rejectedCrashAltitudeChange,
+  `alt=${crashingRotor.aircraft.altitude.toFixed(2)} heading=${crashingRotor.aircraft.heading.toFixed(2)} pos=${crashingRotor.x.toFixed(2)},${crashingRotor.y.toFixed(2)}`)
+  const driftRotor = {
+    id: 703, x: 12, y: 12,
+    aircraft: { heading: 0, vx: 0, vy: 0, altitude: 2.4, targetAltitude: 2.4, verticalSpeed: 0 },
+  }
+  const otherDriftRotor = {
+    id: 704, x: 12, y: 12,
+    aircraft: { heading: 0, vx: 0, vy: 0, altitude: 2.4, targetAltitude: 2.4, verticalSpeed: 0 },
+  }
+  beginUnitAircraftCrash(driftRotor, aircraft, 30)
+  beginUnitAircraftCrash(otherDriftRotor, aircraft, 30)
+  const driftHeading = driftRotor.aircraft.crash!.driftHeading!
+  const earlyHeading = driftRotor.aircraft.heading
+  const earlyAltitude = driftRotor.aircraft.altitude
+  advanceUnitAircraftCrash(driftRotor, aircraft, 0.1)
+  const earlySpin = Math.abs(wrapAngle(driftRotor.aircraft.heading - earlyHeading))
+  const earlyDescent = earlyAltitude - driftRotor.aircraft.altitude
+  const startCrashGain = unitAircraftMovementAudioGain({ ...driftRotor.aircraft.crash!, elapsed: 0 })
+  const middleCrashGain = unitAircraftMovementAudioGain({ ...driftRotor.aircraft.crash!, elapsed: driftRotor.aircraft.crash!.duration * 0.5 })
+  for (let index = 0; index < 9; index++) advanceUnitAircraftCrash(driftRotor, aircraft, 0.1)
+  const lateHeading = driftRotor.aircraft.heading
+  const lateAltitude = driftRotor.aircraft.altitude
+  advanceUnitAircraftCrash(driftRotor, aircraft, 0.1)
+  const lateSpin = Math.abs(wrapAngle(driftRotor.aircraft.heading - lateHeading))
+  const lateDescent = lateAltitude - driftRotor.aircraft.altitude
+  const driftProjection = (driftRotor.x - 12) * dirX(driftHeading) + (driftRotor.y - 12) * dirY(driftHeading)
+  check('旋翼坠毁：每个实例确定随机偏出方向，并持续向该方向漂移', Number.isFinite(driftHeading)
+    && driftRotor.aircraft.crash!.driftHeading !== otherDriftRotor.aircraft.crash!.driftHeading
+    && driftProjection > 0.04,
+  `heading=${driftHeading.toFixed(2)} other=${otherDriftRotor.aircraft.crash!.driftHeading?.toFixed(2)} projection=${driftProjection.toFixed(3)}`)
+  check('旋翼坠毁：后段自转和下降速度高于初段', lateSpin > earlySpin * 1.25 && lateDescent > earlyDescent * 1.25,
+    `spin=${earlySpin.toFixed(3)}→${lateSpin.toFixed(3)} descent=${earlyDescent.toFixed(3)}→${lateDescent.toFixed(3)}`)
+  check('旋翼坠毁：移动循环音按进度由 1 平滑衰减至 0', startCrashGain === 1
+    && middleCrashGain > 0 && middleCrashGain < startCrashGain
+    && unitAircraftMovementAudioGain({ ...driftRotor.aircraft.crash!, elapsed: driftRotor.aircraft.crash!.duration }) === 0,
+  `gain=${startCrashGain.toFixed(2)}→${middleCrashGain.toFixed(2)}→0`)
+  check('旋翼移动音：静止为10%，达到极速80%时满音量且之后保持满音量', ROTORCRAFT_AUDIO_MIN_GAIN === 0.1
+    && ROTORCRAFT_AUDIO_FULL_SPEED_RATIO === 0.8
+    && rotorcraftMovementAudioGain(0, 10) === 0.1
+    && rotorcraftMovementAudioGain(4, 10) === 0.55
+    && rotorcraftMovementAudioGain(8, 10) === 1
+    && rotorcraftMovementAudioGain(12, 10) === 1)
+  check('旋翼坠毁音：无论坠毁瞬间速度如何都从100%开始并按坠毁进度衰减', rotorcraftMovementAudioGain(0, 10, { ...driftRotor.aircraft.crash!, elapsed: 0 }) === 1
+    && rotorcraftMovementAudioGain(0, 10, { ...driftRotor.aircraft.crash!, elapsed: driftRotor.aircraft.crash!.duration * 0.5 }) === middleCrashGain
+    && rotorcraftMovementAudioGain(12, 10, { ...driftRotor.aircraft.crash!, elapsed: driftRotor.aircraft.crash!.duration }) === 0)
+  let rotorImpacted = false
+  for (let index = 0; index < 50 && !rotorImpacted; index++) rotorImpacted = advanceUnitAircraftCrash(crashingRotor, aircraft, 0.1)
+  check('旋翼坠毁：下降完成后才触地并归零高度与速度', rotorImpacted
+    && crashingRotor.aircraft.altitude === 0
+    && crashingRotor.aircraft.vx === 0 && crashingRotor.aircraft.vy === 0)
+
+  const crashingFixed = {
+    id: 702, x: 10, y: 10,
+    aircraft: { heading: 0, vx: 0, vy: -2, altitude: 2.2, targetAltitude: 2.2, verticalSpeed: 0 },
+  }
+  beginUnitAircraftCrash(crashingFixed, fixedWing, 20)
+  const fixedCrashStart = { x: crashingFixed.x, y: crashingFixed.y, heading: crashingFixed.aircraft.heading }
+  for (let index = 0; index < 7; index++) advanceUnitAircraftCrash(crashingFixed, fixedWing, 0.1)
+  const fixedCrashSpeed = Math.hypot(crashingFixed.aircraft.vx, crashingFixed.aircraft.vy)
+  check('固定翼坠毁：保持前进速度并以大半径弧线俯冲，不会原地垂落', crashingFixed.aircraft.altitude < 2.2
+    && fixedCrashSpeed >= 0.7
+    && Math.hypot(crashingFixed.x - fixedCrashStart.x, crashingFixed.y - fixedCrashStart.y) > 0.5
+    && Math.abs(crashingFixed.aircraft.heading - fixedCrashStart.heading) > 0.02,
+  `alt=${crashingFixed.aircraft.altitude.toFixed(2)} speed=${fixedCrashSpeed.toFixed(2)} pos=${crashingFixed.x.toFixed(2)},${crashingFixed.y.toFixed(2)}`)
+  const lowWall: BattleObject = { id: 1, kind: 'rock', x: 0, y: 0, w: 1, h: 1, hp: 1, maxHp: 1, blockMove: true, blockProjectile: true, height: 1 }
+  const highWall: BattleObject = { ...lowWall, id: 2, height: 3 }
+  check('动态高度战斗：高度 1 物体阻挡地面弹道，但飞行高度足够时可越过', objectBlocksEnvironmentShot(lowWall, { kind: 'direct', subtype: 'bullet', altitude: 0 })
+    && !objectBlocksEnvironmentShot(lowWall, { kind: 'direct', subtype: 'bullet', altitude: 1.2 })
+    && objectBlocksEnvironmentShot(highWall, { kind: 'direct', subtype: 'bullet', altitude: 2 }))
+  const shortArc = shellArcVisual(0.5, 0, 0, 2, 0)
+  const longArc = shellArcVisual(0.5, 0, 0, 12, 0)
+  const earlyArc = shellArcVisual(0.2, 0, 0, 12, 0)
+  const lateArc = shellArcVisual(0.9, 0, 0, 12, 0)
+  check('抛射视觉：弧高随射程增加，阴影在最高点缩小且落点提示只在末段出现', longArc.altitude > shortArc.altitude
+    && longArc.shadowScale < 1 && earlyArc.landingProgress === 0 && lateArc.landingProgress > 0)
+  const invalidFixedWing = structuredClone(fixedWing)
+  if (invalidFixedWing.typeConfig?.kind === 'fixedWingAircraft') invalidFixedWing.typeConfig.minSpeed = invalidFixedWing.stats.speed + 1
+  check('固定翼校验：最低航速不能超过最大移动速度', validateUnitDef(invalidFixedWing).some(error => error.includes('最低航速')))
+  const platformDrone = structuredClone(rotorBase)
+  platformDrone.id = 'unit:sim-platform-drone'
+  platformDrone.name = '平台无人机'
+  platformDrone.vehiclePlatform = {
+    ...structuredClone(DEFAULT_FORTRESS), id: 'unit-platform:unit:sim-platform-drone', unitId: platformDrone.id,
+    name: platformDrone.name, platformType: 'rotorcraft', chassis: 'hovercraft', hp: platformDrone.stats.hp,
+    speed: platformDrone.stats.speed, tracks: undefined, wheels: undefined,
+    rotors: [{ id: 'main', asset: 'builtin:rotor/rotor01', unit: 'single', x: 0, y: 0, speed: 720 }],
+    altitude: 0.8, minAltitude: 0.2, maxAltitude: 3, climbRate: 1,
+    hardpoints: [{ id: 'hp1', x: 2.5, y: 4, size: 'S' }],
+    effects: [{ id: 'fx1', x: 2.5, y: 6, kind: 'smoke', state: 'move' }],
+  }
+  const platformSaved = saveCustomUnitDef(platformDrone)
+  const platformResolved = unitDefById(platformDrone.id)
+  check('飞行载具共用平台：旋翼飞行器可持久化矩形车体、炮位、特效点与旋翼专属模板', platformSaved
+    && platformResolved?.type === 'rotorcraft'
+    && platformResolved.vehiclePlatform?.hardpoints[0]?.id === 'hp1'
+    && platformResolved.vehiclePlatform?.effects?.[0]?.id === 'fx1'
+    && platformResolved.vehiclePlatform?.rotors?.[0]?.id === 'main')
+  const deployableAircraft = playableVehicleDefs().find(def => def.unitId === platformDrone.id)
+  const aircraftPreset = deployableAircraft ? normalizeVehicleLoadout({ id: 'sim-aircraft-preset', name: '飞行出战', fortressDefId: deployableAircraft.id, turrets: [], modules: [] }) : null
+  check('关卡备选出战：旋翼与固定翼平台进入统一载具候选并可建立整备预设', deployableAircraft?.platformType === 'rotorcraft'
+    && deployableAircraft.hardpoints[0]?.id === 'hp1' && aircraftPreset?.fortressDefId === deployableAircraft.id)
+  if (platformResolved) {
+    let flightState = arena()
+    flightState.phase = 'combat'; flightState.spawnQueue = []; flightState.enemies = []
+    const playerRect = fortressRect(flightState)
+    const flyer = mkEnemy(flightState, 'walker', playerRect.x + playerRect.w / 2, playerRect.y + playerRect.h / 2, platformResolved.stats.hp)
+    flyer.unitDefId = platformResolved.id
+    flyer.controller = 'ai'
+    flyer.aiOverride = {
+      targeting: { profile: 'fortress' }, movement: { profile: 'stationary' },
+      attack: { profile: 'projectile' }, special: { profile: 'none' },
+    }
+    flyer.vehicle = {
+      heading: 0, vx: 0, vy: 3, steerAngle: 0, turnW: 0,
+      heat: 0, overheated: false, heatCap: 100, heatDissipation: 10,
+      trackPhase: [], armor: { front: 0, rear: 0, left: 0, right: 0 }, maxArmor: { front: 0, rear: 0, left: 0, right: 0 }, turrets: [],
+    }
+    flyer.aircraft = { heading: 0, vx: 0, vy: 3, altitude: 0.8, targetAltitude: 0.8, verticalSpeed: 0 }
+    const beforeCollision = { x: flyer.x, y: flyer.y, hp: flyer.hp, fortressHp: flightState.fortress.hp }
+    const flightHits = applyFortressVehicleCollisions(flightState, 0, -3)
+    check('飞行载具碰撞：空中单位不参与玩家载具的实体分离或冲撞伤害', flightHits === 0
+      && flyer.x === beforeCollision.x && flyer.y === beforeCollision.y && flyer.hp === beforeCollision.hp
+      && flightState.fortress.hp === beforeCollision.fortressHp)
+
+    flyer.x = playerRect.x + playerRect.w / 2
+    flyer.y = Math.max(1, playerRect.y + playerRect.h / 2 - 3)
+    flyer.vehicle.vx = 0; flyer.vehicle.vy = 0
+    flyer.aircraft.vx = 0; flyer.aircraft.vy = 0
+    platformResolved.vehiclePlatform!.hardpoints[0].builtIn = 'mg'
+    ensureUnitVehicleTurrets(flightState, flyer, platformResolved)
+    let flightMuzzle: typeof flightState.muzzles[number] | undefined
+    for (let index = 0; index < 80 && !flightMuzzle; index++) {
+      flightState = tick(flightState, 0.05)
+      flightMuzzle = flightState.muzzles.find(item => flyer.vehicle?.turrets?.some(turret => turret.id === item.turretId))
+    }
+    check('飞行载具炮口：炮口事件继承发射单位高度并与炮塔、弹丸视觉对齐', Math.abs((flightMuzzle?.sourceAltitude ?? -1) - 0.8) < 1e-6,
+      JSON.stringify({ muzzle: flightMuzzle, turrets: flyer.vehicle.turrets, enemyProjectiles: flightState.enemyProjectiles.slice(-2), flyer: flightState.enemies.find(item => item.id === flyer.id) }))
+    const flightProjectile = flightState.enemyProjectiles.find(projectile => flyer.vehicle?.turrets?.some(turret => turret.id === projectile.shooterId))
+    check('飞行载具弹丸：出生首帧视觉高度等于炮口与发射单位高度', !!flightProjectile
+      && Math.abs((flightProjectile.sourceAltitude ?? -1) - 0.8) < 1e-6
+      && Math.abs(projectileAltitudeAtTravel(flightProjectile, 0) - 0.8) < 1e-6)
+    flightState.time += 1
+    damageEnemy(flightState, flyer, 1, null, { x: flyer.x, y: flyer.y - 1, incomingDx: 0, incomingDy: 1, ammoId: 'bullet_std' })
+    const flightHit = flightState.unitHits.at(-1)
+    check('飞行载具受击：命中事件保存实时高度并叠加到空中主体', Math.abs((flightHit?.altitude ?? -1) - 0.8) < 1e-6)
+    flightState.spawnQueue = [{ kind: 'walker', delay: 100 }]
+    flightState.spawnTimer = 100
+    flightState.projectiles = []; flightState.enemyProjectiles = []; flightState.explosions = []; flightState.audioSignals = []
+    const liveFlyerBeforeCrash = flightState.enemies.find(enemy => enemy.id === flyer.id)
+    if (liveFlyerBeforeCrash) liveFlyerBeforeCrash.hp = 0
+    flightState = tick(flightState, 0.05)
+    const crashingFlyer = flightState.enemies.find(enemy => enemy.id === flyer.id)
+    check('飞行坠毁闭环：结构归零先保留空中单位并停止炮塔，不立即播放触地主爆炸', !!crashingFlyer?.aircraft?.crash
+      && flightState.explosions.length === 0
+      && !flightState.audioSignals?.some(signal => signal.kind === 'unitDeath')
+      && crashingFlyer.vehicle?.turrets?.every(turret => !turret.firing && turret.burstLeft === 0),
+    `alive=${!!crashingFlyer} crash=${!!crashingFlyer?.aircraft?.crash} explosions=${flightState.explosions.length}`)
+    flightState = run(flightState, 1.4, 0.05)
+    check('飞行坠毁闭环：下降触地后才移除单位并生成统一摧毁模板与死亡音频', !flightState.enemies.some(enemy => enemy.id === flyer.id)
+      && flightState.explosions.length === 1
+      && flightState.explosions[0]?.kind === 'unitDeath'
+      && !!flightState.audioSignals?.some(signal => signal.kind === 'unitDeath'),
+    `alive=${flightState.enemies.some(enemy => enemy.id === flyer.id)} explosions=${flightState.explosions.length} audio=${flightState.audioSignals?.map(signal => signal.kind).join(',')}`)
+  }
+  deleteCustomUnitDef(platformDrone.id)
+  const collidingVehicle: FortressDef = { ...structuredClone(DEFAULT_FORTRESS), id: 'sim-uav-collision', unitId: 'unit:uav', name: '错误的无人机载具快照' }
+  FORTRESS_DEFS.push(collidingVehicle)
+  try {
+    const resolvedUav = unitDefById('unit:uav')
+    check('内置飞行器保留 ID：旧载具快照不能遮住无人飞行器', resolvedUav?.type === 'rotorcraft' && resolvedUav.name === '无人飞行器')
+  } finally {
+    FORTRESS_DEFS.splice(FORTRESS_DEFS.indexOf(collidingVehicle), 1)
+  }
+  const explicitWalker: FortressDef = { ...structuredClone(DEFAULT_FORTRESS), id: 'sim-uav-walker', unitId: 'unit:uav', name: '无人步行机甲', chassis: 'walker', explicitUnitTypeOverride: true }
+  FORTRESS_DEFS.push(explicitWalker)
+  try {
+    const resolvedWalker = unitDefById('unit:uav')
+    check('单位编辑器显式转换：内置飞行器可使用同一稳定 ID 切换为步行机甲', resolvedWalker?.type === 'vehicle'
+      && unitTypeConfig(resolvedWalker)?.kind === 'vehicle' && unitTypeConfig(resolvedWalker)?.chassis === 'walker')
+  } finally {
+    FORTRESS_DEFS.splice(FORTRESS_DEFS.indexOf(explicitWalker), 1)
+  }
+  const staleVehicleConfig = unitTypeConfig(vehicle)
+  const legacyWheeled = {
+    ...vehicle,
+    typeConfig: staleVehicleConfig?.kind === 'vehicle' ? { ...staleVehicleConfig, chassis: 'tracked' as const } : undefined,
+    legacy: { registry: 'fortress' as const, id: 'sim-wheel', def: { ...structuredClone(DEFAULT_FORTRESS), id: 'sim-wheel', chassis: 'wheeled' as const } },
+  }
+  check('载具类型来源：完整载具定义优先于旧单位副本，轮式吉普不会误标为履带载具', unitTypeConfig(legacyWheeled)?.kind === 'vehicle'
+    && unitTypeConfig(legacyWheeled)?.chassis === 'wheeled')
+  const legacyPlacementDefaults = normalizeKamikazeConfig({ ...rotorBase, faction: 'enemy', controller: 'ai' } as typeof rotorBase & { faction: string; controller: string })
+  check('单位模板归属迁移：旧阵营和控制器字段被移除，归属只由关卡实例保存', !('faction' in legacyPlacementDefaults) && !('controller' in legacyPlacementDefaults))
+
+  const invalidBuilding = structuredClone(rotorBase)
+  invalidBuilding.type = 'building'; invalidBuilding.typeConfig = { kind: 'building', footprintW: 0, footprintH: 13, blocksMovement: true }
+  check('类型校验：拒绝非法建筑占格', validateUnitDef(invalidBuilding).some(error => error.includes('建筑占格')))
+
+  const buildingId = 'unit:sim-blocking-building'
+  const building = {
+    id: buildingId, name: '测试阻挡建筑', type: 'building' as const,
+    targetClasses: ['combatUnit' as const], stats: { hp: 120, speed: 5, size: 0.4, air: false },
+    visual: { width: 2, height: 3 }, typeConfig: { kind: 'building' as const, footprintW: 2, footprintH: 3, blocksMovement: true },
+    combat: { profile: 'hitscan' as const, range: 8, interval: 1, projectileId: 'ray_std', damage: 5, projectileSpeed: 0, penetration: 0 },
+    ai: { targeting: { profile: 'closestHostile' as const, allowedTargets: ['combatUnit' as const] }, movement: { profile: 'direct' as const }, attack: { profile: 'hitscan' as const } },
+  }
+  try {
+    saveCustomUnitDef(building)
+    check('建筑占格：运行时解析 2×3 阻挡矩形并保留可配置开关', unitFootprint(unitDefById(buildingId)!).w === 2
+      && unitFootprint(unitDefById(buildingId)!).h === 3 && unitFootprint(unitDefById(buildingId)!).blocksMovement)
+    let state = arena()
+    state.spawnQueue = [{ kind: 'walker', delay: 100 }]; state.spawnTimer = 100
+    state.objects = []; state.walls = []; state.buildings = []; state.core = null
+    state.allies = [{ id: 9401, kind: 'soldier', unitDefId: buildingId, producerId: 0, x: 5, y: 6.5, hp: 120, maxHp: 120, cooldown: 0, targetId: null, hitFlash: 0 }]
+    const before = { x: state.allies[0].x, y: state.allies[0].y }
+    check('建筑占格：2×3 范围进入 combatUnit 阻挡查询', blockerAt(state, 4, 5)?.kind === 'combatUnit'
+      && blockerAt(state, 5, 7)?.kind === 'combatUnit' && blockerAt(state, 6, 7) === null)
+    mkEnemy(state, 'walker', 10, 6.5, 100)
+    state = run(state, 0.8, 0.1)
+    check('建筑单位：即使定义了移动速度和直冲 AI 也保持原地', state.allies[0]?.x === before.x && state.allies[0]?.y === before.y)
+    const pathVersion = state.pathVersion
+    if (state.allies[0]) state.allies[0].hp = 0
+    state = run(state, 0.8, 0.1)
+    check('建筑占格：建筑阵亡后移除阻挡并触发寻路版本更新', !state.allies.some(ally => ally.id === 9401)
+      && state.pathVersion > pathVersion && blockerAt(state, 4, 5)?.kind !== 'combatUnit',
+      `allies=${state.allies.map(ally => `${ally.id}:${ally.hp}:${ally.deathLeft}`).join(',')} path=${state.pathVersion}/${pathVersion} blocker=${blockerAt(state, 4, 5)?.kind ?? 'none'}`)
+  } finally {
+    deleteCustomUnitDef(buildingId)
+  }
+}
+
+console.log('== v2.87：Boss 阶段与单位脚本控制 ==')
+{
+  const normalized = normalizeEventActions([{ type: 'unit', selector: { scope: 'broken' }, command: { kind: 'move', x: -5, y: 999, speed: 99, wait: true } }, { type: 'unit', selector: { scope: 'allEnemies' }, command: { kind: 'ai', mode: 'replace', targeting: 'bad', movement: 'direct', attack: 'projectile' } }, { type: 'unit', selector: { scope: 'source' }, command: { kind: 'attack', target: { type: 'unit', placementId: 77 }, seconds: 2, wait: true } }, { type: 'unit', selector: { scope: 'source' }, command: { kind: 'behavior', behavior: 'random', range: 9, interval: 2, speedPercent: 65 } }, { type: 'unit', selector: { scope: 'source' }, command: { kind: 'altitude', altitude: 99, wait: true } }])
+  const move = normalized[0]?.type === 'unit' ? normalized[0] : null
+  const replace = normalized[1]?.type === 'unit' ? normalized[1] : null
+  const attack = normalized[2]?.type === 'unit' ? normalized[2] : null
+  const behavior = normalized[3]?.type === 'unit' ? normalized[3] : null
+  const altitude = normalized[4]?.type === 'unit' ? normalized[4] : null
+  check('单位指令迁移：非法选择器回落事件来源，坐标与速度钳制到安全范围', move?.selector.scope === 'source' && move.command.kind === 'move' && move.command.x === 0 && move.command.y === 500 && move.command.speed === 20)
+  check('单位指令迁移：旧替换 AI 自动迁入三字段协议', replace?.command.kind === 'ai'
+    && replace.command.preferredTarget === 'allHostile'
+    && replace.command.positioning === 'shortestRange'
+    && replace.command.movement === 'closeIn')
+  check('单位攻击指令：指定关卡单位目标可归一化保存', attack?.command.kind === 'attack' && attack.command.target !== 'nearestHostile' && attack.command.target.type === 'unit' && attack.command.target.placementId === 77)
+  check('单位行为指令：行为及范围、间隔、速度可归一化保存', behavior?.command.kind === 'behavior' && behavior.command.behavior === 'random' && behavior.command.range === 9 && behavior.command.interval === 2 && behavior.command.speedPercent === 65)
+  check('飞行高度指令：目标高度归一化到关卡安全范围并保留等待语义', altitude?.command.kind === 'altitude' && altitude.command.altitude === 10 && altitude.command.wait)
+  const normalizedFaction = normalizeEventActions([{ type: 'unit', selector: { scope: 'group', group: '  第三组  ' }, command: { kind: 'faction', faction: 'neutralHostile' } }])[0]
+  check('切换阵营指令：组别选择器与目标阵营可归一化保存', normalizedFaction?.type === 'unit'
+    && normalizedFaction.selector.scope === 'group' && normalizedFaction.selector.group === '第三组'
+    && normalizedFaction.command.kind === 'faction' && normalizedFaction.command.faction === 'neutralHostile')
+
+  const altitudeUnitId = 'unit:sim-altitude-command'
+  const altitudeUnit = normalizeKamikazeConfig({ ...structuredClone(unitDefById('unit:uav')!), id: altitudeUnitId, name: '高度指令测试机' })
+  saveCustomUnitDef(altitudeUnit)
+  try {
+    let altitudeState = arena()
+    altitudeState.spawnQueue = [{ kind: 'walker', delay: 100 }]; altitudeState.spawnTimer = 100
+    const flyer = mkEnemy(altitudeState, 'walker', 5, 5, 100)
+    flyer.unitDefId = altitudeUnitId
+    flyer.aircraft = { heading: 0, vx: 0, vy: 0, altitude: 0.8, targetAltitude: 0.8, verticalSpeed: 0 }
+    const rewardBeforeAltitude = altitudeState.gold
+    altitudeState.eventQueue.push({ id: altitudeState.nextId++, sourceId: flyer.id, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [
+      { type: 'unit', selector: { scope: 'source' }, command: { kind: 'altitude', altitude: 2.4, wait: true } },
+      { type: 'reward', gold: 23 },
+    ], index: 0, waitLeft: 0 })
+    altitudeState = tick(altitudeState, 0.1)
+    check('飞行高度指令：等待升降完成前阻塞后续动作', altitudeState.gold === rewardBeforeAltitude && altitudeState.eventQueue.length === 1)
+    altitudeState = run(altitudeState, 2.5, 0.1)
+    const landedFlyer = altitudeState.enemies.find(enemy => enemy.id === flyer.id)
+    check('飞行高度指令：按模板升降速度抵达目标后继续事件序列', !!landedFlyer
+      && Math.abs(currentUnitAltitude(landedFlyer, altitudeUnit) - 2.4) < 1e-4
+      && altitudeState.gold === rewardBeforeAltitude + 23 && altitudeState.eventQueue.length === 0)
+  } finally {
+    deleteCustomUnitDef(altitudeUnitId)
+  }
+
+  let scripted = arena()
+  scripted.spawnQueue = [{ kind: 'walker', delay: 100 }]; scripted.spawnTimer = 100
+  scripted.allies = [{ id: 9501, kind: 'soldier', unitDefId: allyUnitId('soldier'), producerId: 0, x: 2, y: 2, hp: 60, maxHp: 60, cooldown: 0, targetId: null, hitFlash: 0 }]
+  const scriptedGold = scripted.gold
+  scripted.eventQueue.push({ id: scripted.nextId++, sourceId: 9501, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [
+    { type: 'unit', selector: { scope: 'source' }, command: { kind: 'move', x: 4, y: 2, speed: 2, wait: true } },
+    { type: 'reward', gold: 37 },
+  ], index: 0, waitLeft: 0 })
+  scripted = tick(scripted, 0.1)
+  check('单位脚本：等待式移动在抵达前阻塞后续关卡动作', scripted.allies[0]?.x === 2 && scripted.gold === scriptedGold && scripted.eventQueue.length === 1)
+  scripted = run(scripted, 1.2, 0.1)
+  check('单位脚本：抵达几何中心后自动恢复 AI 并继续动作队列', Math.abs((scripted.allies[0]?.x ?? 0) - 4) < 0.01 && scripted.gold === scriptedGold + 37 && scripted.eventQueue.length === 0)
+
+  scripted.eventQueue.push({ id: scripted.nextId++, sourceId: 9501, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [
+    { type: 'unit', selector: { scope: 'source' }, command: { kind: 'ai', mode: 'pause' } },
+    { type: 'wait', seconds: 0.3 },
+    { type: 'unit', selector: { scope: 'source' }, command: { kind: 'ai', mode: 'replace', preferredTarget: 'allHostile', positioning: 'optimalRange', movement: 'stop' } },
+  ], index: 0, waitLeft: 0 })
+  scripted = tick(scripted, 0.1)
+  check('单位脚本：可暂停单位原 AI 并让等待动作保持暂停状态', scripted.allies[0]?.scriptPaused === true)
+  scripted = run(scripted, 0.4, 0.1)
+  check('单位脚本：可恢复运行并替换为新的首选目标、站位和移动组合', scripted.allies[0]?.scriptPaused === false
+    && scripted.allies[0]?.aiOverride?.preferredTarget === 'allHostile'
+    && scripted.allies[0]?.aiOverride?.positioning === 'optimalRange'
+    && scripted.allies[0]?.aiOverride?.movement === 'stop')
+
+  scripted.eventQueue.push({ id: scripted.nextId++, sourceId: 9501, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [{ type: 'unit', selector: { scope: 'source' }, command: { kind: 'behavior', behavior: 'follow', range: 3, interval: 0, speedPercent: 60 } }], index: 0, waitLeft: 0 })
+  scripted = tick(scripted, 0.1)
+  check('单位行为指令：运行时覆盖关卡实例移动行为', scripted.allies[0]?.behaviorOverride?.behavior === 'follow' && scripted.allies[0]?.behaviorOverride?.range === 3 && scripted.allies[0]?.behaviorOverride?.speedPercent === 60)
+  scripted.eventQueue.push({ id: scripted.nextId++, sourceId: 9501, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [{ type: 'unit', selector: { scope: 'source' }, command: { kind: 'behavior', behavior: 'restore', range: 0, interval: 0, speedPercent: 100 } }], index: 0, waitLeft: 0 })
+  scripted = tick(scripted, 0.1)
+  check('单位行为指令：恢复初始行为会清除运行时覆盖', scripted.allies[0]?.behaviorOverride === undefined)
+
+  let factionState = arena()
+  factionState.spawnQueue = [{ kind: 'walker', delay: 100 }]; factionState.spawnTimer = 100
+  factionState.allies = [
+    { id: 9551, kind: 'soldier', unitDefId: allyUnitId('soldier'), placementId: 551, group: '突击组', faction: 'ally', producerId: 0, x: 3, y: 3, hp: 47, maxHp: 60, cooldown: 0, targetId: null, hitFlash: 0 },
+    { id: 9552, kind: 'soldier', unitDefId: allyUnitId('soldier'), placementId: 552, group: '突击组', faction: 'ally', producerId: 0, x: 4, y: 3, hp: 60, maxHp: 60, cooldown: 0, targetId: null, hitFlash: 0 },
+    { id: 9553, kind: 'soldier', unitDefId: allyUnitId('soldier'), placementId: 553, group: '留守组', faction: 'ally', producerId: 0, x: 5, y: 3, hp: 60, maxHp: 60, cooldown: 0, targetId: null, hitFlash: 0 },
+  ]
+  const oldEnemy = mkEnemy(factionState, 'walker', 8, 8, 100)
+  oldEnemy.targetId = 9551
+  oldEnemy.targetKind = 'combatUnit'
+  oldEnemy.mode = 'attack'
+  oldEnemy.behaviorEngaged = true
+  factionState.eventQueue.push({ id: factionState.nextId++, sourceId: 0, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [{ type: 'unit', selector: { scope: 'group', group: '突击组' }, command: { kind: 'faction', faction: 'enemy' } }], index: 0, waitLeft: 0 })
+  factionState = tick(factionState, 0.1)
+  check('切换阵营指令：指定组别的全部单位迁移到目标阵营运行池', [9551, 9552].every(id => factionState.enemies.some(enemy => enemy.id === id && enemy.faction === 'enemy'))
+    && factionState.allies.some(ally => ally.id === 9553) && !factionState.allies.some(ally => ally.group === '突击组'))
+  check('切换阵营指令：迁移保留实例身份、生命和组别，并清理旧阵营索敌', factionState.enemies.some(enemy => enemy.id === 9551 && enemy.placementId === 551 && enemy.hp === 47 && enemy.group === '突击组')
+    && factionState.enemies.find(enemy => enemy.id === oldEnemy.id)?.targetId !== 9551)
+  factionState.eventQueue.push({ id: factionState.nextId++, sourceId: 0, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [{ type: 'unit', selector: { scope: 'placement', placementId: 551 }, command: { kind: 'faction', faction: 'neutral' } }], index: 0, waitLeft: 0 })
+  factionState = tick(factionState, 0.1)
+  check('切换阵营指令：可按指定单位实例跨阵营迁移为中立单位', factionState.allies.some(ally => ally.id === 9551 && ally.faction === 'neutral' && ally.hp === 47)
+    && !factionState.enemies.some(enemy => enemy.id === 9551))
+
+  scripted.objects.push({ id: 9601, kind: 'barrel', x: 5, y: 2, w: 1, h: 1, hp: 40, maxHp: 40, blockMove: false, blockProjectile: false, height: 0 })
+  if (scripted.allies[0]) scripted.allies[0].cooldown = 0
+  scripted.eventQueue.push({ id: scripted.nextId++, sourceId: 9501, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [{ type: 'unit', selector: { scope: 'source' }, command: { kind: 'attack', target: { type: 'object', objectId: 9601 }, seconds: 2, wait: true } }], index: 0, waitLeft: 0 })
+  scripted = run(scripted, 1.5, 0.1)
+  check('单位攻击指令：可强制攻击指定物体', (scripted.objects.find(object => object.id === 9601)?.hp ?? 40) < 40,
+    `hp=${scripted.objects.find(object => object.id === 9601)?.hp ?? 'removed'} ally=${scripted.allies[0]?.x},${scripted.allies[0]?.y} cooldown=${scripted.allies[0]?.cooldown} script=${scripted.allies[0]?.script?.command.kind}:${scripted.allies[0]?.script?.left}:${scripted.allies[0]?.script?.done}`)
+
+  scripted.eventQueue.push({ id: scripted.nextId++, sourceId: 0, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [{ type: 'unit', selector: { scope: 'allAllies' }, command: { kind: 'remove' } }], index: 0, waitLeft: 0 })
+  scripted = run(scripted, 1, 0.1)
+  check('单位脚本：移除指令可按阵营批量清理单位', scripted.allies.length === 0,
+    `allies=${scripted.allies.map(ally => `${ally.id}:${ally.hp}:${ally.deathLeft}`).join(',')} queue=${scripted.eventQueue.length}`)
+
+  const bossId = 'unit:sim-stage-boss'
+  const bossDef = {
+    id: bossId, name: '测试阶段首领', type: 'rotorcraft' as const, faction: 'enemy' as const,
+    controller: 'ai' as const, targetClasses: ['fortress' as const], stats: { hp: 100, speed: 0, size: 0.5, air: true },
+    visual: { width: 1, height: 1 }, combat: { profile: 'projectile' as const, range: 4, interval: 1, projectileId: 'bullet_std', damage: 1, projectileSpeed: 20, penetration: 1 },
+    ai: { preferredTarget: 'playerControlled' as const, positioning: 'longestRange' as const, movement: 'stop' as const, special: { profile: 'none' as const } },
+    boss: { enabled: true, displayName: '赤色监察者', hpScale: 3, sizeScale: 1.6, barColor: '#2244AA', phases: [{ hpPercent: 50, actions: [{ type: 'unit' as const, selector: { scope: 'source' as const }, command: { kind: 'ai' as const, mode: 'pause' as const } }] }], defeatActions: [{ type: 'reward' as const, gold: 123 }] },
+  }
+  try {
+    check('Boss 校验：拒绝非法血条颜色和重复生命阶段阈值', (() => { const invalid = structuredClone(bossDef); invalid.boss.barColor = 'blue'; invalid.boss.phases.push({ hpPercent: 50, actions: [] }); const errors = validateUnitDef(invalid); return errors.some(error => error.includes('颜色')) && errors.some(error => error.includes('重复')) })())
+    saveCustomUnitDef(bossDef)
+    const savedBoss = unitDefById(bossId)!
+    check('Boss 单位库：保存阶段、击败动作、血条色并按生命阈值降序标准化', savedBoss.boss?.barColor === '#2244AA' && savedBoss.boss.phases?.[0]?.hpPercent === 50 && savedBoss.boss.defeatActions?.[0]?.type === 'reward')
+    let bossState = arena()
+    bossState.spawnQueue = [{ kind: 'walker', delay: 100 }]; bossState.spawnTimer = 100
+    bossState.eventQueue.push({ id: bossState.nextId++, sourceId: 0, zone: { x: 2, y: 2, w: 1, h: 1 }, actions: [{ type: 'spawn', enemies: { walker: 0, runner: 0, rusher: 0, brute: 0, flyer: 0 }, units: { [bossId]: 1 }, interval: 0 }], index: 0, waitLeft: 0 })
+    bossState = run(bossState, 0.4, 0.1)
+    const boss = bossState.enemies.find(enemy => enemy.unitDefId === bossId)
+    check('Boss 运行时：普通刷怪动作也会自动应用名称、生命倍率、体型与专属血条', boss?.bossName === '赤色监察者' && boss.maxHp === 300 && boss.bossSizeScale === 1.6 && boss.bossBarColor === '#2244AA')
+    if (boss) boss.hp = 149
+    bossState = run(bossState, 0.8, 0.1)
+    check('Boss 阶段：越过生命阈值后以 Boss 自身作为事件来源执行单位指令', bossState.enemies.find(enemy => enemy.id === boss?.id)?.scriptPaused === true)
+    const bossGold = bossState.gold
+    const liveBoss = bossState.enemies.find(enemy => enemy.id === boss?.id)
+    if (liveBoss) liveBoss.hp = 0
+    bossState = run(bossState, 2, 0.1)
+    check('Boss 击败：死亡后执行统一动作协议中的击败奖励', bossState.gold >= bossGold + 123 && !bossState.enemies.some(enemy => enemy.id === boss?.id),
+      `gold=${bossState.gold}/${bossGold} enemy=${bossState.enemies.find(enemy => enemy.id === boss?.id)?.deathLeft ?? 'none'} queue=${bossState.eventQueue.length}`)
+  } finally {
+    deleteCustomUnitDef(bossId)
+  }
+}
+
+console.log('== 剧情演出事件动作 ==')
+{
+  const normalized = normalizeEventActions([
+    { type: 'dialogue', speaker: '指挥官', text: '坚守阵地', duration: 2, wait: true },
+    { type: 'text', text: '第一幕', duration: 1.5, position: 'top', wait: false },
+    { type: 'camera', x: -5, y: 999, duration: 1, hold: 2, wait: true, returnToOrigin: true },
+    { type: 'unit', selector: { scope: 'placement', placementId: 77 }, command: { kind: 'move', x: 4, y: 2, speed: 2, wait: true } },
+  ])
+  const dialogue = normalized[0]?.type === 'dialogue' ? normalized[0] : null
+  const text = normalized[1]?.type === 'text' ? normalized[1] : null
+  const camera = normalized[2]?.type === 'camera' ? normalized[2] : null
+  const unit = normalized[3]?.type === 'unit' ? normalized[3] : null
+  check('演出存档：对话、画面文本与镜头转移参数可归一化保存', dialogue?.speaker === '指挥官' && dialogue.wait === true && text?.position === 'top' && text.wait === false && camera?.x === 0 && camera.y === 500 && camera.hold === 2 && camera.returnToOrigin === true)
+  check('单位演出：关卡实例选择器按 placementId 保存', unit?.selector.scope === 'placement' && unit.selector.placementId === 77)
+
+  let cinematic = arena()
+  cinematic.spawnQueue = [{ kind: 'walker', delay: 100 }]; cinematic.spawnTimer = 100
+  cinematic.allies = [{ id: 9601, placementId: 77, kind: 'soldier', unitDefId: allyUnitId('soldier'), producerId: 0, x: 2, y: 2, hp: 60, maxHp: 60, cooldown: 0, targetId: null, hitFlash: 0 }]
+  const initialGold = cinematic.gold
+  cinematic.eventQueue.push({ id: cinematic.nextId++, sourceId: 0, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [
+    { type: 'dialogue', speaker: '指挥官', text: '开始行动', duration: 0.3, wait: true },
+    { type: 'text', text: '目标区域', duration: 0.8, position: 'center', wait: false },
+    { type: 'camera', x: 8, y: 8, duration: 0.2, hold: 0.1, wait: true, returnToOrigin: false },
+    { type: 'unit', selector: { scope: 'placement', placementId: 77 }, command: { kind: 'move', x: 4, y: 2, speed: 2, wait: true } },
+    { type: 'reward', gold: 17 },
+  ], index: 0, waitLeft: 0 })
+  cinematic = tick(cinematic, 0.1)
+  check('对话演出：显示期间阻塞后续动作', cinematic.cinematicDialogue?.speaker === '指挥官' && cinematic.gold === initialGold && cinematic.eventQueue[0]?.index === 0)
+  cinematic = run(cinematic, 0.4, 0.1)
+  check('文本与镜头演出：非等待文本可与等待镜头同时显示', cinematic.cinematicText?.text === '目标区域' && !!cinematic.cinematicCamera && cinematic.gold === initialGold)
+  cinematic = run(cinematic, 1.5, 0.1)
+  check('演出顺序：镜头结束后指定实例移动，完成后继续奖励', Math.abs((cinematic.allies[0]?.x ?? 0) - 4) < 0.01 && cinematic.gold === initialGold + 17 && cinematic.eventQueue.length === 0)
+
+  let returningCamera = arena()
+  returningCamera.spawnQueue = [{ kind: 'walker', delay: 100 }]; returningCamera.spawnTimer = 100
+  const returnGold = returningCamera.gold
+  returningCamera.eventQueue.push({ id: returningCamera.nextId++, sourceId: 0, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [
+    { type: 'camera', x: 8, y: 8, duration: 0.2, hold: 0.1, wait: true, returnToOrigin: true },
+    { type: 'reward', gold: 9 },
+  ], index: 0, waitLeft: 0 })
+  returningCamera = run(returningCamera, 0.3, 0.1)
+  check('镜头返回：停留结束后仍保留镜头状态并等待回程', !!returningCamera.cinematicCamera && returningCamera.gold === returnGold)
+  returningCamera = run(returningCamera, 0.3, 0.1)
+  check('镜头返回：回程结束后清除镜头状态并继续后续动作', !returningCamera.cinematicCamera && returningCamera.gold === returnGold + 9 && returningCamera.eventQueue.length === 0)
+
+  const interfaceActions = normalizeEventActions([
+    { type: 'choice', prompt: '选择路线', options: [{ text: '左路', actions: [{ type: 'reward', gold: 11 }] }, { text: '右路', actions: [{ type: 'reward', gold: 22 }] }] },
+    { type: 'assembly' },
+  ])
+  check('界面指令存档：选择项的分支动作与装配指令可归一化保存', interfaceActions[0]?.type === 'choice' && interfaceActions[0].options[1]?.actions[0]?.type === 'reward' && interfaceActions[1]?.type === 'assembly')
+
+  let interfaceState = arena()
+  interfaceState.spawnQueue = [{ kind: 'walker', delay: 100 }]; interfaceState.spawnTimer = 100
+  const interfaceGold = interfaceState.gold
+  interfaceState.eventQueue.push({ id: interfaceState.nextId++, sourceId: 0, zone: { x: 0, y: 0, w: 1, h: 1 }, actions: [
+    { type: 'choice', prompt: '选择路线', options: [{ text: '左路', actions: [{ type: 'reward', gold: 11 }] }, { text: '右路', actions: [{ type: 'reward', gold: 22 }] }] },
+    { type: 'assembly' },
+    { type: 'reward', gold: 3 },
+  ], index: 0, waitLeft: 0 })
+  interfaceState = tick(interfaceState, 0.1)
+  check('选择指令：弹出选项并阻塞后续动作', interfaceState.eventChoice?.options.join(',') === '左路,右路' && interfaceState.gold === interfaceGold)
+  interfaceState = resolveEventChoice(interfaceState, interfaceState.eventChoice!.id, 1)
+  interfaceState = tick(interfaceState, 0.1)
+  check('选择指令：只插入所选分支动作，并继续到装配指令', interfaceState.gold === interfaceGold + 22 && !!interfaceState.eventAssembly)
+  interfaceState = completeEventAssembly(interfaceState, interfaceState.eventAssembly!.id)
+  interfaceState = tick(interfaceState, 0.1)
+  check('装配指令：完成装配后继续后续动作', interfaceState.gold === interfaceGold + 25 && interfaceState.eventQueue.length === 0)
+}
+
+console.log('== 单位编组共享敌情与统一脱战 ==')
+{
+  const savedLevel = structuredClone(LEVEL)
+  const shooterId = 'unit:sim-group-shooter'
+  try {
+    const shooterDef = structuredClone(unitDefById('unit:uav')!)
+    shooterDef.id = shooterId
+    shooterDef.name = '编组远距射手'
+    shooterDef.stats.vision = 1
+    shooterDef.stats.trackingVision = 1
+    shooterDef.stats.speed = 0
+    shooterDef.combat = { profile: 'hitscan', range: 10, interval: 0.1, projectileId: 'bullet_std', damage: 11, projectileSpeed: 0, penetration: 0 }
+    shooterDef.ai = { preferredTarget: 'allHostile', positioning: 'optimalRange', movement: 'stop', special: { profile: 'none' } }
+    check('编组共享敌情夹具：低视野远距射手定义可保存', saveCustomUnitDef(shooterDef))
+
+    LEVEL.initialUnits = [
+      { id: 8811, unitDefId: 'unit:uav', faction: 'ally', controller: 'ai', group: 'shared-contact', x: 10, y: 10, behavior: 'static', events: [] },
+      { id: 8812, unitDefId: shooterId, faction: 'ally', controller: 'ai', group: 'shared-contact', x: 20, y: 10, behavior: 'static', events: [] },
+      { id: 8813, unitDefId: 'unit:uav', faction: 'enemy', controller: 'static', x: 12, y: 10, behavior: 'static', events: [] },
+    ]
+    configureObjective(LEVEL, { type: 'defend', waves: 99 })
+    let groupState = initialState()
+    groupState.phase = 'combat'
+    groupState.spawnQueue = [{ kind: 'walker', delay: 100 }]
+    groupState.spawnTimer = 100
+    const scout = groupState.allies.find(unit => unit.placementId === 8811)!
+    const target = groupState.enemies.find(unit => unit.placementId === 8813)!
+    const targetHp = target.hp
+    damageAlly(groupState, scout, 1)
+    groupState = tick(groupState, 0.1)
+    const scoutAfter = groupState.allies.find(unit => unit.placementId === 8811)
+    const shooterAfter = groupState.allies.find(unit => unit.placementId === 8812)
+    const targetAfter = groupState.enemies.find(unit => unit.placementId === 8813)
+    check('任一组员受击：同组全部进入攻击状态', !!scoutAfter?.behaviorEngaged && !!shooterAfter?.behaviorEngaged)
+    check('共享敌情：射手无视自身视野与追踪视野攻击其他组员视野内敌人', shooterAfter?.targetId === targetAfter?.id && (targetAfter?.hp ?? targetHp) < targetHp,
+      JSON.stringify({ shooterTarget: shooterAfter?.targetId, targetId: targetAfter?.id, targetHp: targetAfter?.hp }))
+
+    if (targetAfter) { targetAfter.x = 40; targetAfter.y = 40 }
+    groupState = run(groupState, 0.4, 0.1)
+    const scoutLost = groupState.allies.find(unit => unit.placementId === 8811)
+    const shooterLost = groupState.allies.find(unit => unit.placementId === 8812)
+    check('整组失去全部敌情：所有成员统一脱战并清除目标', !scoutLost?.behaviorEngaged && !shooterLost?.behaviorEngaged
+      && scoutLost?.targetId == null && shooterLost?.targetId == null)
+  } finally {
+    deleteCustomUnitDef(shooterId)
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== 放置单位受击反击记忆 ==')
+{
+  const savedLevel = structuredClone(LEVEL)
+  try {
+    LEVEL.initialUnits = [
+      { id: 8821, unitDefId: 'unit:uav', faction: 'enemy', controller: 'ai', group: 'retaliation', x: 1.5, y: 1.5, behavior: 'guard', events: [] },
+      { id: 8822, unitDefId: 'unit:uav', faction: 'enemy', controller: 'ai', group: 'retaliation', x: 2.5, y: 1.5, behavior: 'guard', events: [] },
+    ]
+    configureObjective(LEVEL, { type: 'defend', waves: 99 })
+    let state = initialState()
+    state.phase = 'combat'
+    state.spawnQueue = [{ kind: 'walker', delay: 100 }]
+    state.spawnTimer = 100
+    const struck = state.enemies.find(unit => unit.placementId === 8821)!
+    const player = fortressCenter(state)
+    const distanceBefore = Math.hypot(struck.x - player.x, struck.y - player.y)
+    check('受击反击夹具：玩家位于放置单位正常视野外', distanceBefore > (unitDefById(struck.unitDefId!)?.stats.vision ?? 8), `distance=${distanceBefore.toFixed(2)}`)
+
+    damageEnemy(state, struck, 1, 987654)
+    state = tick(state, 0.1)
+    const struckAlert = state.enemies.find(unit => unit.placementId === 8821)
+    const mateAlert = state.enemies.find(unit => unit.placementId === 8822)
+    check('视野外受击：受击者锁定真实攻击者并进入战斗', struckAlert?.behaviorEngaged === true
+      && struckAlert.retaliationSide === 'fortress' && struckAlert.targetKind === 'fortress' && struckAlert.targetId === 0)
+    check('视野外受击：同组成员共享反击目标与记忆', mateAlert?.behaviorEngaged === true
+      && mateAlert.retaliationSide === 'fortress' && mateAlert.targetKind === 'fortress' && mateAlert.targetId === 0)
+    check('反击记忆保留统一最短时长', (struckAlert?.retaliationUntil ?? 0) - state.time >= UNIT_RETALIATION_MEMORY_SECONDS - 0.11,
+      `until=${struckAlert?.retaliationUntil} time=${state.time}`)
+
+    state = run(state, 0.8, 0.05)
+    const struckChasing = state.enemies.find(unit => unit.placementId === 8821)
+    const distanceAfter = struckChasing ? Math.hypot(struckChasing.x - player.x, struckChasing.y - player.y) : Infinity
+    check('反击记忆期间：放置单位会主动接近视野外攻击者', distanceAfter < distanceBefore - 0.05,
+      `before=${distanceBefore.toFixed(2)} after=${distanceAfter.toFixed(2)}`)
+
+    LEVEL.initialUnits = [
+      { id: 8831, unitDefId: 'unit:uav', faction: 'ally', controller: 'ai', group: 'ally-retaliation', x: 1.5, y: 1.5, behavior: 'guard', events: [] },
+      { id: 8832, unitDefId: 'unit:uav', faction: 'enemy', controller: 'static', x: 16.5, y: 1.5, behavior: 'static', events: [] },
+    ]
+    let allyState = initialState()
+    allyState.phase = 'combat'
+    allyState.spawnQueue = [{ kind: 'walker', delay: 100 }]
+    allyState.spawnTimer = 100
+    const ally = allyState.allies.find(unit => unit.placementId === 8831)!
+    const attacker = allyState.enemies.find(unit => unit.placementId === 8832)!
+    damageAlly(allyState, ally, 1, { x: ally.x, y: ally.y, attackerSide: 'enemy', attackerId: attacker.id })
+    allyState = tick(allyState, 0.1)
+    const allyAlert = allyState.allies.find(unit => unit.placementId === 8831)
+    check('阵营无关入口：友方放置单位同样反击视野外实际攻击者', allyAlert?.retaliationSide === 'enemy'
+      && allyAlert.retaliationId === attacker.id && allyAlert.combatTargetSide === 'enemy' && allyAlert.targetId === attacker.id)
+  } finally {
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== 全单位战斗 AI 闭环：固定单位、即时命中与近战节奏 ==')
+{
+  const savedLevel = structuredClone(LEVEL)
+  const hitscanId = 'unit:sim-ai-closure-hitscan'
+  const escortHitscanId = 'unit:sim-ai-closure-escort-hitscan'
+  const meleeId = 'unit:sim-ai-closure-melee'
+  const rotorProjectileId = 'unit:sim-ai-closure-rotor'
+  const fixedWingProjectileId = 'unit:sim-ai-closure-fixed-wing'
+  const hitscanDef = {
+    id: hitscanId, name: 'AI 闭环固定射手', type: 'building' as const,
+    targetClasses: ['combatUnit' as const], bodyLocked: true,
+    stats: { hp: 500, speed: 0, vision: 20, trackingVision: 24, size: 0.2, air: false },
+    typeConfig: { kind: 'building' as const, footprintW: 1, footprintH: 1, blocksMovement: false },
+    combat: { profile: 'hitscan' as const, range: 8, interval: 0.5, projectileId: 'ray_std', damage: 1, projectileSpeed: 0, penetration: 0 },
+    ai: { preferredTarget: 'allHostile' as const, positioning: 'optimalRange' as const, movement: 'stop' as const, special: { profile: 'none' as const } },
+  }
+  const meleeDef = {
+    ...structuredClone(hitscanDef), id: meleeId, name: 'AI 闭环近战单位', bodyLocked: false,
+    stats: { ...hitscanDef.stats, speed: 2 },
+    combat: { profile: 'melee' as const, range: 1, interval: 0.5, damage: 10, projectileSpeed: 0, penetration: 0 },
+  }
+  const escortHitscanDef = {
+    ...structuredClone(hitscanDef), id: escortHitscanId, name: 'AI 闭环护送射手', bodyLocked: false,
+  }
+  const rotorProjectileDef = {
+    ...structuredClone(unitDefById('unit:uav')!), id: rotorProjectileId, name: 'AI 闭环旋翼射手',
+  }
+  const fixedWingProjectileDef = {
+    ...structuredClone(rotorProjectileDef), id: fixedWingProjectileId, name: 'AI 闭环固定翼射手', type: 'fixedWingAircraft' as const,
+    typeConfig: { kind: 'fixedWingAircraft' as const, altitude: 1.2, minAltitude: 0.5, maxAltitude: 4, climbRate: 0.75, accel: 3, turnSpeed: 90, minSpeed: 1, turnRadius: 2.5 },
+  }
+  const placement = (id: number, unitDefId: string, faction: 'ally' | 'enemy', controller: 'ai' | 'static', x: number, y: number, behavior: 'static' | 'guard' = 'static') => ({
+    id, unitDefId, faction, controller, x, y, behavior, behaviorSpeedPercent: 100, events: [],
+  })
+  const combatState = (sourceFaction: 'ally' | 'enemy', unitDefId: string, distance: number) => {
+    LEVEL.initialUnits = sourceFaction === 'enemy'
+      ? [placement(8841, unitDefId, 'enemy', 'ai', 4.5, 4.5), placement(8842, unitDefId, 'ally', 'static', 4.5 + distance, 4.5)]
+      : [placement(8841, unitDefId, 'ally', 'ai', 4.5, 4.5), placement(8842, unitDefId, 'enemy', 'static', 4.5 + distance, 4.5)]
+    configureObjective(LEVEL, { type: 'defend', waves: 99 })
+    const state = initialState()
+    state.phase = 'combat'
+    state.spawnQueue = [{ kind: 'walker', delay: 100 }]
+    state.spawnTimer = 100
+    return state
+  }
+  try {
+    check('AI 闭环夹具：固定、护送、近战与两类飞行射手定义可保存',
+      saveCustomUnitDef(hitscanDef) && saveCustomUnitDef(escortHitscanDef) && saveCustomUnitDef(meleeDef)
+      && saveCustomUnitDef(rotorProjectileDef) && saveCustomUnitDef(fixedWingProjectileDef))
+
+    let enemyHitscan = combatState('enemy', hitscanId, 4)
+    const enemySource = enemyHitscan.enemies.find(unit => unit.placementId === 8841)!
+    const enemyTarget = enemyHitscan.allies.find(unit => unit.placementId === 8842)!
+    const enemySourceOrigin = { x: enemySource.x, y: enemySource.y }
+    const enemyTargetHp = enemyTarget.hp
+    enemyHitscan = run(enemyHitscan, 1.1, 0.05)
+    const enemySourceAfter = enemyHitscan.enemies.find(unit => unit.placementId === 8841)!
+    const enemyTargetAfter = enemyHitscan.allies.find(unit => unit.placementId === 8842)!
+    const enemyLoss = enemyTargetHp - enemyTargetAfter.hp
+    check('固定/停留敌方单位：主体不移动但即时命中武器仍按射程开火', enemyLoss > 0
+      && Math.hypot(enemySourceAfter.x - enemySourceOrigin.x, enemySourceAfter.y - enemySourceOrigin.y) < 1e-9,
+    JSON.stringify({ loss: enemyLoss, source: [enemySourceAfter.x, enemySourceAfter.y], target: enemySourceAfter.targetId }))
+
+    let allyHitscan = combatState('ally', hitscanId, 4)
+    const allyTarget = allyHitscan.enemies.find(unit => unit.placementId === 8842)!
+    const allyTargetHp = allyTarget.hp
+    allyHitscan = run(allyHitscan, 1.1, 0.05)
+    const allyLoss = allyTargetHp - (allyHitscan.enemies.find(unit => unit.placementId === 8842)?.hp ?? allyTargetHp)
+    check('即时命中节奏统一：敌方与友方在相同装填时间内造成相同伤害', enemyLoss === allyLoss && enemyLoss > 0,
+      `enemy=${enemyLoss} ally=${allyLoss}`)
+
+    for (const [label, unitDefId] of [['旋翼飞行器', rotorProjectileId], ['固定翼飞行器', fixedWingProjectileId]] as const) {
+      let aircraftCombat = combatState('enemy', unitDefId, 4)
+      const aircraftTarget = aircraftCombat.allies.find(unit => unit.placementId === 8842)!
+      const aircraftTargetHp = aircraftTarget.hp
+      aircraftCombat = run(aircraftCombat, 1.5, 0.05)
+      const aircraftSource = aircraftCombat.enemies.find(unit => unit.placementId === 8841)
+      const aircraftLoss = aircraftTargetHp - (aircraftCombat.allies.find(unit => unit.placementId === 8842)?.hp ?? aircraftTargetHp)
+      check(`单位类型矩阵：${label}在停留行为下仍能索敌并发射统一弹丸`, aircraftLoss > 0 && aircraftSource?.targetId != null,
+        `${label} loss=${aircraftLoss} target=${aircraftSource?.targetId}`)
+    }
+
+    const retreatingTarget = enemyHitscan.allies.find(unit => unit.placementId === 8842)
+    if (retreatingTarget) { retreatingTarget.x = 40; retreatingTarget.y = 40 }
+    enemyHitscan = run(enemyHitscan, 0.5, 0.05)
+    const fixedAfterLoss = enemyHitscan.enemies.find(unit => unit.placementId === 8841)
+    check('锁定主体的放置单位：整组失去敌情后仍会退出接战并清除目标', fixedAfterLoss?.behaviorEngaged === false && fixedAfterLoss.targetId == null,
+      JSON.stringify({ engaged: fixedAfterLoss?.behaviorEngaged, target: fixedAfterLoss?.targetId, lost: fixedAfterLoss?.behaviorLostTime }))
+
+    LEVEL.initialUnits = [
+      { id: 8841, unitDefId: escortHitscanId, faction: 'ally', controller: 'ai', x: 4.5, y: 4.5, events: [] },
+      placement(8842, hitscanId, 'enemy', 'static', 8.5, 4.5),
+    ]
+    configureObjective(LEVEL, { type: 'escort', unitPlacementId: 8841 })
+    let escortHitscan = initialState()
+    escortHitscan.phase = 'combat'
+    escortHitscan.spawnQueue = [{ kind: 'walker', delay: 100 }]
+    escortHitscan.spawnTimer = 100
+    const escortTarget = escortHitscan.enemies.find(unit => unit.placementId === 8842)!
+    const escortTargetHp = escortTarget.hp
+    escortHitscan = run(escortHitscan, 1.1, 0.05)
+    const escortLoss = escortTargetHp - (escortHitscan.enemies.find(unit => unit.placementId === 8842)?.hp ?? escortTargetHp)
+    check('护送单位攻击口径：即时命中同样按主体外沿射程与装填时间结算', escortLoss === allyLoss && escortLoss > 0,
+      `escort=${escortLoss} regular=${allyLoss}`)
+
+    // 单位战斗射程以格为单位；中心距 1 格扣除双方轮廓后已处于 1 格近战范围内。
+    let enemyMelee = combatState('enemy', meleeId, 1)
+    const enemyMeleeTarget = enemyMelee.allies.find(unit => unit.placementId === 8842)!
+    const enemyMeleeHp = enemyMeleeTarget.hp
+    enemyMelee = run(enemyMelee, 0.8, 0.05)
+    const enemyMeleeLoss = enemyMeleeHp - (enemyMelee.allies.find(unit => unit.placementId === 8842)?.hp ?? enemyMeleeHp)
+    let allyMelee = combatState('ally', meleeId, 1)
+    const allyMeleeTarget = allyMelee.enemies.find(unit => unit.placementId === 8842)!
+    const allyMeleeHp = allyMeleeTarget.hp
+    allyMelee = run(allyMelee, 0.8, 0.05)
+    const allyMeleeLoss = allyMeleeHp - (allyMelee.enemies.find(unit => unit.placementId === 8842)?.hp ?? allyMeleeHp)
+    check('近战节奏统一：敌方与友方都按伤害/间隔换算持续接触伤害', Math.abs(enemyMeleeLoss - allyMeleeLoss) < 1e-6 && enemyMeleeLoss > 0,
+      `enemy=${enemyMeleeLoss} ally=${allyMeleeLoss}`)
+  } finally {
+    deleteCustomUnitDef(hitscanId)
+    deleteCustomUnitDef(escortHitscanId)
+    deleteCustomUnitDef(meleeId)
+    deleteCustomUnitDef(rotorProjectileId)
+    deleteCustomUnitDef(fixedWingProjectileId)
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== #22：摧毁目标任务 ==')
+{
+  const normalized = normalizeObjective({ type: 'destroy', unitPlacementIds: [7, 7, -2, 3.6, '9', 'bad'] })
+  check('摧毁目标迁移：实例 ID 去重、取整、钳正并过滤非法值', normalized.type === 'destroy'
+    && JSON.stringify(normalized.unitPlacementIds) === '[7,1,4,9]', JSON.stringify(normalized))
+
+  const savedLevel = structuredClone(LEVEL)
+  try {
+    LEVEL.initialUnits = [
+      { id: 101, unitDefId: 'unit:uav', faction: 'enemy', controller: 'static', x: 6.5, y: 6.5 },
+      { id: 102, unitDefId: 'unit:uav', faction: 'enemy', controller: 'static', x: 9.5, y: 6.5 },
+      { id: 103, unitDefId: 'unit:uav', faction: 'enemy', controller: 'static', x: 12.5, y: 6.5 },
+    ]
+    configureObjective(LEVEL, { type: 'destroy', unitPlacementIds: [101, 102] })
+    LEVEL.mode = 'advance'
+    let state = initialState()
+    state.spawnQueue = [{ kind: 'walker', delay: 100 }]; state.spawnTimer = 100
+    const first = state.enemies.find(enemy => enemy.placementId === 101)
+    const second = state.enemies.find(enemy => enemy.placementId === 102)
+    const other = state.enemies.find(enemy => enemy.placementId === 103)
+    check('摧毁目标生成：初始敌方单位保留关卡实例 ID，目标与非目标可稳定区分', !!first && !!second && !!other)
+    if (other) other.hp = 0
+    state = tick(state, 0.1)
+    check('摧毁目标判定：击毁非目标不会完成阶段', state.phase === 'combat' && destroyObjectiveProgress(state).destroyed === 0)
+    const liveFirst = state.enemies.find(enemy => enemy.placementId === 101)
+    if (liveFirst) liveFirst.hp = 0
+    state = tick(state, 0.1)
+    const halfway = destroyObjectiveProgress(state)
+    check('摧毁目标进度：多目标任务在首个目标击毁后保持交战', state.phase === 'combat'
+      && halfway.total === 2 && halfway.destroyed === 1 && halfway.remaining === 1)
+    const liveSecond = state.enemies.find(enemy => enemy.placementId === 102)
+    if (liveSecond) liveSecond.hp = 0
+    state = tick(state, 0.1)
+    check('摧毁目标完成：全部指定实例击毁后走阶段成功分支', state.phase === 'won'
+      && state.defeatedUnitPlacementIds.includes(101) && state.defeatedUnitPlacementIds.includes(102))
+
+    configureObjective(LEVEL, { type: 'destroy', unitPlacementIds: [] })
+    const empty = tick(initialState(), 0.1)
+    check('摧毁目标安全门：未配置目标时不会空目标自动获胜', empty.phase === 'combat')
+
+    const migrated = parseLevel(JSON.stringify({ version: 15, initialUnits: LEVEL.initialUnits, objective: { type: 'destroy', unitPlacementIds: [102, 101, 102] }, stages: [{ id: 'stage-1', name: '歼灭', objective: { type: 'destroy', unitPlacementIds: [102, 101, 102] }, waves: [], success: { type: 'win' }, failure: { type: 'lose' } }], startStageId: 'stage-1' }))
+    check('摧毁目标存档：v15 关卡迁移至 v18 并保留去重后的目标实例引用', migrated.version === 18
+      && migrated.objective.type === 'destroy' && JSON.stringify(migrated.objective.unitPlacementIds) === '[102,101]')
+  } finally {
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== v2.89：地形/物体类型库 ==')
+{
+  check('统一阵营关系：玩家与友方同盟，中立不敌对，中立敌对与其他阵营均敌对',
+    !factionsHostile('player', 'ally')
+      && !factionsHostile('neutral', 'enemy')
+      && factionsHostile('neutralHostile', 'player')
+      && factionsHostile('neutralHostile', 'ally')
+      && factionsHostile('neutralHostile', 'enemy')
+      && !factionsHostile('neutralHostile', 'neutralHostile'))
+  check('素材库：内置 BGM 与按钮 SE 使用独立分类', ASSET_CATEGORY_NAME.bgm === 'BGM' && ASSET_CATEGORY_NAME.se === 'SE'
+    && filterAssets('bgm').some(asset => asset.id === 'builtin:bgm/briefing_eve' && asset.name === '备战前夕' && asset.src === '/res/audio/briefing_eve_loop.wav')
+    && filterAssets('se').some(asset => asset.id === 'builtin:se/ui_button_click' && asset.name === 'switch_button' && asset.src === '/res/audio/switch_button.wav')
+    && !filterAssets('se').some(asset => asset.id === 'builtin:se/tracked_move_loop' || asset.name === '履带持续行驶'))
+  check('素材库：UI 图片使用独立正式分类并可参与分类筛选', ASSET_CATEGORY_NAME.ui === 'UI'
+    && filterAssets('ui').every(asset => asset.category === 'ui'))
+  const turretIcon = addAsset('炮塔图标测试', 'data:image/png;base64,AA==', 'icon')
+  const turretWithIcon = { ...TURRET_DEFS[0], iconAsset: turretIcon.id } as TurretDef
+  const turretIconRoundTrip = parseTurretDefs(serializeTurretDefs([turretWithIcon]))?.[0]
+  check('素材库与炮塔：图标使用独立分类，炮塔图标引用可持久化往返', ASSET_CATEGORY_NAME.icon === '图标'
+    && filterAssets('icon').some(asset => asset.id === turretIcon.id)
+    && turretIconRoundTrip?.iconAsset === turretIcon.id)
+  removeAsset(turretIcon.id)
+  check('音频默认：按钮音效预设接入全局 UI 点击槽', resolveCue(undefined, 'uiClick') === UI_BUTTON_CLICK_PRESET_ID
+    && audioProjectConfig().presets.some(preset => preset.id === UI_BUTTON_CLICK_PRESET_ID && preset.assets[0]?.assetId === 'builtin:se/ui_button_click' && preset.channel === 'ui'))
+  check('全局通用音效：载具怠速与各底盘移动音效槽已删除，移动音效改由单位单独配置',
+    !Object.values(GLOBAL_CUE_LABELS).some(label => ['载具怠速', '履带移动', '轮式移动', '飞行器移动'].includes(label))
+      && !audioProjectConfig().presets.some(preset => preset.id === 'builtin:movement/tracked'))
+  check('全局通用音效：已移除对象专属和武器/弹丸通用回退槽', !Object.values(GLOBAL_CUE_LABELS).some(label => ['装甲穿透', '物体摧毁', '武器充能', '通用武器开火', '武器装填', '武器过热', '通用弹丸飞行', '通用弹丸命中', '通用爆炸'].includes(label))
+    && resolveCue(undefined) === undefined)
+  const uploadedSound = addAsset('后台预设模拟音效', 'data:audio/wav;base64,AA==', 'se')
+  const weaponSound = autoSoundPreset(uploadedSound.id, { channel: 'weapon' })
+  const unitLoopSound = autoSoundPreset(uploadedSound.id, { channel: 'unit', loop: true })
+  check('音效选择：只用单个 SE 素材并按使用位置自动生成通道参数', weaponSound?.assets.length === 1
+    && weaponSound.assets[0]?.assetId === uploadedSound.id && weaponSound.channel === 'weapon' && weaponSound.maxDistance === 36
+    && unitLoopSound?.assets.length === 1 && unitLoopSound.channel === 'unit' && unitLoopSound.loop && unitLoopSound.cooldown === 0
+    && autoSoundPreset('builtin:se/ui_button_click', { channel: 'ui' })?.channel === 'ui')
+  removeAsset(uploadedSound.id)
+  const displayLimits = normalizeDisplayConfig({ defaultZoom: 3, minZoom: 1.25, maxZoom: 2 })
+  const raisedMinimum = normalizeDisplayConfig({ defaultZoom: 1, minZoom: 3, maxZoom: 2 }, 'minZoom')
+  check('游戏参数：默认缩放受最小/最大缩放约束且交叉边界自动联动', displayLimits.defaultZoom === 2
+    && displayLimits.minZoom === 1.25 && displayLimits.maxZoom === 2
+    && raisedMinimum.minZoom === 3 && raisedMinimum.maxZoom === 3 && raisedMinimum.defaultZoom === 3)
+  const legacyDisplay = normalizeDisplayConfig({ version: 1 } as never)
+  const fixedDisplay = normalizeDisplayConfig({ resolutionMode: 'fixed', referenceResolution: '1920x1080' })
+  const invalidDisplay = normalizeDisplayConfig({ resolutionMode: 'fixed', referenceResolution: 'invalid' as never })
+  const adaptiveViewport = resolveDisplayViewport(legacyDisplay, 1000.9, 800.9)
+  const fixedViewport = resolveDisplayViewport(fixedDisplay, 1000, 800)
+  const editorViewport = resolveDisplayViewport(fixedDisplay, 1000, 800, true)
+  check('游戏参数：旧显示配置迁移为自适应，固定模式保留合法预设并修复非法预设',
+    legacyDisplay.version === 2 && legacyDisplay.resolutionMode === 'adaptive' && legacyDisplay.referenceResolution === '1920x1080'
+    && fixedDisplay.resolutionMode === 'fixed' && fixedDisplay.referenceResolution === '1920x1080'
+    && invalidDisplay.referenceResolution === '1920x1080')
+  check('游戏参数：常用参考分辨率包含 PC、平板和手机横屏预设且 ID 唯一',
+    DISPLAY_RESOLUTION_PRESETS.length === 8
+    && new Set(DISPLAY_RESOLUTION_PRESETS.map(preset => preset.id)).size === DISPLAY_RESOLUTION_PRESETS.length
+    && DISPLAY_RESOLUTION_PRESETS.some(preset => preset.id === '2560x1440')
+    && DISPLAY_RESOLUTION_PRESETS.some(preset => preset.id === '1920x1200')
+    && DISPLAY_RESOLUTION_PRESETS.some(preset => preset.id === '2400x1080'))
+  check('游戏参数：自适应填满容器；固定分辨率完整等比显示；关卡编辑器强制自适应',
+    adaptiveViewport.logicalWidth === 1000 && adaptiveViewport.logicalHeight === 800 && adaptiveViewport.scale === 1
+    && fixedViewport.logicalWidth === 1920 && fixedViewport.logicalHeight === 1080
+    && Math.abs(fixedViewport.scale - 1000 / 1920) < 1e-9
+    && Math.abs(fixedViewport.displayWidth - 1000) < 1e-9 && Math.abs(fixedViewport.displayHeight - 562.5) < 1e-9
+    && editorViewport.logicalWidth === 1000 && editorViewport.logicalHeight === 800 && editorViewport.scale === 1)
+  const originalNaturalCooling = gameParameters().naturalHeatDissipation
+  setNaturalHeatDissipation(37)
+  const coolingState = initialState()
+  const moduleCooling = moduleBonuses(coolingState).coolingPool
+  check('游戏参数：自然散热值直接作为玩家战车基础散热并与模块叠加',
+    gameParameters().naturalHeatDissipation === 37 && fortressCooling(coolingState) === 37 + moduleCooling)
+  setNaturalHeatDissipation(1200)
+  check('游戏参数：自然散热值限制在 0~1000 点/s', gameParameters().naturalHeatDissipation === 1000)
+  setNaturalHeatDissipation(originalNaturalCooling)
+  setHitFxVisibility('showPenetrationFx', false)
+  setHitFxVisibility('showRicochetFx', false)
+  setHitFxVisibility('showRammingFx', false)
+  check('调试设置：穿甲、跳弹与冲撞显示可独立关闭且默认结算配置不受影响',
+    !gameParameters().showPenetrationFx && !gameParameters().showRicochetFx && !gameParameters().showRammingFx)
+  setHitFxVisibility('showPenetrationFx', true)
+  setHitFxVisibility('showRicochetFx', true)
+  setHitFxVisibility('showRammingFx', true)
+  check('类型库：内置水坑、油桶、废墟和岩石定义齐全', terrainTypeById('terrain:puddle')?.moveModifier === 0.5
+    && objectTypeById('object:barrel')?.name === '油桶' && objectTypeById('object:barrel')?.hp === 30
+    && objectTypeById('object:ruins')?.blockProjectile === true && objectTypeById('object:rock')?.hp === 0)
+  check('素材库：旧地形贴图分类已移除，地形统一使用图块且保留物体贴图分类', !Object.values(ASSET_CATEGORY_NAME).includes('地形贴图') && ASSET_CATEGORY_NAME.tile === '图块' && ASSET_CATEGORY_NAME.worldObject === '物体贴图')
+  const terrain = { ...newTerrainType(), name: '模拟泥地', asset: 'upload-terrain-test', defaultW: 3, defaultH: 2, effect: 'moveModifier' as const, moveModifier: 0.35 }
+  const object = { ...newObjectType(), name: '模拟路障', asset: 'upload-object-test', defaultW: 2, defaultH: 1, hp: 280, blockProjectile: true, states: ['default', 'open', 'locked'],
+    events: [
+      { id: 1, name: '检查物体', trigger: 'interact' as const, activationLimit: 1, cooldown: 0, actions: [{ type: 'reward' as const, gold: 11 }] },
+      { id: 2, name: '碰到物体', trigger: 'contact' as const, activationLimit: 1, cooldown: 0, actions: [{ type: 'reward' as const, gold: 13 }] },
+      { id: 3, name: '摧毁物体', trigger: 'destroyed' as const, activationLimit: 1, cooldown: 0, actions: [{ type: 'message' as const, text: '已摧毁', duration: 1 }] },
+    ] }
+  const autotileAsset = addAsset('模拟物体 Autotile', 'data:image/png;base64,AA==', 'worldObject', { kind: 'autotileStatic', width: 96, height: 128, frames: 1 })
+  const autotileObject = { ...newObjectType(), name: '模拟连续物体', asset: autotileAsset.id, defaultW: 4, defaultH: 3 }
+  try {
+    saveTerrainType(terrain)
+    saveObjectType(object)
+    check('自定义类型：地形贴图按单格保存、无贴图回退白色且移动倍率效果可解析', terrainTypeById(terrain.id)?.asset === terrain.asset
+      && terrainTypeById(terrain.id)?.defaultW === 1
+      && terrainTypeById(terrain.id)?.defaultH === 1
+      && terrainTypeById(terrain.id)?.color === '#FFFFFF'
+      && terrainTypeById(terrain.id)?.effect === 'moveModifier'
+      && terrainTypeById(terrain.id)?.moveModifier === 0.35)
+    check('自定义类型：物体耐久、碰撞与贴图可保存并解析', objectTypeById(object.id)?.asset === object.asset && objectTypeById(object.id)?.hp === 280 && objectTypeById(object.id)?.blockProjectile === true)
+    check('物体状态：类型定义保存可供条件与动作共用的去重状态列表', objectTypeById(object.id)?.states.join(',') === 'default,open,locked')
+    const worldTypeSnapshot = snapshotWorldTypeLibrary()
+    saveObjectType({ ...object, name: '撤销测试改名' })
+    restoreWorldTypeLibrary(worldTypeSnapshot)
+    check('全编辑器历史：地形/物体类型库快照可完整恢复', objectTypeById(object.id)?.name === object.name)
+    check('物体事件：气泡、接触与摧毁三种触发方式可保存并解析', objectTypeById(object.id)?.events.map(event => event.trigger).join(',') === 'interact,contact,destroyed')
+    const eventState = initialState()
+    const eventObject = { id: 9901, kind: 'rock' as const, defId: object.id, x: eventState.fortress.x, y: eventState.fortress.y, w: 2, h: 1, hp: 280, maxHp: 280, blockMove: false, blockProjectile: false, height: 0 }
+    eventState.objects = [eventObject]
+    const beforeObjectGold = eventState.gold
+    const playerRect = fortressRect(eventState)
+    eventObject.x = playerRect.x + playerRect.w + 3.01
+    check('物体气泡：目标外轮廓超过3格时不显示且点击无效', interactionBubbles(eventState).length === 0 && !interactWithObjectAt(eventState, eventObject.x, eventObject.y))
+    eventObject.x = playerRect.x + playerRect.w + 2.99
+    check('物体气泡：目标进入3格时显示并允许点击', interactionBubbles(eventState).some(bubble => bubble.kind === 'object' && bubble.id === eventObject.id) && interactWithObjectAt(eventState, eventObject.x, eventObject.y))
+    eventState.eventQueue = []
+    eventState.unifiedEventStates = eventState.unifiedEventStates.filter(runtime => runtime.id >= 0)
+    eventObject.x = eventState.fortress.x
+    check('物体事件：点击实例执行气泡按钮动作且次数限制独立生效', interactWithObjectAt(eventState, eventObject.x, eventObject.y) && !interactWithObjectAt(eventState, eventObject.x, eventObject.y))
+    let contactedState = tick(eventState, 0.1)
+    contactedState = tick(contactedState, 0.1)
+    check('物体事件：与阻挡物体接触时只在接触沿触发一次', contactedState.gold === beforeObjectGold + 24, `gold=${contactedState.gold}`)
+    saveObjectType(autotileObject)
+    check('物体 Autotile：由物体贴图尺寸协议识别并强制锁定 1×1 占格', isAutotileAsset(autotileAsset.id) && objectTypeById(autotileObject.id)?.defaultW === 1 && objectTypeById(autotileObject.id)?.defaultH === 1)
+    const freshObject = newObjectType()
+    check('新建物体默认：蓝色回退、不可破坏、无碰撞且高度为0', freshObject.color === '#5387C8' && freshObject.hp === 0 && !freshObject.blockMove && !freshObject.blockProjectile && freshObject.height === 0)
+    const parsed = parseLevel(JSON.stringify({ ...defaultLevel(), terrain: [{ kind: 'puddle', defId: terrain.id, x: 1, y: 3, w: 3, h: 2, moveModifier: 0.35 }], objects: [{ kind: 'ruins', defId: object.id, x: 5, y: 6, w: 2, h: 1, hp: 280, blockMove: true, blockProjectile: true, height: 1 }] }))
+    check('关卡实例：可复用定义 ID 随关卡存档往返保留', parsed.terrain[0]?.defId === terrain.id && parsed.objects[0]?.defId === object.id)
+  } finally {
+    deleteTerrainType(terrain.id)
+    deleteObjectType(object.id)
+    deleteObjectType(autotileObject.id)
+    removeAsset(autotileAsset.id)
+  }
+  check('类型删除：自定义定义可移除且内置定义保持可用', !terrainTypeLibrary().some(def => def.id === terrain.id) && !objectTypeLibrary().some(def => def.id === object.id) && !!terrainTypeById('terrain:puddle'))
+}
+
+// 初始单位实例与物体共用同一套3格气泡交互口径。
+{
+  const savedInitialUnits = structuredClone(LEVEL.initialUnits)
+  try {
+    LEVEL.initialUnits = [{
+      id: 9911, unitDefId: 'unit:uav', faction: 'enemy', controller: 'static', x: 1, y: 1,
+      events: [{ id: 1, name: '询问士兵', trigger: 'interact', activationLimit: 1, cooldown: 0, actions: [{ type: 'reward', gold: 7 }] }],
+    }]
+    const state = initialState()
+    const placedEnemy = state.enemies.find(enemy => enemy.placementId === 9911)
+    const playerRect = fortressRect(state)
+    if (placedEnemy) {
+      placedEnemy.x = playerRect.x + playerRect.w + 10
+      placedEnemy.y = playerRect.y + playerRect.h / 2
+      check('单位气泡：单位超过3格时不显示且点击无效', !interactionBubbles(state).some(bubble => bubble.kind === 'unit' && bubble.id === 9911)
+        && !interactWithUnitAt(state, placedEnemy.x, placedEnemy.y))
+      placedEnemy.x = playerRect.x + playerRect.w + 1
+      check('单位气泡：单位进入3格时显示并允许点击', interactionBubbles(state).some(bubble => bubble.kind === 'unit' && bubble.id === 9911)
+        && interactWithUnitAt(state, placedEnemy.x, placedEnemy.y))
+    } else check('单位气泡：初始单位测试实例成功生成', false)
+  } finally {
+    LEVEL.initialUnits = savedInitialUnits
+  }
+}
+
+// #19：移动堡垒碾压单位（实际位移、重量档位、接触冷却、地空过滤与大型单位击退衰减）
+{
+  const inferredLight: FortressDef = { ...structuredClone(DEFAULT_FORTRESS), id: 'ram-light', w: 2, h: 2, shape: undefined, ramWeight: undefined }
+  const inferredMedium: FortressDef = { ...structuredClone(DEFAULT_FORTRESS), id: 'ram-medium', w: 4, h: 4, shape: undefined, ramWeight: undefined }
+  const explicitHeavy: FortressDef = { ...inferredLight, id: 'ram-heavy', ramWeight: 'heavy' }
+  check('碾压重量：旧载具按真实占格自动推导，显式档位优先', fortressRamWeight(inferredLight) === 'light' && fortressRamWeight(inferredMedium) === 'medium' && fortressRamWeight(explicitHeavy) === 'heavy' && fortressRamWeightFactor(explicitHeavy) === 1.3)
+
+  const s = arena()
+  s.enemies = []
+  const rect = fortressRect(s)
+  const e = mkEnemy(s, 'walker', rect.x + rect.w / 2, rect.y + 0.15, 1000)
+  const hp0 = e.hp
+  const hits = applyFortressRamming(s, 0, -3)
+  check('旧椭圆碾压不会误处理已统一为旋转矩形的载具单位', hits === 0 && e.hp === hp0)
+
+  const air = mkEnemy(s, 'flyer', rect.x + rect.w / 2, rect.y + 0.2, 500)
+  const airHp = air.hp
+  const slow = mkEnemy(s, 'walker', rect.x + rect.w / 2, rect.y + 0.25, 500)
+  const slowHp = slow.hp
+  applyFortressRamming(s, RAM_MIN_SPEED - 0.01, 0)
+  check('碾压过滤：飞行单位免疫，低于最低速度不触发', air.hp === airHp && slow.hp === slowHp)
+
+  const blocked = arena()
+  blocked.enemies = []
+  blocked.fortress.x = 0
+  blocked.fortress.vx = -3
+  blocked.moveDir = { x: -1, y: 0 }
+  const blockedRect = fortressRect(blocked)
+  const pinned = mkEnemy(blocked, 'walker', blockedRect.x + 0.2, blockedRect.y + blockedRect.h / 2, 500)
+  const pinnedHp = pinned.hp
+  const afterBlocked = tick(blocked, 0.05)
+  check('碾压实际位移：撞边界空转不造成伤害', afterBlocked.enemies.find(x => x.id === pinned.id)?.hp === pinnedHp)
+}
+
+// #19：敌方载具运行时与堡垒对堡垒冲撞
+{
+  const savedInitialUnits = structuredClone(LEVEL.initialUnits)
+  const wheeledUnitId = 'unit:sim-enemy-wheeled'
+  const wheeledFortressId = 'sim-enemy-wheeled-fortress'
+  try {
+    const wheeledUnit = structuredClone(unitDefById(fortressUnitId(DEFAULT_FORTRESS.id))!)
+    wheeledUnit.id = wheeledUnitId
+    wheeledUnit.name = '敌方轮式运动测试载具'
+    const wheeledConfig = unitTypeConfig(wheeledUnit)!
+    const wheeledFortress = structuredClone(DEFAULT_FORTRESS)
+    wheeledFortress.id = wheeledFortressId
+    wheeledFortress.unitId = wheeledUnitId
+    wheeledFortress.name = wheeledUnit.name
+    wheeledFortress.unitTargetClasses = structuredClone(wheeledUnit.targetClasses)
+    wheeledFortress.unitCombat = wheeledUnit.combat ? structuredClone(wheeledUnit.combat) : undefined
+    wheeledFortress.unitAI = wheeledUnit.ai ? structuredClone(wheeledUnit.ai) : undefined
+    wheeledFortress.unitBoss = wheeledUnit.boss ? structuredClone(wheeledUnit.boss) : undefined
+    if (wheeledConfig.kind === 'vehicle') {
+      wheeledConfig.chassis = 'wheeled'
+      wheeledConfig.accel = 2.5
+      wheeledConfig.turnSpeed = 45
+      wheeledConfig.wheelbase = 2.2
+      wheeledConfig.steerMax = 35
+      wheeledConfig.steerRate = 90
+      wheeledFortress.chassis = wheeledConfig.chassis
+      wheeledFortress.accel = wheeledConfig.accel
+      wheeledFortress.turnSpeed = wheeledConfig.turnSpeed
+      wheeledFortress.wheelbase = wheeledConfig.wheelbase
+      wheeledFortress.steerMax = wheeledConfig.steerMax
+      wheeledFortress.steerRate = wheeledConfig.steerRate
+    }
+    saveCustomFortress(wheeledFortress)
+    LEVEL.initialUnits = [{
+      id: 'sim-enemy-fortress', unitDefId: fortressUnitId(DEFAULT_FORTRESS.id),
+      faction: 'enemy', controller: 'ai', x: LEVEL.cols / 2, y: LEVEL.rows / 2,
+    }, {
+      id: 'sim-enemy-wheeled', unitDefId: wheeledUnitId,
+      faction: 'enemy', controller: 'ai', x: LEVEL.cols / 2 + 8, y: LEVEL.rows / 2,
+    }]
+    const s = initialState()
+    s.phase = 'combat'
+    s.spawnQueue = []
+    const enemy = s.enemies[0]
+    check('敌方载具生成：关卡中的堡垒单位建立朝向、速度与独立四向装甲', !!enemy?.vehicle && enemy.unitDefId === fortressUnitId(DEFAULT_FORTRESS.id) && enemy.vehicle.armor.front === (DEFAULT_FORTRESS.armor?.front ?? 0))
+    const movementState = initialState()
+    movementState.phase = 'combat'
+    movementState.spawnQueue = []
+    const movingVehicle = movementState.enemies[0]
+    if (movingVehicle) {
+      movingVehicle.x = 2
+      movingVehicle.y = 2
+      movingVehicle.placementId = undefined // 隔离视野门控，只验证组合式 AI 的无武器移动分支
+      movingVehicle.aiOverride = {
+        targeting: { profile: 'fortress' }, movement: { profile: 'direct' }, attack: { profile: 'none' }, special: { profile: 'none' },
+      }
+      const target = fortressRect(movementState)
+      const before = Math.hypot(movingVehicle.x - (target.x + target.w / 2), movingVehicle.y - (target.y + target.h / 2))
+      const movedState = run(movementState, 2, 0.05)
+      const movedVehicle = movedState.enemies.find(item => item.id === movingVehicle.id)
+      const after = movedVehicle ? Math.hypot(movedVehicle.x - (target.x + target.w / 2), movedVehicle.y - (target.y + target.h / 2)) : Infinity
+      check('敌方无武器载具：攻击为无时仍执行移动堡垒＋直冲 AI', after < before && movedVehicle?.vehicle !== undefined,
+        JSON.stringify({ before, after, pos: movedVehicle && { x: movedVehicle.x, y: movedVehicle.y }, heading: movedVehicle?.vehicle?.heading }))
+    }
+    const curveState = initialState()
+    // 该用例只验证底盘运动学；清空场景阻挡，避免连续碰撞系统把出生于障碍内的载具先行截停。
+    curveState.objects = []
+    curveState.walls = []
+    curveState.buildings = []
+    curveState.core = null
+    const trackedVehicle = curveState.enemies[0]
+    const wheeledVehicle = curveState.enemies[1]
+    if (trackedVehicle?.vehicle && wheeledVehicle?.vehicle) {
+      trackedVehicle.x = 8; trackedVehicle.y = 12
+      trackedVehicle.vehicle.heading = 0; trackedVehicle.vehicle.vx = 0; trackedVehicle.vehicle.vy = 0
+      const trackedStart = { x: trackedVehicle.x, y: trackedVehicle.y }
+      moveEnemyVehicleToward(curveState, trackedVehicle, 16, 4, 0.1)
+      const trackedFirstSpeed = Math.hypot(trackedVehicle.vehicle.vx, trackedVehicle.vehicle.vy)
+      for (let index = 0; index < 39; index++) moveEnemyVehicleToward(curveState, trackedVehicle, 16, 4, 0.1)
+      check('敌方履带载具：按加速度起步并以连续朝向形成曲线轨迹', trackedFirstSpeed > 0 && trackedFirstSpeed <= DEFAULT_FORTRESS.accel * 0.1 + 1e-6
+        && Math.abs(trackedVehicle.x - trackedStart.x) > 0.05 && Math.abs(trackedVehicle.y - trackedStart.y) > 0.05
+        && Math.abs(trackedVehicle.vehicle.heading) > 0.01 && Math.abs(trackedVehicle.vehicle.heading) < Math.PI / 2,
+        JSON.stringify({ start: trackedStart, end: { x: trackedVehicle.x, y: trackedVehicle.y }, firstSpeed: trackedFirstSpeed, heading: trackedVehicle.vehicle.heading }))
+
+      wheeledVehicle.x = 24; wheeledVehicle.y = 12
+      wheeledVehicle.vehicle.heading = 0; wheeledVehicle.vehicle.vx = 0; wheeledVehicle.vehicle.vy = 0; wheeledVehicle.vehicle.steerAngle = 0
+      const wheeledStart = { x: wheeledVehicle.x, y: wheeledVehicle.y }
+      for (let index = 0; index < 40; index++) moveEnemyVehicleToward(curveState, wheeledVehicle, 32, 5, 0.1)
+      check('敌方轮式载具：按方向盘速率、最大转角和轴距转弯，不横移或原地旋转', Math.abs(wheeledVehicle.vehicle.steerAngle) > 0.01
+        && Math.abs(wheeledVehicle.vehicle.heading) > 0.01
+        && Math.abs(wheeledVehicle.x - wheeledStart.x) > 0.05 && Math.abs(wheeledVehicle.y - wheeledStart.y) > 0.05)
+    }
+    const armedTemplate = unitDefById(fortressUnitId(DEFAULT_FORTRESS.id))!
+    const armedVehicleDef = armedTemplate.legacy?.registry === 'fortress' ? armedTemplate.legacy.def : DEFAULT_FORTRESS
+    const armedHp = armedVehicleDef.hardpoints.find(item => !item.types && item.fixed === undefined && item.arc === undefined) ?? armedVehicleDef.hardpoints[0]
+    const savedBuiltIn = armedHp.builtIn
+    const savedArmedSize = armedHp.size
+    const savedArmedPosition = { x: armedHp.x, y: armedHp.y }
+    try {
+      for (const [weaponId, expected] of [['mg', 'bullet'], ['lob', 'shell'], ['hunter', 'missile'], ['beam', 'beam'], ['spray', 'spray']] as const) {
+        const weapon = TURRET_DEFS.find(item => item.id === weaponId)!
+        const savedMinRange = weapon.rangeMin, savedMaxRange = weapon.rangeMax
+        weapon.rangeMin = 0; weapon.rangeMax = Math.max(legacyMeters(400), weapon.rangeMax)
+        armedHp.builtIn = weaponId
+        armedHp.size = weapon.mount
+        let armedState = initialState()
+        armedState.phase = 'combat'
+        armedState.spawnQueue = []
+        const armedEnemy = armedState.enemies[0]
+        const player = fortressRect(armedState)
+        let attackGroupmateId: number | null = null
+        if (armedEnemy?.vehicle) {
+          armedEnemy.damageMultiplier = 1.5
+          armedEnemy.x = player.x + player.w / 2
+          armedEnemy.y = player.y + player.h / 2 - 10
+          armedEnemy.vehicle.heading = Math.PI
+          armedEnemy.group = 'attack-sync'
+          armedEnemy.aiOverride = {
+            targeting: { profile: 'closestHostile' }, movement: { profile: 'stationary' }, attack: { profile: 'none' }, special: { profile: 'none' },
+          }
+          const groupmate = structuredClone(armedEnemy)
+          groupmate.id = armedState.nextId++
+          groupmate.placementId = 900000 + groupmate.id
+          groupmate.controller = 'static'
+          groupmate.x = 2; groupmate.y = 2
+          groupmate.behaviorEngaged = false
+          if (groupmate.vehicle) groupmate.vehicle.turrets = []
+          armedState.enemies.push(groupmate)
+          attackGroupmateId = groupmate.id
+        }
+        const mountedId = armedEnemy?.vehicle?.turrets?.[0]?.id
+        let fired = false, firingSeen = false, projectileKindSeen = false, sharedProjectileArtSeen = false, groupEngagedSeen = false, scaledProjectileDamageSeen = false, scaledBlastEffectSeen = false
+        for (let index = 0; index < 45; index++) {
+          armedState = tick(armedState, 0.1)
+          fired ||= !!mountedId && armedState.muzzles.some(item => item.turretId === mountedId)
+          const mounted = armedState.enemies.find(item => item.id === armedEnemy?.id)?.vehicle?.turrets?.find(item => item.id === mountedId)
+          firingSeen ||= mounted?.firing ?? false
+          projectileKindSeen ||= armedState.enemyProjectiles.some(item => item.kind === expected)
+          const ammo = weapon.art?.projectile ? PROJECTILE_ARTS.find(item => item.id === weapon.art?.projectile) : undefined
+          sharedProjectileArtSeen ||= armedState.enemyProjectiles.some(item => item.defId === weaponId
+            && item.ammoId === weapon.art?.projectile && item.assetRef === ammo?.projectileAsset)
+          scaledProjectileDamageSeen ||= (expected === 'bullet' || expected === 'shell' || expected === 'missile') && armedState.enemyProjectiles.some(item => item.defId === weaponId
+            && Math.abs(item.damage - weapon.damage * 1.5) < 1e-9)
+          scaledBlastEffectSeen ||= !!weapon.blastEffect && armedState.enemyProjectiles.some(item => item.defId === weaponId
+            && Math.abs((item.blastEffect?.damage ?? 0) - weapon.blastEffect!.damage * 1.5) < 1e-9
+            && (!weapon.blastEffect!.burn || Math.abs((item.blastEffect?.burn?.damage ?? 0) - weapon.blastEffect!.burn!.damage * 1.5) < 1e-9))
+          groupEngagedSeen ||= attackGroupmateId !== null
+            && !!armedState.enemies.find(item => item.id === attackGroupmateId)?.behaviorEngaged
+        }
+        const armedAfter = armedState.enemies.find(item => item.id === armedEnemy?.id)
+        const behaviorSeen = expected === 'beam' || expected === 'spray' ? firingSeen : expected === 'bullet' ? fired : projectileKindSeen
+        check(`敌方载具五类炮塔：${weapon.name} 复用共用状态机并执行${expected}行为`,
+          !!mountedId && !!armedAfter?.vehicle?.turrets?.some(item => item.id === mountedId) && behaviorSeen,
+          JSON.stringify({ mountedId, turrets: armedAfter?.vehicle?.turrets?.length, fired, firingSeen, projectileKindSeen }))
+        check(`单位编组主动攻击：${weapon.name} 起射后同组成员共同进入攻击状态`, groupEngagedSeen)
+        if (expected === 'bullet') check('敌我哨戒机枪：敌方弹丸携带与我方相同的弹丸库及贴图引用', sharedProjectileArtSeen,
+          JSON.stringify({ ammoId: weapon.art?.projectile, asset: PROJECTILE_ARTS.find(item => item.id === weapon.art?.projectile)?.projectileAsset }))
+        if (expected === 'bullet' || expected === 'shell' || expected === 'missile') check(`波次敌人强度：1.5 系数把${weapon.name}弹丸威力提升为 150%`, scaledProjectileDamageSeen)
+        if (weapon.blastEffect) check(`波次敌人强度：${weapon.name}爆炸及燃烧附加伤害同步提升为 150%`, scaledBlastEffectSeen)
+        weapon.rangeMin = savedMinRange; weapon.rangeMax = savedMaxRange
+      }
+
+      // 车体中心刚好进入旧 16 格射程时，后置 0.5 格的炮塔仍有 16.5 格；敌友双方都必须继续靠近，
+      // 不能因为车体中心已进射程而停在炮塔实际射程之外。
+      const sharedRangeWeapon = TURRET_DEFS.find(item => item.id === 'mg')!
+      const savedSharedRange = { min: sharedRangeWeapon.rangeMin, max: sharedRangeWeapon.rangeMax }
+      const savedSharedVision = armedTemplate.stats.vision
+      try {
+        sharedRangeWeapon.rangeMin = 0; sharedRangeWeapon.rangeMax = legacyMeters(400)
+        armedTemplate.stats.vision = 40
+        armedHp.builtIn = 'mg'; armedHp.size = sharedRangeWeapon.mount
+        armedHp.x = armedVehicleDef.w / 2; armedHp.y = armedVehicleDef.h / 2 + 0.5
+
+        let enemyRangeState = initialState()
+        enemyRangeState.phase = 'combat'; enemyRangeState.spawnQueue = []
+        const rangeEnemy = enemyRangeState.enemies[0]
+        const playerCenter = fortressRect(enemyRangeState)
+        const playerX = playerCenter.x + playerCenter.w / 2, playerY = playerCenter.y + playerCenter.h / 2
+        if (rangeEnemy?.vehicle) {
+          rangeEnemy.placementId = undefined // 隔离关卡实例视野，只验证炮位实际射程
+          rangeEnemy.x = playerX; rangeEnemy.y = playerY - 12
+          rangeEnemy.vehicle.heading = Math.PI; rangeEnemy.vehicle.vx = 0; rangeEnemy.vehicle.vy = 0
+          rangeEnemy.aiOverride = { targeting: { profile: 'closestHostile' }, movement: { profile: 'holdRange' }, attack: { profile: 'none' }, special: { profile: 'none' } }
+        }
+        const enemyRangeY = rangeEnemy?.y ?? 0
+        enemyRangeState = run(enemyRangeState, 0.5, 0.05)
+        const enemyRangeAfter = enemyRangeState.enemies.find(item => item.id === rangeEnemy?.id)
+        check('敌方载具实际炮位射程：已在 75%～95% 站位带时稳定保持位置', !!enemyRangeAfter && Math.abs(enemyRangeAfter.y - enemyRangeY) < 0.01 && enemyRangeAfter.targetId === 0,
+          JSON.stringify({ before: enemyRangeY, after: enemyRangeAfter?.y, targetId: enemyRangeAfter?.targetId, engaged: enemyRangeAfter?.behaviorEngaged }))
+
+        let allyRangeState = initialState()
+        allyRangeState.phase = 'combat'; allyRangeState.spawnQueue = []
+        const staticEnemy = allyRangeState.enemies[0]
+        if (staticEnemy?.vehicle) {
+          staticEnemy.controller = 'static'; staticEnemy.x = 12; staticEnemy.y = 12
+          staticEnemy.vehicle.vx = 0; staticEnemy.vehicle.vy = 0
+          allyRangeState.enemies = [staticEnemy]
+          const allyRange = {
+            id: allyRangeState.nextId++, kind: 'tank' as const, unitDefId: staticEnemy.unitDefId,
+            faction: 'ally' as const, controller: 'ai' as const, producerId: 0,
+            x: 12, y: 28, hp: staticEnemy.maxHp, maxHp: staticEnemy.maxHp,
+            cooldown: 0, targetId: null, hitFlash: 0,
+            vehicle: structuredClone(staticEnemy.vehicle),
+            aiOverride: { targeting: { profile: 'closestHostile' as const }, movement: { profile: 'holdRange' as const }, attack: { profile: 'none' as const }, special: { profile: 'none' as const } },
+          }
+          allyRange.vehicle.heading = 0; allyRange.vehicle.vx = 0; allyRange.vehicle.vy = 0
+          for (const turret of allyRange.vehicle.turrets ?? []) turret.id = allyRangeState.nextId++
+          allyRangeState.allies = [allyRange]
+          const allyRangeY = allyRange.y
+          allyRangeState = tick(allyRangeState, 0.1)
+          const allyRangeAfter = allyRangeState.allies.find(item => item.id === allyRange.id)
+          check('友方载具实际炮位射程：与敌方共用同一接敌规则并继续靠近', !!allyRangeAfter && allyRangeAfter.y < allyRangeY,
+            JSON.stringify({ before: allyRangeY, after: allyRangeAfter?.y, targetId: allyRangeAfter?.targetId }))
+        }
+      } finally {
+        sharedRangeWeapon.rangeMin = savedSharedRange.min; sharedRangeWeapon.rangeMax = savedSharedRange.max
+        armedTemplate.stats.vision = savedSharedVision
+      }
+    } finally {
+      armedHp.builtIn = savedBuiltIn
+      armedHp.size = savedArmedSize
+      armedHp.x = savedArmedPosition.x
+      armedHp.y = savedArmedPosition.y
+    }
+    const aiHardpoints = armedVehicleDef.hardpoints.slice(0, 2)
+    const aiHardpointSnapshots = aiHardpoints.map(item => structuredClone(item))
+    const mgForAi = TURRET_DEFS.find(item => item.id === 'mg')!
+    const savedMgRanges = { min: mgForAi.rangeMin, max: mgForAi.rangeMax }
+    try {
+      mgForAi.rangeMin = 0; mgForAi.rangeMax = legacyMeters(400)
+      for (const hp of aiHardpoints) {
+        hp.size = 'S'; hp.builtIn = 'mg'; delete hp.types; delete hp.arc; delete hp.fixed
+      }
+      let aiState = initialState()
+      aiState.phase = 'combat'; aiState.spawnQueue = []
+      const aiEnemy = aiState.enemies[0]
+      const player = fortressRect(aiState)
+      const firedTurrets = new Set<number>()
+      let independentAimSeen = false
+      let startDistance = 0
+      if (aiEnemy?.vehicle) {
+        aiEnemy.x = player.x + player.w / 2; aiEnemy.y = player.y + player.h / 2 - 10; aiEnemy.vehicle.heading = 0
+        aiEnemy.aiOverride = { targeting: { profile: 'closestHostile' }, movement: { profile: 'rangeEdge' }, attack: { profile: 'none' }, special: { profile: 'none' } }
+        startDistance = fortressDistanceToPoint(aiState, aiEnemy.x, aiEnemy.y)
+      }
+      for (let index = 0; index < 35; index++) {
+        aiState = tick(aiState, 0.1)
+        for (const muzzle of aiState.muzzles) firedTurrets.add(muzzle.turretId)
+        const live = aiState.enemies.find(item => item.id === aiEnemy?.id)
+        independentAimSeen ||= !!live?.vehicle?.turrets?.some(turret => Math.abs(wrapAngle(turret.angle - live.vehicle!.heading)) > 0.01)
+      }
+      const aiAfter = aiState.enemies.find(item => item.id === aiEnemy?.id)
+      const mountedIds = aiAfter?.vehicle?.turrets?.map(item => item.id) ?? []
+      check('敌方载具炮塔 AI：车体按载具运动学进入站位，炮塔朝向与车体独立', !!aiAfter?.vehicle
+        && fortressDistanceToPoint(aiState, aiAfter.x, aiAfter.y) > startDistance
+        && independentAimSeen,
+        JSON.stringify({ startDistance, endDistance: aiAfter ? fortressDistanceToPoint(aiState, aiAfter.x, aiAfter.y) : null,
+          heading: aiAfter?.vehicle?.heading, turret: aiAfter?.vehicle?.turrets?.[0]?.angle, independentAimSeen }))
+      check('敌方载具多炮塔：每个炮位拥有独立状态并都能索敌开火', mountedIds.length === 2 && mountedIds.every(id => firedTurrets.has(id)))
+    } finally {
+      mgForAi.rangeMin = savedMgRanges.min; mgForAi.rangeMax = savedMgRanges.max
+      aiHardpoints.forEach((hp, index) => {
+        const snapshot = aiHardpointSnapshots[index]
+        Object.assign(hp, snapshot)
+        if (snapshot.builtIn === undefined) delete hp.builtIn
+        if (snapshot.types === undefined) delete hp.types
+        if (snapshot.arc === undefined) delete hp.arc
+        if (snapshot.fixed === undefined) delete hp.fixed
+      })
+    }
+    let armorState = initialState()
+    armorState.phase = 'combat'; armorState.spawnQueue = []
+    const armorEnemy = armorState.enemies[0]
+    if (armorEnemy?.vehicle) {
+      armorEnemy.vehicle.heading = 0
+      armorEnemy.vehicle.armor = { front: 100, rear: 80, left: 60, right: 40 }
+      armorEnemy.vehicle.maxArmor = { ...armorEnemy.vehicle.armor }
+      while (eventRandom(armorState.nextId, 131) < 0.05) armorState.nextId++
+      const hpBeforeBlock = armorEnemy.hp
+      const hitFxBeforeBlock = armorState.unitHits.length
+      damageEnemy(armorState, armorEnemy, 25, null, {
+        x: armorEnemy.x, y: armorEnemy.y - 2, penetration: 0,
+        incomingDx: 0, incomingDy: 1, ammoId: 'custom_ammo_3', projectileSize: 0.6,
+      })
+      check('敌方载具四向装甲：车头来弹读取前装甲并产生跳弹/格挡而不伤结构', armorEnemy.hp === hpBeforeBlock && armorEnemy.vehicle.armor.front === 100)
+      const enemyRicochetFx = armorState.unitHits.at(-1)
+      check('敌我单位受击反馈统一：敌方载具跳弹也生成共用反射粒子事件', armorState.unitHits.length === hitFxBeforeBlock + 1
+        && enemyRicochetFx?.ricochet === true && Math.hypot(enemyRicochetFx.ricochetDx, enemyRicochetFx.ricochetDy) > 0.99
+        && enemyRicochetFx.normalDy < -0.99 && enemyRicochetFx.ammoId === 'custom_ammo_3' && enemyRicochetFx.projectileSize === 0.6)
+      check('装甲提示文字：跳弹只生成“跳弹”飘字并标记为可独立隐藏', armorState.floats.at(-1)?.text === '跳弹' && armorState.floats.at(-1)?.visualKind === 'ricochet')
+      damageEnemy(armorState, armorEnemy, 25, null, { x: armorEnemy.x, y: armorEnemy.y - 2, penetration: 200, armorDamage: 7 })
+      check('敌方载具四向装甲：穿深足够时伤结构并削减对应受击面', armorEnemy.hp === hpBeforeBlock - 25 && armorEnemy.vehicle.armor.front === 93)
+      check('装甲提示文字：有装甲的结构伤害显示“击穿”', armorState.floats.at(-1)?.text === '击穿' && armorState.floats.at(-1)?.visualKind === 'penetration')
+      armorState.time += 0.1
+      while (eventRandom(armorState.nextId, 131) < 0.05) armorState.nextId++
+      damageEnemy(armorState, armorEnemy, 10, null, {
+        x: armorEnemy.x - 10, y: armorEnemy.y, penetration: 0,
+        incomingDx: 1, incomingDy: 0, ammoId: 'bullet_std', projectileSize: GEOMETRIC_BULLET_VISUAL_SIZE,
+      })
+      const sideHitFx = armorState.unitHits.at(-1)
+      const armorUnit = unitDefById(armorEnemy.unitDefId!)!
+      const visualHalfWidth = (armorUnit.visual?.width ?? armorUnit.stats.size * 2) * (armorEnemy.bossSizeScale ?? 1) / 2
+      check('敌方载具受击点：按实际主体宽度内缩投影，不落到较大的碰撞体外圈', !!sideHitFx
+        && Math.abs(sideHitFx.x - armorEnemy.x) < visualHalfWidth
+        && Math.abs(sideHitFx.y - armorEnemy.y) <= (armorUnit.visual?.height ?? armorUnit.stats.size * 2) / 2,
+        JSON.stringify({ hit: sideHitFx && { x: sideHitFx.x, y: sideHitFx.y }, center: { x: armorEnemy.x, y: armorEnemy.y }, visualHalfWidth }))
+      armorState.time += 0.1
+      damageEnemy(armorState, armorEnemy, 10, null, {
+        x: armorEnemy.x - 10, y: armorEnemy.y - 10, penetration: 0,
+        incomingDx: 1, incomingDy: 1, ammoId: 'bullet_std', projectileSize: GEOMETRIC_BULLET_VISUAL_SIZE,
+      })
+      const cornerHitFx = armorState.unitHits.at(-1)
+      const cornerOutwardLength = cornerHitFx ? Math.hypot(cornerHitFx.x - armorEnemy.x, cornerHitFx.y - armorEnemy.y) : 0
+      const cornerOutside = cornerHitFx && cornerOutwardLength > 0 ? {
+        x: cornerHitFx.x + (cornerHitFx.x - armorEnemy.x) / cornerOutwardLength * 0.1,
+        y: cornerHitFx.y + (cornerHitFx.y - armorEnemy.y) / cornerOutwardLength * 0.1,
+      } : null
+      check('载具受击点：斜向来弹投影到主体透明边缘轮廓内，继续向外即离开贴图', !!cornerHitFx && !!cornerOutside
+        && pointInsideUnitShape(cornerHitFx.x, cornerHitFx.y, armorEnemy, armorUnit)
+        && !pointInsideUnitShape(cornerOutside.x, cornerOutside.y, armorEnemy, armorUnit))
+      armorEnemy.vehicle.heading = Math.PI / 2
+      check('敌方载具四向装甲：车体旋转后世界右侧映射为车头', enemyVehicleArmorSideAt(armorEnemy, armorEnemy.x + 2, armorEnemy.y) === 'front')
+      armorEnemy.vehicle.armor = { front: 0, rear: 0, left: 0, right: 0 }
+      armorEnemy.hp = 1
+      damageEnemy(armorState, armorEnemy, 10, null, { x: armorEnemy.x, y: armorEnemy.y - 2, penetration: 200 })
+      const destroyedId = armorEnemy.id
+      armorState = tick(armorState, 0.1)
+      const destroyed = armorState.enemies.find(item => item.id === destroyedId)
+      check('敌方载具损毁：炮塔停火、播放载具爆炸并进入延迟移除流程', !!destroyed?.vehicle?.destroyedFx && (destroyed.deathLeft ?? 0) > 0 && armorState.explosions.length > 0 && destroyed.vehicle.turrets?.every(item => !item.firing && item.burstLeft === 0))
+      check('载具摧毁表现：不显示“载具摧毁”文字', !armorState.floats.some(item => item.text === '载具摧毁'))
+    }
+    if (enemy?.vehicle) {
+      const rect = fortressRect(s)
+      enemy.x = rect.x + rect.w / 2
+      enemy.y = rect.y + rect.h / 2 - 1
+      enemy.vehicle.heading = Math.PI
+      enemy.vehicle.vx = 0
+      enemy.vehicle.vy = 3
+      const playerHp = s.fortress.hp
+      const enemyHp = enemy.hp
+      const enemyArmor = { ...enemy.vehicle.armor }
+      const hits = applyFortressVehicleCollisions(s, 0, -3)
+      check('堡垒冲撞：重叠载具按相对速度双向损伤并削减敌方受击面装甲', hits === 1 && s.fortress.hp < playerHp && enemy.hp < enemyHp && Object.keys(enemyArmor).some(side => enemy.vehicle!.armor[side as keyof typeof enemyArmor] < enemyArmor[side as keyof typeof enemyArmor]))
+      const hpAfterHit = enemy.hp
+      enemy.x = rect.x + rect.w / 2
+      enemy.y = rect.y + rect.h / 2 - 1
+      applyFortressVehicleCollisions(s, 0, -3)
+      check('堡垒冲撞冷却：持续重叠只分离车体，不会逐帧重复扣血', enemy.hp === hpAfterHit)
+      s.time += VEHICLE_COLLISION_COOLDOWN
+      enemy.x = rect.x + rect.w / 2
+      enemy.y = rect.y + rect.h / 2 - 1
+      applyFortressVehicleCollisions(s, 0, -3)
+      check('堡垒冲撞冷却：冷却结束后再次接触可重新结算', enemy.hp < hpAfterHit)
+    }
+
+    const separationState = initialState()
+    separationState.spawnQueue = []
+    const firstVehicle = separationState.enemies[0]
+    const secondVehicle = separationState.enemies[1]
+    if (firstVehicle?.vehicle && secondVehicle?.vehicle) {
+      firstVehicle.x = secondVehicle.x = 12
+      firstVehicle.y = secondVehicle.y = 8
+      const contacts = resolveUnitCollisions(separationState, 6)
+      check('单位实体分离：同点生成的两台载具会按碰撞体积自动分开', contacts === 1 && Math.hypot(firstVehicle.x - secondVehicle.x, firstVehicle.y - secondVehicle.y) > 0.5)
+    }
+
+    const groundUnitState = initialState()
+    groundUnitState.enemies = []
+    groundUnitState.allies = []
+    const groundUnitA = mkEnemy(groundUnitState, 'walker', 10, 10, 100)
+    const groundUnitB = mkEnemy(groundUnitState, 'walker', 10, 10, 100)
+    const groundUnitContacts = resolveUnitCollisions(groundUnitState, 6)
+    check('单位实体分离：地面载具追逐同一点时不会叠在一起', groundUnitContacts === 1 && Math.hypot(groundUnitA.x - groundUnitB.x, groundUnitA.y - groundUnitB.y) > 0.1)
+    groundUnitA.controller = 'static'
+    groundUnitB.controller = 'static'
+    groundUnitA.x = groundUnitB.x = 10
+    groundUnitA.y = groundUnitB.y = 10
+    const staticContacts = resolveUnitCollisions(groundUnitState, 6)
+    check('单位实体分离：两个静止控制器同点生成也会确定性解开重叠', staticContacts === 1 && Math.hypot(groundUnitA.x - groundUnitB.x, groundUnitA.y - groundUnitB.y) > 0.1)
+
+    const sweptState = initialState()
+    sweptState.objects = [{
+      id: sweptState.nextId++, kind: 'rock', x: 8, y: 8, w: 1, h: 1,
+      hp: -1, maxHp: -1, blockMove: true, blockProjectile: false, height: 0,
+    }]
+    sweptState.walls = []
+    sweptState.buildings = []
+    sweptState.core = null
+    sweptState.enemies = []
+    sweptState.allies = []
+    const walkerDef = unitDefById(enemyUnitId('walker'))!
+    const sweptMove = moveGroundUnitWithBlockers(sweptState, walkerDef, 5, 8.5, 7, 0, null, 1, 90001)
+    check('地面单位连续碰撞：单帧高速移动不会穿过阻挡移动的物体', sweptMove.blockedX && sweptMove.x < 8)
+    const airMove = moveGroundUnitWithBlockers(sweptState, { ...walkerDef, stats: { ...walkerDef.stats, air: true } }, 5, 8.5, 7, 0, null, 1, 90002)
+    check('空中单位碰撞例外：仍可越过地面阻挡物', !airMove.blockedX && airMove.x > 8)
+
+    const prepContactState = initialState()
+    prepContactState.phase = 'prep'
+    prepContactState.enemies = []
+    prepContactState.allies = []
+    const prepFortressRect = fortressRect(prepContactState)
+    const prepCenterX = prepFortressRect.x + prepFortressRect.w / 2
+    const prepCenterY = prepFortressRect.y + prepFortressRect.h / 2
+    const prepVehicle = structuredClone(firstVehicle!)
+    prepVehicle.id = prepContactState.nextId++
+    prepVehicle.x = prepCenterX
+    prepVehicle.y = prepCenterY
+    prepVehicle.hp = prepVehicle.maxHp = 100
+    prepContactState.enemies = [prepVehicle]
+    const prepHp = prepVehicle.hp
+    const prepPlayerX = prepContactState.fortress.x
+    const prepPlayerY = prepContactState.fortress.y
+    applyFortressVehicleCollisions(prepContactState, 0, 0)
+    check('备战阶段实体碰撞：玩家与地面载具会分离且不结算伤害', prepVehicle.hp === prepHp
+      && (Math.hypot(prepContactState.fortress.x - prepPlayerX, prepContactState.fortress.y - prepPlayerY) > 0
+        || Math.hypot(prepVehicle.x - prepCenterX, prepVehicle.y - prepCenterY) > 0),
+      JSON.stringify({ hasVehicle: !!prepVehicle.vehicle, player: { x: prepContactState.fortress.x, y: prepContactState.fortress.y }, enemy: { x: prepVehicle.x, y: prepVehicle.y } }))
+    groundUnitState.time += 0.1
+    damageEnemy(groundUnitState, groundUnitA, 1, null, { x: groundUnitA.x - 2, y: groundUnitA.y - 2, incomingDx: 1, incomingDy: 1 })
+    const vehicleHitFx = groundUnitState.unitHits.at(-1)
+    const vehicleUnit = unitDefById(groundUnitA.unitDefId ?? enemyUnitId(groundUnitA.kind))!
+    const vehicleOutwardLength = vehicleHitFx ? Math.hypot(vehicleHitFx.x - groundUnitA.x, vehicleHitFx.y - groundUnitA.y) : 0
+    const vehicleOutside = vehicleHitFx && vehicleOutwardLength > 0 ? {
+      x: vehicleHitFx.x + (vehicleHitFx.x - groundUnitA.x) / vehicleOutwardLength * 0.1,
+      y: vehicleHitFx.y + (vehicleHitFx.y - groundUnitA.y) / vehicleOutwardLength * 0.1,
+    } : null
+    check('载具受击点：统一按主体透明边缘轮廓投影', !!vehicleHitFx && !!vehicleOutside
+      && pointInsideUnitShape(vehicleHitFx.x, vehicleHitFx.y, groundUnitA, vehicleUnit)
+      && !pointInsideUnitShape(vehicleOutside.x, vehicleOutside.y, groundUnitA, vehicleUnit))
+
+    const sharedUnitState = initialState()
+    sharedUnitState.phase = 'combat'; sharedUnitState.spawnQueue = []
+    const vehicleSource = sharedUnitState.enemies.find(item => (item.vehicle?.turrets?.length ?? 0) > 0)
+      ?? sharedUnitState.enemies.find(item => item.vehicle)
+    if (vehicleSource?.vehicle) {
+      sharedUnitState.enemies = [vehicleSource]
+      const allyVehicle = {
+        id: sharedUnitState.nextId++, kind: 'tank' as const, unitDefId: vehicleSource.unitDefId,
+        faction: 'ally' as const, controller: 'ai' as const, producerId: 0,
+        x: vehicleSource.x + 6, y: vehicleSource.y, hp: vehicleSource.maxHp, maxHp: vehicleSource.maxHp,
+        cooldown: 0, targetId: null, hitFlash: 0,
+        vehicle: structuredClone(vehicleSource.vehicle),
+        aiOverride: { targeting: { profile: 'closestHostile' as const, allowedTargets: ['combatUnit' as const] }, movement: { profile: 'direct' as const }, attack: { profile: 'none' as const }, special: { profile: 'none' as const } },
+      }
+      allyVehicle.vehicle.heading = 0
+      allyVehicle.vehicle.armor = { front: 100, rear: 80, left: 60, right: 40 }
+      allyVehicle.vehicle.maxArmor = { ...allyVehicle.vehicle.armor }
+      const anchorTestUnit = unitDefById(allyVehicle.unitDefId)!
+      if (anchorTestUnit.legacy?.registry === 'fortress' && allyVehicle.vehicle.turrets?.length === 0) {
+        const hardpoint = anchorTestUnit.legacy.def.hardpoints[0]
+        const previousBuiltIn = hardpoint.builtIn
+        const previousSize = hardpoint.size
+        hardpoint.builtIn = 'mg'; hardpoint.size = 'S'
+        ensureUnitVehicleTurrets(sharedUnitState, allyVehicle, anchorTestUnit)
+        if (previousBuiltIn === undefined) delete hardpoint.builtIn; else hardpoint.builtIn = previousBuiltIn
+        hardpoint.size = previousSize
+      }
+      sharedUnitState.allies = [allyVehicle]
+      const allyHpBefore = allyVehicle.hp
+      while (eventRandom(sharedUnitState.nextId, 131) < 0.05) sharedUnitState.nextId++
+      damageAlly(sharedUnitState, allyVehicle, 25, {
+        x: allyVehicle.x, y: allyVehicle.y - 2, penetration: 0,
+        incomingDx: 0, incomingDy: 1, ammoId: 'custom_ammo_3', projectileSize: 0.6,
+      })
+      const allyRicochetFx = sharedUnitState.unitHits.at(-1)
+      check('阵营无关承伤：友方载具与敌方载具共用命中面、反射与弹丸口径数据', allyVehicle.hp === allyHpBefore
+        && allyRicochetFx?.ricochet === true && allyRicochetFx.normalDy < -0.99
+        && allyRicochetFx.ammoId === 'custom_ammo_3' && allyRicochetFx.projectileSize === 0.6)
+      damageAlly(sharedUnitState, allyVehicle, 25, { x: allyVehicle.x, y: allyVehicle.y - 2, penetration: 200, armorDamage: 7 })
+      check('阵营无关承伤：友方载具穿透后同样扣结构并削减对应装甲', allyVehicle.hp === allyHpBefore - 25 && allyVehicle.vehicle.armor.front === 93)
+      allyVehicle.vehicle.heading = -Math.PI / 2
+      const beforeMove = { x: allyVehicle.x, y: allyVehicle.y, heading: allyVehicle.vehicle.heading }
+      let maxObservedSpeed = 0
+      for (let index = 0; index < 20; index++) {
+        moveUnitVehicleToward(sharedUnitState, allyVehicle, unitDefById(allyVehicle.unitDefId)!, vehicleSource.x, vehicleSource.y, 0.1)
+        maxObservedSpeed = Math.max(maxObservedSpeed, Math.hypot(allyVehicle.vehicle.vx, allyVehicle.vehicle.vy))
+      }
+      check('阵营无关运动：友方载具使用与敌方相同的加速和连续转向组件', Math.hypot(allyVehicle.x - beforeMove.x, allyVehicle.y - beforeMove.y) > 0
+        && maxObservedSpeed > 0,
+        JSON.stringify({ beforeMove, maxObservedSpeed, moved: { x: allyVehicle.x, y: allyVehicle.y, vehicle: allyVehicle.vehicle } }))
+      const vehicleUnit = unitDefById(allyVehicle.unitDefId)!
+      const vehicleTurretsAnchored = (host: typeof allyVehicle) => {
+        if (vehicleUnit.legacy?.registry !== 'fortress' || !host.vehicle.turrets?.length) return false
+        const body = vehicleUnit.legacy.def
+        const cosine = Math.cos(host.vehicle.heading), sine = Math.sin(host.vehicle.heading)
+        return host.vehicle.turrets.every(turret => {
+          const hardpoint = body.hardpoints.find(item => item.id === turret.hardpointId)
+          if (!hardpoint) return false
+          const localX = hardpoint.x - body.w / 2, localY = hardpoint.y - body.h / 2
+          const expectedX = host.x + localX * cosine - localY * sine
+          const expectedY = host.y + localX * sine + localY * cosine
+          return Math.abs(turret.x + turret.w / 2 - expectedX) < 1e-6
+            && Math.abs(turret.y + turret.h / 2 - expectedY) < 1e-6
+        })
+      }
+      check('车载炮塔锚定：友方载具普通移动和转向后炮塔同帧跟随炮位', vehicleTurretsAnchored(allyVehicle),
+        JSON.stringify({ legacy: vehicleUnit.legacy?.registry, turrets: allyVehicle.vehicle.turrets }))
+
+      const playerRect = fortressRect(sharedUnitState)
+      allyVehicle.x = playerRect.x + playerRect.w / 2
+      allyVehicle.y = playerRect.y + playerRect.h / 2
+      applyFortressVehicleCollisions(sharedUnitState, 0, 0)
+      check('车载炮塔锚定：玩家碰撞推开友方载具后主体与炮塔保持同步', vehicleTurretsAnchored(allyVehicle))
+
+      const secondAllyVehicle = structuredClone(allyVehicle)
+      secondAllyVehicle.id = sharedUnitState.nextId++
+      secondAllyVehicle.x = allyVehicle.x
+      secondAllyVehicle.y = allyVehicle.y
+      sharedUnitState.allies.push(secondAllyVehicle)
+      resolveUnitCollisions(sharedUnitState, 6)
+      check('车载炮塔锚定：单位互相挤开和同点出生分离后所有载具炮塔保持同步',
+        vehicleTurretsAnchored(allyVehicle) && vehicleTurretsAnchored(secondAllyVehicle))
+
+      const parallelState = initialState()
+      parallelState.enemies = []
+      const parallelA = structuredClone(allyVehicle)
+      const parallelB = structuredClone(allyVehicle)
+      parallelA.id = parallelState.nextId++; parallelB.id = parallelState.nextId++
+      parallelA.x = 10; parallelA.y = 10
+      parallelB.x = 10.2; parallelB.y = 10
+      parallelA.vehicle.heading = parallelB.vehicle.heading = 0
+      parallelA.vehicle.vx = 0.6; parallelA.vehicle.vy = -3
+      parallelB.vehicle.vx = 0; parallelB.vehicle.vy = -3
+      parallelState.allies = [parallelA, parallelB]
+      resolveUnitCollisions(parallelState, 6)
+      check('友方载具贴行：只削减互相挤压的横向相对速度，完整保留共同前进速度',
+        Math.abs(parallelA.vehicle.vy + 3) < 1e-9 && Math.abs(parallelB.vehicle.vy + 3) < 1e-9
+        && parallelA.vehicle.vx - parallelB.vehicle.vx < 0.6,
+        JSON.stringify({ a: { vx: parallelA.vehicle.vx, vy: parallelA.vehicle.vy }, b: { vx: parallelB.vehicle.vx, vy: parallelB.vehicle.vy } }))
+      const visual = vehicleUnit.visual ?? { width: vehicleUnit.stats.size * 2, height: vehicleUnit.stats.size * 2 }
+      const localCornerX = visual.width * 0.45, localCornerY = visual.height * 0.45
+      const cornerCos = Math.cos(allyVehicle.vehicle.heading), cornerSin = Math.sin(allyVehicle.vehicle.heading)
+      const cornerX = allyVehicle.x + localCornerX * cornerCos - localCornerY * cornerSin
+      const cornerY = allyVehicle.y + localCornerX * cornerSin + localCornerY * cornerCos
+      check('统一弹丸碰撞体：载具主体角部按旋转矩形命中', pointInsideUnitShape(cornerX, cornerY, allyVehicle, vehicleUnit)
+        && segmentUnitShapeEntry(cornerX - visual.width, cornerY, cornerX + visual.width, cornerY, allyVehicle, vehicleUnit) !== null)
+      allyVehicle.vehicle.heat = allyVehicle.vehicle.heatCap
+      allyVehicle.vehicle.overheated = true
+      coolUnitVehicleHeat(allyVehicle, vehicleUnit, 0.1)
+      const coolingStarted = allyVehicle.vehicle.heat < allyVehicle.vehicle.heatCap && allyVehicle.vehicle.overheated
+      coolUnitVehicleHeat(allyVehicle, vehicleUnit, allyVehicle.vehicle.heatCap / Math.max(0.01, allyVehicle.vehicle.heatDissipation))
+      const nonPlayerResourcesRemainInfinite = allyVehicle.vehicle.turrets?.every(item => item.ammo === undefined && item.energy === undefined) ?? true
+      check('非玩家炮塔热量：无限弹药/电量不影响产热，过热后按同一50%迟滞散热恢复',
+        coolingStarted && !allyVehicle.vehicle.overheated && nonPlayerResourcesRemainInfinite)
+    }
+  } finally {
+    LEVEL.initialUnits = savedInitialUnits
+    deleteCustomFortress(wheeledFortressId)
+  }
+}
+
+// 关卡单位实例行为：静止、范围随机、循环路线、玩家接近、跟随玩家。
+{
+  const savedLevel = structuredClone(LEVEL)
+  const navigationFortressId = 'sim-non-combat-navigation'
+  const navigationUnitId = fortressUnitId(navigationFortressId)
+  const placed = (behavior: 'static' | 'guard' | 'random' | 'route' | 'approach' | 'follow', extra: Partial<typeof LEVEL.initialUnits[number]> = {}): typeof LEVEL.initialUnits[number] => ({
+    id: 9801, unitDefId: 'unit:uav', faction: 'neutral', controller: 'ai', x: 6.5, y: 6.5,
+    behavior, behaviorRange: behavior === 'random' ? 4 : 8, behaviorInterval: 0.25, behaviorSpeedPercent: 50, route: [], events: [], ...extra,
+  })
+  const behaviorState = (unit: typeof LEVEL.initialUnits[number]) => {
+    LEVEL.initialUnits = [unit]
+    const state = initialState()
+    state.phase = 'combat'
+    state.spawnQueue = [{ kind: 'walker', delay: 1000 }]
+    state.spawnTimer = 1000
+    return state
+  }
+  try {
+    const migrated = parseLevel(JSON.stringify({ ...defaultLevel(), rows: 20, cols: 20, initialUnits: [
+      placed('random', { behaviorRange: 7, behaviorInterval: 0, behaviorSpeedPercent: 35 }),
+      { ...placed('route', { id: 9802 }), route: [{ x: -2, y: 4.5 }, { x: 99, y: 99 }] },
+    ] })).initialUnits
+    check('单位行为配置：范围、零间隔、速度百分比会持久化，路线节点限制在战场内', migrated[0]?.behaviorRange === 7 && migrated[0]?.behaviorInterval === 0 && migrated[0]?.behaviorSpeedPercent === 35
+      && migrated[1]?.route[0]?.x === 0.5 && migrated[1]?.route[1]?.x === 19.5 && migrated[1]?.route[1]?.y === 19.5)
+
+    let state = behaviorState(placed('static'))
+    const still = state.allies.find(unit => unit.placementId === 9801)!
+    const stillAt = { x: still.x, y: still.y }
+    state = run(state, 1)
+    const stillAfter = state.allies.find(unit => unit.placementId === 9801)!
+    check('静止行为：单位固定在放置位置', Math.hypot(stillAfter.x - stillAt.x, stillAfter.y - stillAt.y) < 1e-6)
+
+    const guardPlacement = placed('guard', { unitDefId: fortressUnitId(DEFAULT_FORTRESS.id), rotation: 90, behaviorSpeedPercent: 100 })
+    state = behaviorState(guardPlacement)
+    const guard = state.allies.find(unit => unit.placementId === 9801)!
+    guard.x += 0.05
+    guard.vehicle!.heading = Math.PI
+    guard.behaviorReturning = true
+    guard.behaviorFacingHome = false
+    state = run(state, 0.2)
+    const guardAfter = state.allies.find(unit => unit.placementId === 9801)!
+    check('坚守行为：返回原位后恢复关卡实例的初始朝向', !guardAfter.behaviorReturning && guardAfter.behaviorFacingHome === true
+      && Math.abs(guardAfter.vehicle!.heading - Math.PI / 2) < 1e-9,
+    JSON.stringify({ returning: guardAfter.behaviorReturning, facingHome: guardAfter.behaviorFacingHome, heading: guardAfter.vehicle?.heading }))
+
+    state = behaviorState(placed('random'))
+    const randomStart = state.allies.find(unit => unit.placementId === 9801)!
+    const randomHome = { x: randomStart.x, y: randomStart.y }
+    state = run(state, 1.2)
+    const randomAfter = state.allies.find(unit => unit.placementId === 9801)!
+    const randomDistance = Math.hypot(randomAfter.x - randomHome.x, randomAfter.y - randomHome.y)
+    check('随机行为：按范围20%–50%目标与速度百分比执行移动', randomDistance > 0.05 && randomDistance <= 2.1, `distance=${randomDistance}`)
+
+    state = behaviorState(placed('route', { behaviorSpeedPercent: 100, route: [{ x: 7.5, y: 6.5 }, { x: 8.5, y: 6.5 }] }))
+    state = run(state, 0.6)
+    const routeMid = state.allies.find(unit => unit.placementId === 9801)!
+    state = run(state, 1.2)
+    const routeAfter = state.allies.find(unit => unit.placementId === 9801)!
+    check('路线行为：先到1号节点，再按编号推进并在末节点后回到1号循环', routeMid.x > 6.5 && (routeAfter.behaviorRouteIndex === 0 || routeAfter.behaviorRouteIndex === 1), JSON.stringify({ mid: routeMid.x, after: routeAfter.x, index: routeAfter.behaviorRouteIndex }))
+
+    state = behaviorState(placed('approach', { behaviorRange: 5, behaviorSpeedPercent: 60 }))
+    const approach = state.allies.find(unit => unit.placementId === 9801)!
+    const fortress = fortressRect(state)
+    approach.x = fortress.x + fortress.w / 2
+    approach.y = fortress.y - 3
+    const before = fortressDistanceToPoint(state, approach.x, approach.y)
+    state = run(state, 2)
+    const afterUnit = state.allies.find(unit => unit.placementId === 9801)!
+    const after = fortressDistanceToPoint(state, afterUnit.x, afterUnit.y)
+    check('接近行为：玩家进入触发范围后持续向玩家移动', after < before, `before=${before} after=${after}`)
+
+    state = behaviorState(placed('follow', { behaviorRange: 2, behaviorSpeedPercent: 60 }))
+    const follower = state.allies.find(unit => unit.placementId === 9801)!
+    const followFortress = fortressRect(state)
+    follower.x = followFortress.x + followFortress.w / 2
+    follower.y = followFortress.y - 6
+    const followBefore = fortressDistanceToPoint(state, follower.x, follower.y)
+    state = run(state, 2)
+    const followerAfter = state.allies.find(unit => unit.placementId === 9801)!
+    const followAfter = fortressDistanceToPoint(state, followerAfter.x, followerAfter.y)
+    check('跟随行为：单位持续向玩家移动并保持配置距离', followAfter < followBefore, `before=${followBefore} after=${followAfter}`)
+
+    const navigationDef = structuredClone(DEFAULT_FORTRESS)
+    navigationDef.id = navigationFortressId
+    navigationDef.unitId = navigationUnitId
+    navigationDef.name = '非战斗寻路夹具'
+    navigationDef.w = 1
+    navigationDef.h = 1
+    navigationDef.shape = ['0,0']
+    navigationDef.interior = { cols: 1, rows: 1 }
+    navigationDef.interiorCells = ['0,0']
+    navigationDef.hardpoints = []
+    navigationDef.effects = []
+    navigationDef.tracks = undefined
+    navigationDef.wheels = undefined
+    navigationDef.spriteBody = undefined
+    navigationDef.speed = 2
+    navigationDef.accel = 8
+    navigationDef.turnSpeed = 360
+    navigationDef.turnRadius = 0
+    saveCustomFortress(navigationDef)
+
+    LEVEL.objects = [{
+      id: 9890, kind: 'rock', x: 8, y: 4, w: 1, h: 5,
+      hp: -1, maxHp: -1, blockMove: true, blockProjectile: false, height: 3,
+    }]
+    LEVEL.initialUnits = [
+      placed('route', { id: 9811, unitDefId: navigationUnitId, x: 6.5, y: 6.5, behaviorSpeedPercent: 100, route: [{ x: 12.5, y: 6.5 }] }),
+      placed('route', { id: 9812, unitDefId: navigationUnitId, x: 6.5, y: 7.5, behaviorSpeedPercent: 100, route: [{ x: 12.5, y: 6.5 }] }),
+    ]
+    const statsBefore = nonCombatNavigationStats()
+    state = initialState()
+    state.phase = 'combat'
+    state.spawnQueue = [{ kind: 'walker', delay: 1000 }]
+    state.spawnTimer = 1000
+    let deviatedAroundWall = false
+    state = run(state, 14, 0.05, current => {
+      const first = current.allies.find(unit => unit.placementId === 9811)
+      if (first && Math.abs(first.y - 6.5) > 0.7) deviatedAroundWall = true
+    })
+    const routedUnits = state.allies.filter(unit => unit.placementId === 9811 || unit.placementId === 9812)
+    const statsAfter = nonCombatNavigationStats()
+    check('统一地格寻路：路线单位绕开阻挡物抵达指定节点而非直线顶墙',
+      deviatedAroundWall && routedUnits.length === 2 && routedUnits.every(unit => Math.hypot(unit.x - 12.5, unit.y - 6.5) < 0.8),
+      JSON.stringify(routedUnits.map(unit => ({ x: unit.x, y: unit.y, index: unit.behaviorRouteIndex }))))
+    check('统一地格寻路：同类型同目标单位共享一份距离场缓存',
+      statsAfter.fieldBuilds - statsBefore.fieldBuilds === 1 && statsAfter.fieldCacheHits > statsBefore.fieldCacheHits,
+      JSON.stringify({ before: statsBefore, after: statsAfter }))
+
+    LEVEL.objects = [{
+      id: 9891, kind: 'rock', x: 8, y: 0, w: 1, h: LEVEL.rows,
+      hp: -1, maxHp: -1, blockMove: true, blockProjectile: false, height: 3,
+    }]
+    state = behaviorState(placed('route', {
+      id: 9813, unitDefId: navigationUnitId, x: 6.5, y: 6.5,
+      behaviorSpeedPercent: 100, route: [{ x: 12.5, y: 6.5 }],
+    }))
+    state = run(state, 1.6)
+    const unreachable = state.allies.find(unit => unit.placementId === 9813)!
+    check('统一地格寻路：不可达路线节点不会被跳过，单位停车并周期触发脱困重算',
+      unreachable.x < 7.5 && unreachable.behaviorRouteIndex === 0
+        && unreachable.behaviorNavUnreachable === true && (unreachable.behaviorNavRepathSerial ?? 0) >= 1,
+      JSON.stringify({ x: unreachable.x, y: unreachable.y, index: unreachable.behaviorRouteIndex, unreachable: unreachable.behaviorNavUnreachable, replans: unreachable.behaviorNavRepathSerial }))
+  } finally {
+    deleteCustomFortress(navigationFortressId)
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+// 放置行为与战斗 AI 的车体移动必须严格单入口：复现 13 台勇士 K1“接近”时逐帧加速乱飞。
+{
+  const savedLevel = structuredClone(LEVEL)
+  const fortressId = 'sim-k1-approach-regression'
+  const unitId = fortressUnitId(fortressId)
+  try {
+    const k1 = structuredClone(DEFAULT_FORTRESS)
+    k1.id = fortressId
+    k1.unitId = unitId
+    k1.name = '勇士 K1 移动回归夹具'
+    k1.chassis = 'walker'
+    k1.w = 1
+    k1.h = 1
+    k1.shape = ['0,0']
+    k1.interior = { cols: 1, rows: 1 }
+    k1.interiorCells = ['0,0']
+    k1.hardpoints = [{ id: 'k1-gun', x: 0.5, y: 0.5, size: 'S', builtIn: 'mg' }]
+    k1.effects = []
+    k1.tracks = undefined
+    k1.wheels = undefined
+    k1.speed = 2.5
+    k1.accel = 1
+    k1.turnSpeed = 90
+    k1.brakeInertia = 1
+    k1.walkerStride = 2.1
+    k1.vision = 1
+    k1.trackingVision = 1
+    k1.unitAI = { preferredTarget: 'allHostile', positioning: 'optimalRange', movement: 'stop', special: { profile: 'none' } }
+    check('勇士 K1 回归夹具：步行机甲定义可保存', saveCustomFortress(k1))
+
+    LEVEL.objects = []
+    LEVEL.terrain = []
+    LEVEL.events = []
+    LEVEL.triggers = []
+    LEVEL.interactables = []
+    configureObjective(LEVEL, { type: 'defend', waves: 99 })
+
+    const verifyFaction = (faction: 'ally' | 'enemy') => {
+      LEVEL.initialUnits = Array.from({ length: 13 }, (_, index) => ({
+        id: 9810 + index,
+        unitDefId: unitId,
+        faction,
+        controller: 'ai' as const,
+        x: 3.5 + (index % 7) * 4,
+        y: 3.5 + Math.floor(index / 7) * 4,
+        rotation: 180,
+        behavior: 'approach' as const,
+        behaviorRange: 100,
+        behaviorInterval: 1,
+        behaviorSpeedPercent: 100,
+        route: [],
+        events: [],
+      }))
+      let state = initialState()
+      state.phase = 'combat'
+      state.turrets = []
+      state.spawnQueue = [{ kind: 'walker', delay: 999 }]
+      state.spawnTimer = 999
+      const dt = 0.05
+      const previous = new Map<number, { x: number; y: number }>()
+      const hosts = faction === 'enemy' ? state.enemies : state.allies
+      for (const host of hosts) previous.set(host.id, { x: host.x, y: host.y })
+      let maxStep = 0
+      let maxRuntimeSpeed = 0
+      for (let step = 0; step < 40; step++) {
+        state = tick(state, dt)
+        const liveHosts = faction === 'enemy' ? state.enemies : state.allies
+        for (const host of liveHosts) {
+          const before = previous.get(host.id)
+          if (before) maxStep = Math.max(maxStep, Math.hypot(host.x - before.x, host.y - before.y))
+          previous.set(host.id, { x: host.x, y: host.y })
+          if (host.vehicle) maxRuntimeSpeed = Math.max(maxRuntimeSpeed, Math.hypot(host.vehicle.vx, host.vehicle.vy))
+        }
+      }
+      const liveHosts = faction === 'enemy' ? state.enemies : state.allies
+      check(`勇士 K1 接近回归：${faction === 'enemy' ? '敌方' : '友方'}13 台单位不会因双重积分加速乱飞`,
+        liveHosts.length === 13 && maxStep <= k1.speed * dt * 1.5 + 0.02 && maxRuntimeSpeed <= k1.speed * 1.5
+          && liveHosts.every(host => Number.isFinite(host.x) && Number.isFinite(host.y) && host.x >= 0 && host.x <= LEVEL.cols && host.y >= 0 && host.y <= LEVEL.rows),
+        JSON.stringify({ count: liveHosts.length, maxStep, maxRuntimeSpeed }))
+    }
+
+    verifyFaction('enemy')
+    verifyFaction('ally')
+  } finally {
+    deleteCustomFortress(fortressId)
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+// #18 一期：任务简报、三枚勋章展示与线性/显式关卡链解锁。
+{
+  const first = defaultLevel()
+  const second = defaultLevel()
+  const missionLibrary = parseLevelLibrary(JSON.stringify({
+    version: 1,
+    activeId: 'level-1',
+    levels: [
+      { id: 'level-1', name: '第一关', level: first, nextId: 'level-2' },
+      { id: 'level-2', name: '第二关', level: second },
+    ],
+  }))
+  const emptyProgress: LevelProgress = { completedIds: [], totalReward: 0, medalIds: [], unlockedEquipmentIds: [], unlockRecords: [], spentMedals: 0, globalVariables: { 'global:rescued': 2 } }
+  const completedProgress: LevelProgress = { completedIds: ['level-1'], totalReward: 0, medalIds: ['level-1:primary', 'level-1:secondary-1'], unlockedEquipmentIds: [], unlockRecords: [], spentMedals: 0, globalVariables: {} }
+  const brief = missionBriefingOf(missionLibrary.levels[0])
+  check('任务介绍：旧关卡自动补齐任务贴图、简报和一主两次目标', !!brief.image && !!brief.introduction && !!brief.primaryObjective && brief.secondaryObjectives.length === 2)
+  check('任务介绍：默认任务贴图锚定素材库任务贴图分类', brief.image === 'builtin:mission/briefing_default' && getAsset(brief.image)?.category === 'missionImage')
+  check('任务介绍：首关默认解锁、后续关卡在前置完成前锁定', isLevelUnlocked(missionLibrary, 'level-1', emptyProgress) && !isLevelUnlocked(missionLibrary, 'level-2', emptyProgress))
+  check('任务介绍：前置关卡完成后按顺序/nextId 解锁下一关', isLevelUnlocked(missionLibrary, 'level-2', completedProgress))
+  check('任务介绍：已获得目标勋章按独立槽位识别', hasLevelMedal(completedProgress, 'level-1', 'primary') && hasLevelMedal(completedProgress, 'level-1', 'secondary-1') && !hasLevelMedal(completedProgress, 'level-1', 'secondary-2'))
+  const deploymentLibrary = parseLevelLibrary(JSON.stringify({
+    version: 1,
+    activeId: 'level-1',
+    levels: [{ id: 'level-1', name: '限定载具关', level: first, deployableFortressIds: ['standard', 'jeep', 'standard', '', 7, 'third-valid-id', 'extra-fourth'] }],
+  }))
+  check('任务介绍：关卡出战车辆去重、过滤非法值并限制最多三个', JSON.stringify(deploymentLibrary.levels[0].deployableFortressIds) === JSON.stringify(['standard', 'jeep', 'third-valid-id']))
+  check('任务介绍：旧关卡未配置时默认取当前车辆库前三项', JSON.stringify(deployableFortressIdsOf(missionLibrary.levels[0], FORTRESS_DEFS.map(def => def.id))) === JSON.stringify(FORTRESS_DEFS.slice(0, 3).map(def => def.id)))
+  const unlockLibrary = parseLevelLibrary(JSON.stringify({
+    version: 1,
+    activeId: 'level-1',
+    levels: [{ id: 'level-1', name: '装备奖励关', level: first, unlockRewards: [
+      { kind: 'fortress', id: 'jeep' }, { kind: 'fortress', id: 'jeep' }, { kind: 'turret', id: 'mg' }, { kind: 'bad', id: 'ignored' },
+    ] }],
+  }))
+  const jeepRef = { kind: 'fortress' as const, id: 'jeep' }
+  const freeRef = { kind: 'module' as const, id: 'unlisted-module' }
+  check('装备解锁配置：关卡奖励引用会去重并过滤非法类型', unlockLibrary.levels[0].unlockRewards?.length === 2)
+  check('装备准入：已配置为奖励的装备在获得前锁定，未配置来源的现有装备默认可用', !isEquipmentUnlocked(emptyProgress, jeepRef, unlockLibrary) && isEquipmentUnlocked(emptyProgress, freeRef, unlockLibrary))
+  const unlockedProgress = awardLevelProgress(emptyProgress, 'level-1', 0, ['primary'], unlockLibrary.levels[0].unlockRewards)
+  const unlockedAgain = awardLevelProgress(unlockedProgress, 'level-1', 0, ['primary'], unlockLibrary.levels[0].unlockRewards)
+  check('关卡装备奖励：首次通关永久解锁并记录关卡来源', isEquipmentUnlocked(unlockedProgress, jeepRef, unlockLibrary)
+    && unlockedProgress.unlockRecords.some(record => record.equipmentId === equipmentUnlockId(jeepRef) && record.source === 'level' && record.sourceId === 'level-1'))
+  check('关卡装备奖励：重复通关不会重复写入所有权或来源记录', unlockedAgain.unlockedEquipmentIds.length === unlockedProgress.unlockedEquipmentIds.length && unlockedAgain.unlockRecords.length === unlockedProgress.unlockRecords.length)
+  const shopRef = { kind: 'module' as const, id: 'shop-module' }
+  const insufficientPurchase = purchaseEquipment(emptyProgress, shopRef, 1, 'shop:item-1')
+  const successfulPurchase = purchaseEquipment(completedProgress, shopRef, 2, 'shop:item-1')
+  check('成就商店接口：勋章不足时不扣除也不解锁', !insufficientPurchase.ok && insufficientPurchase.reason === 'insufficient-medals' && insufficientPurchase.progress.spentMedals === 0)
+  check('成就商店接口：足额购买原子扣除勋章并记录商店来源', successfulPurchase.ok && availableMedalCount(successfulPurchase.progress) === 0
+    && successfulPurchase.progress.unlockRecords.some(record => record.equipmentId === equipmentUnlockId(shopRef) && record.source === 'shop' && record.sourceId === 'shop:item-1'))
+  const shopKeys = ACHIEVEMENT_SHOP_ITEMS.map(item => equipmentUnlockId(item.reward))
+  check('#27 商品目录：商品 ID、装备引用唯一且勋章价格为正整数',
+    new Set(ACHIEVEMENT_SHOP_ITEMS.map(item => item.id)).size === ACHIEVEMENT_SHOP_ITEMS.length
+    && new Set(shopKeys).size === shopKeys.length
+    && ACHIEVEMENT_SHOP_ITEMS.every(item => Number.isInteger(item.medalCost) && item.medalCost > 0))
+  check('#27 商品目录：全部炮塔和模块奖励都指向当前有效定义', ACHIEVEMENT_SHOP_ITEMS.every(item => item.reward.kind === 'turret'
+    ? TURRET_DEFS.some(def => def.id === item.reward.id)
+    : item.reward.kind === 'module' ? MODULE_DEFS.some(def => def.id === item.reward.id) : true))
+  const firstShopItem = ACHIEVEMENT_SHOP_ITEMS[0]
+  check('#27 商店准入：目录装备在获得前锁定', !isEquipmentUnlocked(emptyProgress, firstShopItem.reward, missionLibrary))
+  const catalogPurchase = purchaseEquipment(completedProgress, firstShopItem.reward, firstShopItem.medalCost, firstShopItem.id)
+  const duplicatePurchase = purchaseEquipment(catalogPurchase.progress, firstShopItem.reward, firstShopItem.medalCost, firstShopItem.id)
+  check('#27 兑换：成功后永久解锁并准确扣除勋章', catalogPurchase.ok
+    && isEquipmentUnlocked(catalogPurchase.progress, firstShopItem.reward, missionLibrary)
+    && catalogPurchase.progress.spentMedals === firstShopItem.medalCost)
+  check('#27 兑换：重复兑换被拦截且不再扣除勋章', !duplicatePurchase.ok && duplicatePurchase.reason === 'owned'
+    && duplicatePurchase.progress.spentMedals === firstShopItem.medalCost)
+  const levelUnlockedShopItem = awardLevelProgress(emptyProgress, 'level-1', 0, ['primary'], [firstShopItem.reward])
+  check('#27 双来源：关卡奖励可提前解锁商店装备且不消费勋章', isEquipmentUnlocked(levelUnlockedShopItem, firstShopItem.reward, missionLibrary)
+    && levelUnlockedShopItem.spentMedals === 0
+    && levelUnlockedShopItem.unlockRecords.some(record => record.equipmentId === equipmentUnlockId(firstShopItem.reward) && record.source === 'level'))
+  let trackedGoalState = initialState()
+  trackedGoalState.kills = 999
+  trackedGoalState.fortress.hp = trackedGoalState.fortress.maxHp
+  trackedGoalState = tick(trackedGoalState, 0.01)
+  check('目标状态：数值条件变化不会自动完成任何目标', !primaryObjectiveStatus(trackedGoalState) && JSON.stringify(secondaryObjectiveStatuses(trackedGoalState)) === JSON.stringify([false, false]))
+  trackedGoalState.secondaryObjectivesCompleted[0] = true
+  check('主界面目标：事件写入次要目标后立即显示达成', secondaryObjectiveStatuses(trackedGoalState)[0])
+  trackedGoalState.phase = 'lost'
+  check('目标结算：失败关卡不会确认已追踪的次要目标', JSON.stringify(settlementObjectiveStatuses(trackedGoalState)) === JSON.stringify([false, false, false]))
+  trackedGoalState.phase = 'won'
+  trackedGoalState.levelVariables['builtin:primaryObjectiveCompleted'] = true
+  check('目标结算：胜利时确认主要目标及已达成的次要目标', JSON.stringify(settlementObjectiveStatuses(trackedGoalState)) === JSON.stringify([true, true, false]))
+  const firstSettlement = awardLevelProgress(emptyProgress, 'level-1', 320, ['primary', 'secondary-1'])
+  const repeatedSettlement = awardLevelProgress(firstSettlement, 'level-1', 320, ['primary', 'secondary-1'])
+  check('关卡结算：首次胜利发放奖励并记录完成的目标勋章', firstSettlement.totalReward === 320 && firstSettlement.completedIds.includes('level-1') && firstSettlement.medalIds.length === 2)
+  check('关卡结算：重复挑战可重复获得奖励，但不会重复记录关卡或同一目标勋章', repeatedSettlement.totalReward === 640 && repeatedSettlement.completedIds.length === 1 && repeatedSettlement.medalIds.length === 2)
+  check('玩家进度：关卡结算保留全局变量当前值', repeatedSettlement.globalVariables['global:rescued'] === 2)
+  const globalLibrary = parseLevelLibrary(JSON.stringify({ version: 1, activeId: 'level-1', globalVariables: [{ id: 'rescued', name: '已救人数', type: 'number', initial: 1 }], levels: [{ id: 'level-1', name: '第一关', level: first }] }))
+  const globalValues = globalVariableValues(globalLibrary.globalVariables, { 'global:rescued': 5 })
+  check('全局变量：定义归属整个关卡库，玩家进度值优先于初始值', globalLibrary.globalVariables[0]?.id === 'global:rescued' && globalValues['global:rescued'] === 5)
+  check('关卡结算：胜利或失败状态会冻结游戏主循环', isTerminalPhase('won') && isTerminalPhase('lost') && !isTerminalPhase('combat'))
+}
+
+// 关卡事件：触发方式只描述时机，单位/物体/变量统一作为触发条件。
+{
+  const legacy = defaultLevel()
+  ;(legacy.events as unknown[]) = [{
+    id: 9900, name: '旧变量触发', category: 'scene', enabled: true,
+    activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] },
+    trigger: { type: 'variable', conditions: { mode: 'all', conditions: [{ variableId: 'gate', operator: 'eq', value: true }] } },
+    actions: [],
+  }]
+  const migrated = parseLevel(JSON.stringify(legacy)).events[0]
+  check('事件条件迁移：旧“变量满足”触发方式转为“自动”并保留变量判断', migrated?.trigger.type === 'automatic'
+    && migrated.conditions.conditions[0]?.kind === 'variable'
+    && migrated.conditions.conditions[0]?.variableId === 'gate')
+
+  const numericMigration = defaultLevel()
+  ;(numericMigration.variables as unknown[]) = [
+    { id: 'var:true', name: '旧真值', type: 'boolean', initial: true },
+    { id: 'var:false', name: '旧假值', type: 'boolean', initial: false },
+  ]
+  ;(numericMigration.events as unknown[]) = [{
+    id: 9905, name: '旧布尔条件', category: 'scene', enabled: true, activationLimit: 1, cooldown: 0,
+    trigger: { type: 'automatic' }, conditions: { mode: 'all', conditions: [{ variableId: 'var:true', operator: 'eq', value: true }] }, actions: [],
+  }]
+  const migratedNumeric = parseLevel(JSON.stringify(numericMigration))
+  check('数值变量迁移：旧布尔定义、初始值与条件统一转为 1/0', migratedNumeric.variables.every(variable => variable.type === 'number')
+    && migratedNumeric.variables[0]?.initial === 1 && migratedNumeric.variables[1]?.initial === 0
+    && migratedNumeric.events[0]?.conditions.conditions[0]?.kind === 'variable'
+    && migratedNumeric.events[0]?.conditions.conditions[0]?.value === 1)
+
+  const legacyObjectState = defaultLevel()
+  ;(legacyObjectState.events as unknown[]) = [{
+    id: 9901, name: '旧物体状态触发', category: 'object', enabled: true,
+    activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] },
+    trigger: { type: 'objectState', objectId: 7, state: 'open' }, actions: [],
+  }]
+  const migratedObjectState = parseLevel(JSON.stringify(legacyObjectState)).events[0]
+  const migratedStateCondition = migratedObjectState?.conditions.conditions[0]
+  check('物体状态迁移：旧触发方式收口为自动时机＋物体状态条件', migratedObjectState?.trigger.type === 'automatic'
+    && migratedStateCondition?.kind === 'objectState'
+    && migratedStateCondition.objectId === 7 && migratedStateCondition.operator === 'eq' && migratedStateCondition.state === 'open')
+
+  const savedLevel = structuredClone(LEVEL)
+  try {
+    LEVEL.mode = 'defend'; LEVEL.objective = { type: 'defend', waves: 99 }
+    LEVEL.interactables = []; LEVEL.triggers = []; LEVEL.stages = [defaultStage({ type: 'defend', waves: 99 })]; LEVEL.startStageId = LEVEL.stages[0].id
+    LEVEL.initialUnits = [{ id: 9901, unitDefId: 'unit:uav', faction: 'ally', controller: 'static', x: 8.5, y: 8.5, events: [] }]
+    LEVEL.objects = [{ id: 9902, kind: 'rock', x: 10, y: 10, w: 1, h: 1, hp: -1, blockMove: false, blockProjectile: false, height: 0 }]
+    const event = (id: number, conditions: typeof LEVEL.events[number]['conditions'], gold: number): typeof LEVEL.events[number] => ({
+      id, name: `条件 ${id}`, category: 'scene', enabled: true, activationLimit: 1, cooldown: 0,
+      trigger: { type: 'automatic' }, conditions, actions: [{ type: 'reward', gold }],
+    })
+    LEVEL.events = [
+      event(9911, { mode: 'all', conditions: [{ kind: 'unit', unitPlacementId: 9901, state: 'alive' }] }, 10),
+      event(9912, { mode: 'all', conditions: [{ kind: 'unit', unitPlacementId: 9901, state: 'dead' }] }, 20),
+      event(9913, { mode: 'all', conditions: [{ kind: 'object', objectId: 9902, state: 'intact' }] }, 30),
+      event(9914, { mode: 'all', conditions: [{ kind: 'object', objectId: 9902, state: 'destroyed' }] }, 40),
+    ]
+    let state = initialState(); state.phase = 'combat'; state.spawnQueue = [{ kind: 'walker', delay: 100 }]; state.spawnTimer = 100
+    const baseGold = state.gold
+    state = tick(state, 0.1)
+    check('事件条件：单位存活与物体未摧毁条件读取关卡实例状态', state.gold === baseGold + 40)
+    state.allies = state.allies.filter(unit => unit.placementId !== 9901)
+    state.defeatedUnitPlacementIds.push(9901)
+    state.objects = state.objects.filter(object => object.id !== 9902)
+    state = tick(state, 0.1)
+    check('事件条件：单位死亡与物体摧毁后触发对应事件', state.gold === baseGold + 100)
+
+    LEVEL.objects = [{ id: 9920, kind: 'rock', defId: 'object:rock', x: 8, y: 8, w: 1, h: 1, hp: -1, blockMove: false, blockProjectile: false, height: 0, state: 'default', events: [{ id: 1, name: '开启自身', trigger: 'interact', activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] }, actions: [{ type: 'setObjectState', objectId: 'source', state: 'open' }] }] }]
+    LEVEL.initialUnits = [{ id: 9921, unitDefId: 'unit:uav', faction: 'ally', controller: 'static', x: 10.5, y: 8.5, events: [{ id: 1, name: '移除自身', trigger: 'interact', activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] }, actions: [{ type: 'unit', selector: { scope: 'source' }, command: { kind: 'remove' } }] }] }]
+    LEVEL.events = []
+    const setEventCenter = (game: GameState, x: number, y: number) => { const rect = fortressRect(game); game.fortress.x = x - rect.w / 2; game.fortress.y = y - rect.h / 2 }
+    let sourceState = initialState(); sourceState.phase = 'combat'; sourceState.spawnQueue = [{ kind: 'walker', delay: 100 }]; sourceState.spawnTimer = 100; setEventCenter(sourceState, 9, 8.5)
+    const sourceObjectActivated = interactWithObjectAt(sourceState, 8.5, 8.5)
+    sourceState = tick(sourceState, 0.1)
+    check('物体实例事件：事件来源物体可作为状态动作目标', sourceObjectActivated && sourceState.objectStates[9920] === 'open')
+    const sourceUnitActivated = interactWithUnitAt(sourceState, 10.5, 8.5)
+    sourceState = tick(sourceState, 0.1)
+    check('单位实例事件：事件来源单位解析为真实运行时单位', sourceUnitActivated && sourceState.allies.some(unit => unit.placementId === 9921 && unit.hp <= 0))
+
+    LEVEL.initialUnits = []
+    LEVEL.objects = []
+    LEVEL.events = [{ id: 9930, name: '并行防重入', category: 'flow', enabled: true, activationLimit: 0, cooldown: 0, conditions: { mode: 'all', conditions: [] }, trigger: { type: 'parallel' }, actions: [{ type: 'wait', seconds: 2 }] }]
+    let parallelState = initialState(); parallelState.phase = 'combat'; parallelState.spawnQueue = [{ kind: 'walker', delay: 100 }]; parallelState.spawnTimer = 100
+    for (let i = 0; i < 5; i++) parallelState = tick(parallelState, 0.1)
+    check('并行事件：冷却为0时默认禁止动作序列重入', parallelState.unifiedEventStates.find(item => item.id === 9930)?.activations === 1 && parallelState.eventQueue.length === 1)
+    check('事件监视器：持续阻塞只记录一次原因，不会逐帧刷满日志', parallelState.eventDebugLog.filter(log => log.eventId === 9930 && log.status === 'blocked').length === 1)
+
+    const exactCells = ['2,2', '12,12']
+    LEVEL.events = [{ id: 9931, name: '不规则区域刷怪', category: 'region', enabled: true, activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] }, trigger: { type: 'regionEnter', cells: exactCells }, actions: [{ type: 'spawn', enemies: { walker: 0, runner: 0, rusher: 0, brute: 0, flyer: 0 }, units: { 'unit:uav': 12 }, interval: 100 }] }]
+    let regionState = initialState(); regionState.phase = 'combat'; regionState.spawnQueue = [{ kind: 'walker', delay: 100 }]; regionState.spawnTimer = 100; setEventCenter(regionState, 2.5, 2.5)
+    regionState = tick(regionState, 0.1)
+    check('不规则区域：刷怪点只落在实际选中格而非包围盒空洞', regionState.ambushQueue.length > 0 && regionState.ambushQueue.every(item => exactCells.includes(`${Math.floor(item.x)},${Math.floor(item.y)}`)))
+
+    LEVEL.events = [
+      { id: 9940, name: '调用方', category: 'flow', enabled: true, activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] }, trigger: { type: 'automatic' }, actions: [{ type: 'callEvent', eventId: 9941 }, { type: 'reward', gold: 3 }] },
+      { id: 9941, name: '被调用事件', category: 'flow', enabled: false, activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] }, trigger: { type: 'automatic' }, actions: [{ type: 'wait', seconds: 0.2 }, { type: 'reward', gold: 7 }] },
+    ]
+    let callState = initialState(); callState.phase = 'combat'; callState.spawnQueue = [{ kind: 'walker', delay: 100 }]; callState.spawnTimer = 100
+    const callGold = callState.gold
+    callState = run(callState, 0.6)
+    check('调用事件：等待被调用动作完成后返回调用方继续执行', callState.gold === callGold + 10 && callState.eventQueue.length === 0)
+    check('事件监视器：直接调用次数与自动触发次数分开记录', callState.unifiedEventStates.find(item => item.id === 9941)?.callActivations === 1 && callState.unifiedEventStates.find(item => item.id === 9941)?.activations === 0)
+
+    LEVEL.events = [{ id: 9942, name: '递归调用', category: 'flow', enabled: true, activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] }, trigger: { type: 'automatic' }, actions: [{ type: 'callEvent', eventId: 9942 }] }]
+    let recursiveState = initialState(); recursiveState.phase = 'combat'; recursiveState.spawnQueue = [{ kind: 'walker', delay: 100 }]; recursiveState.spawnTimer = 100
+    recursiveState = run(recursiveState, 2)
+    check('调用事件：循环调用在8层后被阻止且事件队列能够结束', recursiveState.eventQueue.length === 0 && recursiveState.eventDebugLog.some(log => log.status === 'blocked' && log.detail.includes('调用深度')), JSON.stringify({ queue: recursiveState.eventQueue.map(item => ({ depth: item.callDepth, index: item.index, child: item.waitingChildSequenceId })), logs: recursiveState.eventDebugLog.slice(-5) }))
+
+    const loopStage = defaultStage({ type: 'defend', waves: 99 }); loopStage.id = 'loop-stage'
+    LEVEL.stages = [loopStage]; LEVEL.startStageId = loopStage.id; LEVEL.objective = structuredClone(loopStage.objective)
+    LEVEL.events = [{ id: 9943, name: '回到当前阶段', category: 'flow', enabled: true, activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] }, trigger: { type: 'automatic' }, actions: [{ type: 'stageJump', stageId: loopStage.id }] }]
+    let loopState = initialState(); loopState.phase = 'combat'; loopState.levelVariables['builtin:stageSuccess:loop-stage'] = true; loopState.levelVariables['builtin:stageFailure:loop-stage'] = true
+    loopState = tick(loopState, 0.1)
+    check('任务阶段回环：重新进入阶段时重置上一轮成功与失败标记', loopState.levelVariables['builtin:stageSuccess:loop-stage'] === false && loopState.levelVariables['builtin:stageFailure:loop-stage'] === false)
+
+    const pulseStage = defaultStage({ type: 'survive', duration: 0.1 }); pulseStage.id = 'pulse-stage'; pulseStage.success = { type: 'stage', stageId: pulseStage.id }
+    LEVEL.stages = [pulseStage]; LEVEL.startStageId = pulseStage.id; LEVEL.objective = structuredClone(pulseStage.objective)
+    LEVEL.events = [{ id: 9945, name: '循环阶段成功脉冲', category: 'flow', enabled: true, activationLimit: 0, cooldown: 0, conditions: { mode: 'all', conditions: [] }, trigger: { type: 'stageSuccess', stageId: pulseStage.id }, actions: [{ type: 'reward', gold: 1 }] }]
+    let pulseState = initialState(); pulseState.phase = 'combat'
+    const pulseGold = pulseState.gold
+    pulseState = run(pulseState, 0.5)
+    check('任务阶段回环：同阶段成功事件可以在每轮结果后再次触发', (pulseState.unifiedEventStates.find(item => item.id === 9945)?.activations ?? 0) >= 2 && pulseState.gold >= pulseGold + 2)
+
+    const invalidLevel = defaultLevel()
+    invalidLevel.events = [{ id: 9944, name: '坏引用', category: 'region', enabled: true, activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] }, trigger: { type: 'regionEnter', cells: [] }, actions: [{ type: 'callEvent', eventId: 9999 }, { type: 'stageJump', stageId: 'missing' }] }]
+    const validation = validateLevelReferences(invalidLevel)
+    check('保存校验：识别空区域及失效事件、任务阶段引用', validation.filter(issue => issue.severity === 'error').length >= 3)
+    check('保存校验：事件问题携带可定位的事件编号', validation.filter(issue => issue.severity === 'error').every(issue => issue.target.kind === 'event' && issue.target.eventId === 9944))
+
+    const nestedCycleLevel = defaultLevel()
+    nestedCycleLevel.events = [{ id: 9946, name: '嵌套循环', category: 'flow', enabled: true, activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] }, trigger: { type: 'automatic' }, actions: [{ type: 'choice', prompt: '继续？', options: [{ text: '是', actions: [{ type: 'callEvent', eventId: 9946 }] }] }] }]
+    const nestedValidation = validateLevelReferences(nestedCycleLevel)
+    check('保存校验：选择分支内的调用事件也参与循环引用检查', nestedValidation.some(issue => issue.severity === 'warning' && issue.message.includes('循环引用')))
+    check('保存校验：循环警告可定位到对应事件', nestedValidation.some(issue => issue.severity === 'warning' && issue.target.kind === 'event' && issue.target.eventId === 9946))
+
+    const invalidStageLevel = defaultLevel()
+    invalidStageLevel.startStageId = 'missing-stage'
+    const stageValidation = validateLevelReferences(invalidStageLevel)
+    check('保存校验：任务阶段问题可定位到任务页', stageValidation.some(issue => issue.target.kind === 'mission'))
+
+    const soundLevel = defaultLevel()
+    soundLevel.events = [{ id: 9947, name: '音效引用', category: 'flow', enabled: true, activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] }, trigger: { type: 'automatic' }, actions: [{ type: 'sound', presetId: 'auto:environment:shot:test' }] }]
+    const soundValidation = validateLevelReferences(soundLevel, undefined, new Set(['test']), new Set(), new Set(['auto:environment:shot:test']))
+    check('保存校验：声音预设按预设ID校验，不会被误判为素材缺失', !soundValidation.some(issue => issue.severity === 'error'))
+
+    const resizedLevel = defaultLevel(12, 20)
+    resizedLevel.objects = [{ id: 9950, kind: 'rock', x: 19, y: 10, w: 2, h: 1, hp: 0, blockMove: false, blockProjectile: false, height: 0 }]
+    resizedLevel.initialUnits = [{ id: 9951, unitDefId: 'unit:uav', faction: 'enemy', controller: 'ai', x: 20.5, y: 6 }]
+    resizedLevel.events = [{ id: 9952, name: '越界区域', category: 'region', enabled: true, activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] }, trigger: { type: 'regionEnter', cells: ['19,11', '20,11'] }, actions: [{ type: 'reward', gold: 1 }] }]
+    const resizedValidation = validateLevelReferences(resizedLevel)
+    check('保存校验：物体、单位和事件区域越界会阻止保存', [
+      resizedValidation.some(issue => issue.severity === 'error' && issue.target.kind === 'object' && issue.target.objectId === 9950),
+      resizedValidation.some(issue => issue.severity === 'error' && issue.target.kind === 'unit' && issue.target.placementId === 9951),
+      resizedValidation.some(issue => issue.severity === 'error' && issue.target.kind === 'event' && issue.target.eventId === 9952),
+    ].every(Boolean))
+
+    const visualOverflowLevel = defaultLevel(12, 20)
+    visualOverflowLevel.baseTiles = [
+      { x: 1, y: 1, source: 'independent', assetId: 'test', tileIndex: 0, flipX: false, rotation: 0 },
+      { x: 20, y: 1, source: 'independent', assetId: 'test', tileIndex: 0, flipX: false, rotation: 0 },
+    ]
+    visualOverflowLevel.overlayTiles = [
+      { x: 2, y: 2, source: 'independent', assetId: 'test', tileIndex: 0, flipX: false, rotation: 0 },
+      { x: 2, y: 12, source: 'independent', assetId: 'test', tileIndex: 0, flipX: false, rotation: 0 },
+    ]
+    visualOverflowLevel.groundCells = ['3,3', '20,3']
+    visualOverflowLevel.terrain = [
+      { id: 9953, kind: 'puddle', x: 4, y: 4, w: 1, h: 1, moveModifier: 0.5 },
+      { id: 9954, kind: 'puddle', x: 19, y: 5, w: 2, h: 1, moveModifier: 0.5 },
+    ]
+    const prunedVisualLevel = pruneVisualLayersOutsideBounds(visualOverflowLevel)
+    check('保存清理：仅删除越界底图、装饰与地形，且不修改原草稿', prunedVisualLevel.baseTiles.length === 1 && prunedVisualLevel.overlayTiles.length === 1 && prunedVisualLevel.groundCells.length === 1 && prunedVisualLevel.terrain.length === 1 && visualOverflowLevel.baseTiles.length === 2 && visualOverflowLevel.terrain.length === 2)
+  } finally {
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== v2.94：组合式 AI 投送兵力 ==')
+{
+  const savedLevel = structuredClone(LEVEL)
+  const transportId = 'unit:sim-deploy-transport'
+  const transportFortressId = 'sim-deploy-transport-fortress'
+  const deployedUnitId = unitDefById(fortressUnitId('jeep')) ? fortressUnitId('jeep') : fortressUnitId(DEFAULT_FORTRESS.id)
+  try {
+    const transport = structuredClone(unitDefById(fortressUnitId('jeep')) ?? unitDefById(fortressUnitId('standard'))!)
+    transport.id = transportId
+    transport.name = '测试投送载具'
+    transport.stats.vision = 100
+    transport.stats.trackingVision = 100
+    transport.combat = { profile: 'none', range: 0, interval: 1 }
+    transport.ai = {
+      preferredTarget: 'playerControlled', positioning: 'shortestRange', movement: 'closeIn',
+      special: { profile: 'deployForces', unitDefId: deployedUnitId, count: 3, interval: 0.25, direction: 'right' },
+    }
+    check('投送配置：合法单位、总数、间隔和方向可通过单位定义校验', validateUnitDef(transport).length === 0, validateUnitDef(transport).join('；'))
+    const invalidTransport = structuredClone(transport)
+    invalidTransport.ai!.special = { profile: 'deployForces', unitDefId: transportId, count: 0, interval: 0, direction: 'diagonal' as 'front' }
+    check('投送配置：拒绝投送自身及越界总数/间隔/方向', validateUnitDef(invalidTransport).filter(error => error.includes('投送')).length >= 4)
+    const migratedTransport = normalizeKamikazeConfig({
+      ...structuredClone(transport),
+      ai: { ...structuredClone(transport.ai!), special: { profile: 'deployForces', unitDefId: deployedUnitId, count: 1, interval: 0.5, stopDistance: 8 } as never },
+    })
+    check('投送配置：旧停车距离被移除并默认迁移为车后投送', migratedTransport.ai?.special?.profile === 'deployForces'
+      && migratedTransport.ai.special.direction === 'rear' && !('stopDistance' in migratedTransport.ai.special))
+    const transportFortress = structuredClone(transport.legacy?.registry === 'fortress' ? transport.legacy.def : DEFAULT_FORTRESS)
+    transportFortress.id = transportFortressId
+    transportFortress.unitId = transportId
+    transportFortress.name = transport.name
+    transportFortress.unitTargetClasses = structuredClone(transport.targetClasses)
+    transportFortress.unitCombat = transport.combat ? structuredClone(transport.combat) : undefined
+    transportFortress.unitAI = transport.ai ? structuredClone(transport.ai) : undefined
+    transportFortress.vision = 100
+    transportFortress.trackingVision = 100
+    transportFortress.unitBoss = transport.boss ? structuredClone(transport.boss) : undefined
+    check('投送配置：单位模板可持久化特殊行为', saveCustomFortress(transportFortress)
+      && unitDefById(transportId)?.ai?.special?.profile === 'deployForces')
+
+    LEVEL.mode = 'defend'
+    configureObjective(LEVEL, { type: 'defend', waves: 99 })
+    LEVEL.events = []; LEVEL.triggers = []; LEVEL.interactables = []; LEVEL.objects = []
+    LEVEL.initialUnits = [{ id: 9960, unitDefId: transportId, faction: 'neutralHostile', controller: 'ai', x: LEVEL.cols / 2, y: 3, behavior: 'approach', behaviorRange: 8, behaviorInterval: 1, behaviorSpeedPercent: 100, route: [], events: [] }]
+    let state = initialState()
+    state.turrets = []; state.phase = 'combat'; state.spawnQueue = [{ kind: 'walker', delay: 999 }]; state.spawnTimer = 999
+    const hostId = state.enemies.find(enemy => enemy.placementId === 9960)!.id
+    let completedDistance = Infinity
+    for (let step = 0; step < 800; step++) {
+      state = tick(state, 0.05)
+      const host = state.enemies.find(enemy => enemy.id === hostId)
+      if (!host) break
+      if (host.deployForces?.complete) {
+        completedDistance = fortressDistanceToPoint(state, host.x, host.y)
+        break
+      }
+    }
+    const hostAtDeploy = state.enemies.find(enemy => enemy.id === hostId)!
+    const dropped = state.enemies.filter(enemy => enemy.unitDefId === deployedUnitId && enemy.id !== hostId)
+    const transportRadius = Math.max(transport.stats.collisionRadiusX ?? transport.stats.size, transport.stats.collisionRadiusY ?? transport.stats.size)
+    check('投送运行时：关卡实例行为存在时仍优先抵达几何外沿并按配置总数生成单位', hostAtDeploy.deployForces?.complete === true && dropped.length === 3
+      && completedDistance - transportRadius <= 0.35, `complete=${hostAtDeploy.deployForces?.complete} count=${dropped.length} edgeDistance=${completedDistance - transportRadius}`)
+    check('投送运行时：生成单位继承运输实例阵营并使用自身单位定义', dropped.every(enemy => enemy.faction === 'neutralHostile'
+      && enemy.unitDefId === deployedUnitId && enemy.controller === 'ai'))
+    check('投送运行时：合法落点不会与运输载具或彼此重叠', dropped.every((enemy, index) => {
+      const others = [hostAtDeploy, ...dropped.filter((_, otherIndex) => otherIndex !== index)]
+      return others.every(other => Math.hypot(enemy.x - other.x, enemy.y - other.y) > 0.3)
+    }))
+    const deployHeading = hostAtDeploy.vehicle?.heading ?? hostAtDeploy.initialHeading ?? 0
+    const rightX = Math.cos(deployHeading), rightY = Math.sin(deployHeading)
+    check('投送运行时：落点限制在配置的车右方向', dropped.every(enemy => (enemy.x - hostAtDeploy.x) * rightX + (enemy.y - hostAtDeploy.y) * rightY > 0.05))
+    hostAtDeploy.behaviorOverride = { behavior: 'random', range: 4, interval: 0, speedPercent: 100 }
+    hostAtDeploy.behaviorWait = 0
+    hostAtDeploy.behaviorTargetX = undefined
+    hostAtDeploy.behaviorTargetY = undefined
+    hostAtDeploy.behaviorEngaged = false
+    hostAtDeploy.targetId = null
+    hostAtDeploy.targetKind = null
+    hostAtDeploy.mode = 'move'
+    state = tick(state, 0.05)
+    const resumedHost = state.enemies.find(enemy => enemy.id === hostId)!
+    check('投送运行时：完成后恢复运输单位原移动 AI', (resumedHost.behaviorStep ?? 0) > 0)
+
+    LEVEL.initialUnits = [{ id: 9961, unitDefId: transportId, faction: 'enemy', controller: 'ai', x: LEVEL.cols / 2, y: 3, events: [] }]
+    let blocked = initialState()
+    blocked.turrets = []; blocked.phase = 'combat'; blocked.spawnQueue = [{ kind: 'walker', delay: 999 }]; blocked.spawnTimer = 999
+    const blockedHost = blocked.enemies.find(enemy => enemy.placementId === 9961)!
+    const blockedRect = fortressRect(blocked)
+    blockedHost.x = blockedRect.x + blockedRect.w / 2
+    blockedHost.y = blockedRect.y - transportRadius
+    blocked.objects = [{ id: blocked.nextId++, kind: 'rock', x: 0, y: 0, w: LEVEL.cols, h: LEVEL.rows, hp: -1, maxHp: -1, blockMove: true, blockProjectile: false, height: 0 }]
+    blocked = run(blocked, 0.8, 0.05)
+    const waitingHost = blocked.enemies.find(enemy => enemy.id === blockedHost.id)!
+    check('投送运行时：附近无合法空间时保持停车并重试，不丢失剩余数量', waitingHost.deployForces?.spawned === 0
+      && waitingHost.deployForces.complete === false && waitingHost.deployForces.cooldown > 0)
+    blocked.objects = []
+    blocked = run(blocked, 0.8, 0.05)
+    check('投送运行时：空间恢复后继续投送', blocked.enemies.some(enemy => enemy.unitDefId === deployedUnitId))
+
+    const allyTransport = structuredClone(transport)
+    allyTransport.ai!.preferredTarget = 'allHostile'
+    if (allyTransport.ai?.special?.profile === 'deployForces') {
+      allyTransport.ai.special.count = 1
+      allyTransport.ai.special.direction = 'rear'
+    }
+    transportFortress.unitAI = structuredClone(allyTransport.ai!)
+    saveCustomFortress(transportFortress)
+    LEVEL.initialUnits = [
+      { id: 9962, unitDefId: transportId, faction: 'ally', controller: 'ai', x: 8, y: 4, events: [] },
+      { id: 9963, unitDefId: deployedUnitId, faction: 'enemy', controller: 'static', x: 12, y: 4, events: [] },
+    ]
+    let allied = initialState()
+    allied.turrets = []; allied.phase = 'combat'; allied.spawnQueue = [{ kind: 'walker', delay: 999 }]; allied.spawnTimer = 999
+    allied = run(allied, 12, 0.05)
+    check('投送运行时：友方实例复用同一状态机并生成友方单位', allied.allies.some(unit => unit.placementId === 9962 && unit.deployForces?.complete)
+      && allied.allies.some(unit => unit.placementId === undefined && unit.unitDefId === deployedUnitId && unit.faction === 'ally'))
+  } finally {
+    deleteCustomFortress(transportFortressId)
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== 堡垒库版本兼容 ==')
+check('堡垒库 v8 存档可在 v9 启动时载入迁移', isSupportedFortressLibVersion(8) && isSupportedFortressLibVersion(9))
+check('堡垒库拒绝无效及未来版本', !isSupportedFortressLibVersion(0) && !isSupportedFortressLibVersion(11) && !isSupportedFortressLibVersion('8'))
+
+console.log('== 自定义载具单一数据源与删除闭环 ==')
+{
+  const fortressId = 'sim-single-source-armor'
+  const unitId = 'unit:sim-single-source-armor'
+  const physical = structuredClone(DEFAULT_FORTRESS)
+  physical.id = fortressId
+  physical.unitId = unitId
+  physical.name = '装甲车'
+  physical.hp = 777
+  physical.speed = 4.5
+  physical.chassis = 'wheeled'
+  physical.wheelbase = 2.4
+  physical.unitAI = { preferredTarget: 'allHostile', positioning: 'shortestRange', movement: 'closeIn', special: { profile: 'none' } }
+  saveCustomFortress(physical)
+
+  const stale = structuredClone(unitDefById(fortressUnitId(DEFAULT_FORTRESS.id))!)
+  stale.id = unitId
+  stale.name = '装甲车'
+  stale.stats.hp = DEFAULT_FORTRESS.hp
+  stale.ai = { targeting: { profile: 'antiVehicle' }, movement: { profile: 'rangeEdge' }, attack: { profile: 'none' } }
+  stale.boss = { enabled: true, displayName: '装甲车首领', hpScale: 2, sizeScale: 1.2, phases: [], defeatActions: [] }
+  importUnitLibrary({ version: unitLibraryForExport().version, customs: [stale] })
+  check('载具旧快照注入：迁移前确实会覆盖为测试堡垒耐久', unitDefById(unitId)?.stats.hp === DEFAULT_FORTRESS.hp)
+  check('载具旧数据迁移：发现并迁移重复 UnitDef', migrateLegacyCustomVehicleUnits() === 1)
+  const migrated = unitDefById(unitId)!
+  check('载具唯一数据源：保留装甲车物理参数而不再套用测试堡垒', migrated.stats.hp === 777 && migrated.stats.speed === 4.5 && unitTypeConfig(migrated)?.kind === 'vehicle' && unitTypeConfig(migrated)?.chassis === 'wheeled')
+  check('载具唯一数据源：AI 与 Boss 元数据迁回 FortressDef', migrated.ai?.preferredTarget === 'allHostile'
+    && migrated.ai?.positioning === 'longestRange' && migrated.ai?.movement === 'orbit'
+    && migrated.boss?.displayName === '装甲车首领')
+  check('载具唯一数据源：单位库不再保存任何完整载具记录', !unitLibraryForExport().customs.some(unit => unit.type === 'vehicle'))
+  check('载具保存闸：禁止再次向 UnitDef 库写入载具副本', !saveCustomUnitDef(structuredClone(migrated)))
+
+  const renamed = structuredClone(migrated)
+  renamed.name = '装甲侦察车'
+  renamed.ai = { preferredTarget: 'playerControlled', positioning: 'shortestRange', movement: 'closeIn', special: { profile: 'none' } }
+  check('载具重命名/AI 保存：写回唯一 FortressDef 并保持单位 ID', saveVehicleUnitDefinition(renamed)
+    && FORTRESS_DEFS.find(item => item.id === fortressId)?.name === '装甲侦察车'
+    && unitDefById(unitId)?.ai?.preferredTarget === 'playerControlled'
+    && unitDefById(unitId)?.ai?.movement === 'closeIn')
+
+  const invalid = structuredClone(unitDefById(unitId)!)
+  invalid.id = 'unit:missing-vehicle-ref'
+  if (invalid.legacy?.registry === 'fortress') invalid.legacy.id = 'missing-fortress-ref'
+  check('载具失效引用：明确拒绝保存且不回退覆盖测试堡垒', !saveVehicleUnitDefinition(invalid) && DEFAULT_FORTRESS.hp === 2000)
+
+  const references = defaultLevelLibrary()
+  const entry = references.levels[0]
+  entry.deployableFortressIds = [fortressId]
+  entry.level.initialUnits = [{ id: 7001, unitDefId: unitId, faction: 'enemy', controller: 'ai', x: 5, y: 5, events: [] }]
+  entry.level.stages[0].waves = [{ id: 'single-source-wave', name: '测试波次', entries: [{ id: 'single-source-entry', unitDefId: unitId, count: 1, delay: 0, interval: 0 }] }]
+  entry.level.events = [{ id: 7002, name: '测试事件', category: 'flow', enabled: true, activationLimit: 1, cooldown: 0, conditions: { mode: 'all', conditions: [] }, trigger: { type: 'missionStart' }, actions: [
+    { type: 'spawn', enemies: { walker: 0, runner: 0, rusher: 0, brute: 0, flyer: 0 }, units: { [unitId]: 2 }, interval: 0 },
+    { type: 'boss', boss: { kind: 'brute', unitDefId: unitId, name: '测试', hpScale: 1, sizeScale: 1, phases: [], defeatActions: [] } },
+    { type: 'unit', selector: { scope: 'unitDef', unitDefId: unitId }, command: { kind: 'remove' } },
+  ] }]
+  const cleaned = removeUnitDefinitionReferences(references, unitId, fortressId)
+  check('载具删除清理：初始单位、波次、事件与备选出战引用同步移除', cleaned >= 6
+    && entry.level.initialUnits.length === 0
+    && entry.level.stages[0].waves[0].entries.length === 0
+    && entry.level.events[0].actions.length === 1
+    && !entry.deployableFortressIds)
+
+  setSelectedFortressId(fortressId)
+  check('载具统一删除：载具定义、旧单位记录与当前选择同时清理', deleteCustomVehicleDefinition(fortressId, unitId)
+    && !FORTRESS_DEFS.some(item => item.id === fortressId)
+    && !unitLibraryForExport().customs.some(unit => unit.id === unitId)
+    && getSelectedFortressId() === DEFAULT_FORTRESS.id)
+}
+
+console.log('== 气垫载具首版 ==')
+{
+  const savedLevel = structuredClone(LEVEL)
+  const previousFortressId = getSelectedFortressId()
+  const fortressId = 'sim-hovercraft'
+  const unitId = fortressUnitId(fortressId)
+  try {
+    const hover = structuredClone(DEFAULT_FORTRESS)
+    hover.id = fortressId
+    hover.unitId = unitId
+    hover.name = '测试气垫载具'
+    hover.chassis = 'hovercraft'
+    hover.w = 1
+    hover.h = 1
+    hover.shape = ['0,0']
+    hover.interior = { cols: 1, rows: 1 }
+    hover.interiorCells = ['0,0']
+    hover.hardpoints = []
+    hover.effects = []
+    hover.tracks = undefined
+    hover.wheels = undefined
+    hover.speed = 4
+    hover.accel = 12
+    hover.turnSpeed = 120
+    hover.hoverDrag = 0.35
+    hover.hoverGrip = 0.8
+    check('气垫定义：合法参数通过堡垒校验', validateFortressDef(hover).length === 0, validateFortressDef(hover).join('；'))
+    const invalidHover = structuredClone(hover)
+    invalidHover.hoverDrag = 0
+    invalidHover.hoverGrip = 11
+    check('气垫定义：滑行阻力与横向稳定范围受保存校验保护', validateFortressDef(invalidHover).some(error => error.includes('气垫滑行阻力'))
+      && validateFortressDef(invalidHover).some(error => error.includes('气垫横向稳定')))
+    saveCustomFortress(hover)
+    setSelectedFortressId(fortressId)
+    const stored = FORTRESS_DEFS.find(def => def.id === fortressId)!
+    check('气垫存档：保留独立底盘类型与参数并清理履带轮胎', stored.chassis === 'hovercraft'
+      && stored.hoverDrag === 0.35 && stored.hoverGrip === 0.8 && !stored.tracks && !stored.wheels)
+    const unit = unitDefById(unitId)!
+    const typeConfig = unitTypeConfig(unit)
+    check('气垫单位协议：动态单位适配器读取同一载具定义', typeConfig?.kind === 'vehicle'
+      && typeConfig.chassis === 'hovercraft' && typeConfig.hoverDrag === 0.35 && typeConfig.hoverGrip === 0.8)
+
+    const drift = hoverVelocityStep(0, -4, Math.PI / 2, 4, 12, 0.35, 0.8, 0.1)
+    check('气垫运动：车身转向后保留原速度方向并逐步产生甩尾', drift.vx > 0.5 && drift.vy < -3.5, JSON.stringify(drift))
+    const coast = hoverVelocityStep(0, -4, 0, 0, 12, 0.35, 0.8, 1)
+    check('气垫运动：松开推进后低摩擦滑行而非立即停下', Math.hypot(coast.vx, coast.vy) > 2.5 && Math.hypot(coast.vx, coast.vy) < 4, JSON.stringify(coast))
+
+    LEVEL.objects = []
+    LEVEL.terrain = [{ kind: 'puddle', x: 0, y: 0, w: LEVEL.cols, h: LEVEL.rows, moveModifier: 0.05 }]
+    LEVEL.buildCells = []
+    LEVEL.core = null
+    LEVEL.initialUnits = []
+    LEVEL.events = []
+    LEVEL.triggers = []
+    LEVEL.interactables = []
+    LEVEL.startZone = { x: 8, y: 14, w: 1, h: 1 }
+    configureObjective(LEVEL, { type: 'defend', waves: 99 })
+    let player = initialState()
+    player.phase = 'prep'
+    const startY = player.fortress.y
+    player.moveDir = { x: 0, y: -1 }
+    player = run(player, 1, 0.05)
+    check('气垫玩家运动：无视地形移动倍率', startY - player.fortress.y > 2.5, `distance=${startY - player.fortress.y}`)
+
+    LEVEL.terrain = []
+    LEVEL.objects = [{ id: 9910, kind: 'rock', x: 8, y: 12, w: 1, h: 1, hp: -1, blockMove: true, blockProjectile: false, height: 1 }]
+    let lowBarrier = initialState()
+    lowBarrier.phase = 'prep'
+    lowBarrier.moveDir = { x: 0, y: -1 }
+    lowBarrier = run(lowBarrier, 1.2, 0.05)
+    check('气垫玩家碰撞：可越过高度 1 的移动阻挡物', lowBarrier.fortress.y < 12, `y=${lowBarrier.fortress.y}`)
+
+    LEVEL.objects = [{ id: 9911, kind: 'rock', x: 8, y: 12, w: 1, h: 1, hp: -1, blockMove: true, blockProjectile: false, height: 2 }]
+    let highBarrier = initialState()
+    highBarrier.phase = 'prep'
+    highBarrier.moveDir = { x: 0, y: -1 }
+    highBarrier = run(highBarrier, 1.2, 0.05)
+    check('气垫玩家碰撞：高度 2 及以上仍会阻挡移动', highBarrier.fortress.y >= 13 - 1e-6, `y=${highBarrier.fortress.y}`)
+
+    LEVEL.objects = [{ id: 9912, kind: 'rock', x: 8, y: 8, w: 1, h: 1, hp: -1, blockMove: true, blockProjectile: false, height: 1 }]
+    LEVEL.initialUnits = [{ id: 9913, unitDefId: unitId, faction: 'enemy', controller: 'static', x: 8.5, y: 10.5, events: [] }]
+    const aiState = initialState()
+    const ai = aiState.enemies.find(enemy => enemy.placementId === 9913)!
+    for (let step = 0; step < 40; step++) moveUnitVehicleToward(aiState, ai, unit, 8.5, 6.5, 0.05)
+    check('气垫 AI 运动：复用惯性运动并可越过高度 1 物体', ai.y < 8, `y=${ai.y}`)
+  } finally {
+    deleteCustomFortress(fortressId)
+    setSelectedFortressId(previousFortressId)
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== 步行机甲首版 ==')
+{
+  const savedLevel = structuredClone(LEVEL)
+  const previousFortressId = getSelectedFortressId()
+  const fortressId = 'sim-walker-mech'
+  const unitId = fortressUnitId(fortressId)
+  const bodyAsset = addAsset('Mech01_body', 'data:image/png;base64,AA==', 'vehicle')
+  const footAsset = addAsset('Mech01_foot', 'data:image/png;base64,AA==', 'vehicle')
+  try {
+    const walker = structuredClone(DEFAULT_FORTRESS)
+    walker.id = fortressId
+    walker.unitId = unitId
+    walker.name = '测试步行机甲'
+    walker.chassis = 'walker'
+    walker.w = 1
+    walker.h = 1
+    walker.shape = ['0,0']
+    walker.interior = { cols: 1, rows: 1 }
+    walker.interiorCells = ['0,0']
+    const walkerTurret = TURRET_DEFS.find(def => def.mount === 'S' && def.canGround && def.type === 'direct')!
+    walker.hardpoints = [{ id: 'hidden-art', x: 0.5, y: 0.5, size: 'S', hidden: true, builtIn: walkerTurret.id }]
+    walker.effects = []
+    walker.tracks = undefined
+    walker.wheels = undefined
+    walker.speed = 3
+    walker.accel = 6
+    walker.turnSpeed = 180
+    walker.brakeInertia = 5
+    walker.walkerFrames = 6
+    walker.walkerFps = 10
+    walker.spriteBody = bodyAsset.id
+    walker.walkerLowerAsset = footAsset.id
+    walker.walkerLowerOffsetX = 3
+    walker.walkerLowerOffsetY = -2
+    walker.bodyCollision = {
+      source: `${bodyAsset.id}#walker:0,0`, widthPx: 64, heightPx: 64,
+      points: [{ x: -1, y: -1 }, { x: 1, y: -1 }, { x: 1, y: 1 }, { x: -1, y: 1 }],
+    }
+    check('步行机甲定义：合法参数通过堡垒校验', validateFortressDef(walker).length === 0, validateFortressDef(walker).join('；'))
+    const invalidWalker = structuredClone(walker)
+    invalidWalker.walkerStride = 0.01
+    invalidWalker.walkerBodyOffsetX = 600
+    check('步行机甲定义：步幅与主体坐标修正受保存校验保护', validateFortressDef(invalidWalker).some(error => error.includes('步幅'))
+      && validateFortressDef(invalidWalker).some(error => error.includes('主体 X 坐标修正')))
+
+    saveCustomFortress(walker)
+    setSelectedFortressId(fortressId)
+    const stored = FORTRESS_DEFS.find(def => def.id === fortressId)!
+    check('步行机甲旧双层迁移：旧下半身序列提升为唯一主体且移除配对字段', stored.spriteBody === footAsset.id
+      && stored.walkerLowerAsset === undefined && stored.walkerLowerOffsetX === undefined && stored.walkerLowerOffsetY === undefined)
+    check('步行机甲 2×7 迁移：旧 2×6 首帧碰撞轮廓失效并等待按新首帧重建', stored.bodyCollision === undefined)
+    check('步行机甲存档：旧帧率迁移为步幅并清理其他底盘参数', stored.chassis === 'walker'
+      && Math.abs((stored.walkerStride ?? 0) - 2.1) < 1e-9
+      && stored.walkerFrameDuration === undefined
+      && stored.walkerBodyOffsetX === 3 && stored.walkerBodyOffsetY === -2 && !stored.tracks && !stored.wheels
+      && stored.turnRadius === undefined && stored.trackWidth === undefined && stored.wheelbase === undefined
+      && stored.hoverDrag === undefined && stored.pitchGain === undefined && stored.leanCap === undefined)
+    check('炮位迁移：旧隐藏炮位转为只隐藏炮塔素材', stored.hardpoints[0]?.hideTurretArt === true && stored.hardpoints[0]?.hidden === undefined)
+    const unit = unitDefById(unitId)!
+    const typeConfig = unitTypeConfig(unit)
+    check('步行机甲单位协议：动态单位适配器读取同一载具定义', typeConfig?.kind === 'vehicle'
+      && typeConfig.chassis === 'walker' && Math.abs(typeConfig.walkerStride - 2.1) < 1e-9)
+    check('步行机甲单层主体：实际位移按步幅驱动 2×7 的 14 帧循环', walkerFrameCount(stored) === 14
+      && walkerFrameIndex(stored, 0) === 0 && walkerFrameIndex(stored, 0.61) === 2
+      && walkerFrameIndex(stored, 2.11) === 7 && walkerFrameIndex(stored, 3.91) === 13)
+
+    const turnFirst = walkerMotionStep(0, 0, 0, Math.PI / 2, 3, 6, 5, 90, 0.1)
+    check('步行机甲运动：大角度指令先转身且不会横向漂移', turnFirst.heading > 0 && turnFirst.speed === 0 && turnFirst.vx === 0 && turnFirst.vy === 0, JSON.stringify(turnFirst))
+    const aligned = walkerMotionStep(0, 0, 0, 0, 3, 6, 5, 180, 0.1)
+    check('步行机甲运动：朝向对齐后按加速度沿机体前方起步', aligned.speed > 0 && Math.abs(aligned.vx) < 1e-8 && aligned.vy < 0, JSON.stringify(aligned))
+    const braking = walkerMotionStep(aligned.vx, aligned.vy, aligned.heading, aligned.heading, 0, 6, 5, 180, 0.1)
+    check('步行机甲运动：松开输入后按刹停惯性减速', braking.speed >= 0 && braking.speed < aligned.speed, JSON.stringify(braking))
+    const turnGait: { walkPhase?: number; walkSettleTarget?: number; walkSettleBlend?: number } = { walkPhase: 0 }
+    const turnFootfall = advanceWalkerAnimation(turnGait, 2.1, 0, Math.PI / 2, 0.1)
+    check('步行机甲步态：原地转向会推进低速步态并产生一次交替落脚', Math.abs((turnGait.walkPhase ?? 0) - 2.1) < 1e-9
+      && turnFootfall.turningInPlace && turnFootfall.footfalls.length === 1)
+    const settling: { walkPhase?: number; walkSettleTarget?: number; walkSettleBlend?: number } = { walkPhase: 0.8 }
+    let settleFootfalls = 0
+    for (let i = 0; i < 8; i++) settleFootfalls += advanceWalkerAnimation(settling, 2.1, 0, 0, 0.05).footfalls.length
+    check('步行机甲停步：补完当前半步后淡回待机帧且只触发落脚一次', settling.walkPhase === 0
+      && settling.walkSettleTarget === undefined && settling.walkSettleBlend === undefined && settleFootfalls === 1, JSON.stringify(settling))
+
+    LEVEL.objects = []
+    LEVEL.terrain = []
+    LEVEL.buildCells = []
+    LEVEL.core = null
+    LEVEL.initialUnits = []
+    LEVEL.events = []
+    LEVEL.triggers = []
+    LEVEL.interactables = []
+    LEVEL.startZone = { x: 8, y: 14, w: 1, h: 1 }
+    configureObjective(LEVEL, { type: 'defend', waves: 99 })
+    let clearGround = initialState()
+    clearGround.phase = 'prep'
+    clearGround.moveDir = { x: 0, y: -1 }
+    clearGround.desiredHeading = 0
+    const clearStartY = clearGround.fortress.y
+    clearGround = run(clearGround, 1, 0.05)
+    const clearDistance = clearStartY - clearGround.fortress.y
+    check('步行机甲玩家运动：腿部动画相位等于实际移动距离', clearDistance > 1
+      && Math.abs((clearGround.fortress.walkPhase ?? 0) - clearDistance) < 0.05,
+      `distance=${clearDistance}, phase=${clearGround.fortress.walkPhase}`)
+
+    LEVEL.terrain = [{ kind: 'puddle', x: 0, y: 0, w: LEVEL.cols, h: LEVEL.rows, moveModifier: 0.25 }]
+    let slowed = initialState()
+    slowed.phase = 'prep'
+    slowed.moveDir = { x: 0, y: -1 }
+    slowed.desiredHeading = 0
+    const slowedStartY = slowed.fortress.y
+    slowed = run(slowed, 1, 0.05)
+    check('步行机甲玩家运动：仍受地形移动倍率影响', slowedStartY - slowed.fortress.y < clearDistance * 0.6,
+      `clear=${clearDistance}, slowed=${slowedStartY - slowed.fortress.y}`)
+
+    LEVEL.terrain = []
+    LEVEL.objects = [{ id: 9920, kind: 'rock', x: 8, y: 12, w: 1, h: 1, hp: -1, blockMove: true, blockProjectile: false, height: 1 }]
+    let lowBarrier = initialState()
+    lowBarrier.phase = 'prep'
+    lowBarrier.moveDir = { x: 0, y: -1 }
+    lowBarrier.desiredHeading = 0
+    lowBarrier = run(lowBarrier, 1.5, 0.05)
+    check('步行机甲玩家碰撞：可跨越高度 1 的移动阻挡物', lowBarrier.fortress.y < 12, `y=${lowBarrier.fortress.y}`)
+
+    LEVEL.objects = [{ id: 9921, kind: 'rock', x: 8, y: 12, w: 1, h: 1, hp: -1, blockMove: true, blockProjectile: false, height: 2 }]
+    let highBarrier = initialState()
+    highBarrier.phase = 'prep'
+    highBarrier.moveDir = { x: 0, y: -1 }
+    highBarrier.desiredHeading = 0
+    highBarrier = run(highBarrier, 1.5, 0.05)
+    check('步行机甲玩家碰撞：高度 2 及以上仍会阻挡移动', highBarrier.fortress.y >= 13 - 1e-6, `y=${highBarrier.fortress.y}`)
+
+    LEVEL.objects = [{ id: 9922, kind: 'rock', x: 8, y: 8, w: 1, h: 1, hp: -1, blockMove: true, blockProjectile: false, height: 1 }]
+    LEVEL.initialUnits = [{ id: 9923, unitDefId: unitId, faction: 'enemy', controller: 'static', x: 8.5, y: 10.5, events: [] }]
+    const aiState = initialState()
+    const ai = aiState.enemies.find(enemy => enemy.placementId === 9923)!
+    let maxAiWalkPhase = 0
+    for (let step = 0; step < 80; step++) {
+      moveUnitVehicleToward(aiState, ai, unit, 8.5, 6.5, 0.05)
+      maxAiWalkPhase = Math.max(maxAiWalkPhase, ai.vehicle?.walkPhase ?? 0)
+    }
+    check('步行机甲 AI 运动：复用同一转身/行走求解并跨越高度 1 物体', ai.y < 8 && maxAiWalkPhase > 0,
+      `y=${ai.y}, maxPhase=${maxAiWalkPhase}`)
+
+    LEVEL.objects = []
+    LEVEL.startZone = { x: Math.max(0, LEVEL.cols - 3), y: Math.max(0, LEVEL.rows - 3), w: 1, h: 1 }
+    LEVEL.initialUnits = [{
+      id: 9924,
+      unitDefId: unitId,
+      faction: 'enemy',
+      controller: 'ai',
+      x: 1.5,
+      y: 1.5,
+      behavior: 'guard',
+      events: [],
+    }]
+    let retaliationState = initialState()
+    retaliationState.phase = 'combat'
+    retaliationState.spawnQueue = [{ kind: 'walker', delay: 100 }]
+    retaliationState.spawnTimer = 100
+    const retaliatingWalker = retaliationState.enemies.find(enemy => enemy.placementId === 9924)!
+    const retaliationPlayer = fortressCenter(retaliationState)
+    const retaliationDistanceBefore = Math.hypot(retaliatingWalker.x - retaliationPlayer.x, retaliatingWalker.y - retaliationPlayer.y)
+    damageEnemy(retaliationState, retaliatingWalker, 1, 992400)
+    const longRangeMemory = retaliatingWalker.retaliationUntil ?? 0
+    retaliationState = run(retaliationState, UNIT_RETALIATION_MEMORY_SECONDS + 1, 0.05)
+    const walkerAfterRetaliation = retaliationState.enemies.find(enemy => enemy.placementId === 9924)
+    const retaliationDistanceAfter = walkerAfterRetaliation
+      ? Math.hypot(walkerAfterRetaliation.x - retaliationPlayer.x, walkerAfterRetaliation.y - retaliationPlayer.y)
+      : Infinity
+    check('步行机甲受击反击：远距离记忆动态延长并持续锁定玩家接近', longRangeMemory - retaliationState.time > 0
+      && walkerAfterRetaliation?.retaliationSide === 'fortress'
+      && walkerAfterRetaliation.targetKind === 'fortress' && retaliationDistanceAfter < retaliationDistanceBefore - 0.05,
+    `before=${retaliationDistanceBefore.toFixed(2)}, after=${retaliationDistanceAfter.toFixed(2)}, memory=${longRangeMemory.toFixed(2)}, target=${walkerAfterRetaliation?.targetKind}`)
+    const retaliationTurretId = walkerAfterRetaliation?.vehicle?.turrets?.[0]?.id
+    let retaliationFired = false
+    for (let step = 0; step < 600 && !retaliationFired; step++) {
+      retaliationState = tick(retaliationState, 0.05)
+      retaliationFired = retaliationTurretId !== undefined && (retaliationState.muzzles.some(muzzle => muzzle.turretId === retaliationTurretId)
+        || retaliationState.enemyProjectiles.some(projectile => projectile.shooterId === retaliationTurretId))
+    }
+    const finalWalker = retaliationState.enemies.find(enemy => enemy.placementId === 9924)
+    const finalTurret = finalWalker?.vehicle?.turrets?.find(turret => turret.id === retaliationTurretId)
+    check('步行机甲受击反击：追入射程后预装炮塔实际开火', retaliationFired,
+      `turret=${retaliationTurretId}, time=${retaliationState.time.toFixed(2)}, distance=${finalWalker ? Math.hypot(finalWalker.x - retaliationPlayer.x, finalWalker.y - retaliationPlayer.y).toFixed(2) : 'missing'}, target=${finalWalker?.targetKind}:${finalWalker?.targetId}, retaliationUntil=${finalWalker?.retaliationUntil?.toFixed(2)}, turretTarget=${finalTurret?.targetId}, cooldown=${finalTurret?.cooldown.toFixed(2)}`)
+
+    clearGround.moveDir = { x: 0, y: 0 }
+    clearGround.desiredHeading = null
+    clearGround = run(clearGround, 2, 0.05)
+    check('步行机甲动画：停稳后复位到静止帧', Math.hypot(clearGround.fortress.vx, clearGround.fortress.vy) < 0.01
+      && (clearGround.fortress.walkPhase ?? 0) === 0, JSON.stringify({ vx: clearGround.fortress.vx, vy: clearGround.fortress.vy, phase: clearGround.fortress.walkPhase }))
+  } finally {
+    deleteCustomFortress(fortressId)
+    removeAsset(bodyAsset.id)
+    removeAsset(footAsset.id)
+    setSelectedFortressId(previousFortressId)
+    for (const key of Object.keys(LEVEL)) delete (LEVEL as unknown as Record<string, unknown>)[key]
+    Object.assign(LEVEL, savedLevel)
+    invalidateWallInfo()
+  }
+}
+
+console.log('== 战车整备预设 ==')
+{
+  const fortress = FORTRESS_DEFS.find(item => item.hardpoints.some(hardpoint => !hardpoint.builtIn))!
+  const hardpoint = fortress.hardpoints.find(item => !item.builtIn)!
+  const turret = TURRET_DEFS.find(item => item.mount === hardpoint.size && (!hardpoint.types || hardpoint.types.includes(item.type)))!
+  const blank: VehicleLoadoutPreset = {
+    id: 'sim-loadout', name: '模拟整备', fortressDefId: fortress.id, turrets: [], modules: [],
+  }
+  const modulePlacement = MODULE_DEFS.flatMap(def => firstLoadoutModulePlacement(fortress, [], def.id) ?? [])[0]
+  const equipped: VehicleLoadoutPreset = {
+    ...blank,
+    turrets: [{ hardpointId: hardpoint.id, turretDefId: turret.id }],
+    modules: modulePlacement ? [modulePlacement] : [],
+  }
+  const normalized = normalizeVehicleLoadout(equipped)
+  check('整备预设校验：保留兼容炮位和合法模块', normalized?.turrets.length === 1 && normalized.modules.length === equipped.modules.length)
+  const blankStats = vehicleLoadoutStats(blank)
+  const equippedStats = vehicleLoadoutStats(equipped)
+  check('整备参数：只需用当前值与已保存值求变化量', equippedStats.firepower > blankStats.firepower,
+    `before=${blankStats.firepower}, current=${equippedStats.firepower}`)
+  const state = initialState(equipped)
+  check('整备出战：预设载具成为玩家战车', state.fortressDefId === fortress.id)
+  check('整备出战：预装炮塔进入统一炮塔战斗实例', state.turrets.some(item => item.hardpointId === hardpoint.id && item.defId === turret.id && item.builtIn === false))
+  check('整备出战：预装模块进入统一模块实例', state.modules.length === equipped.modules.length)
+  check('整备出战：模块加成已同步到初始结构上限', state.fortress.maxHp === fortressMaxHp(state) && state.fortress.hp === state.fortress.maxHp)
+
+  check('装配分：炮塔与模块按各自定义计入总分', vehicleLoadoutAssemblyPoints(equipped) === turretAssemblyPoints(turret)
+    + (modulePlacement ? moduleAssemblyPoints(MODULE_DEFS.find(item => item.id === modulePlacement.defId)!) : 0))
+  const parsedLevel = parseLevel(JSON.stringify({ ...defaultLevel(), assemblyPointLimit: 17 }))
+  check('关卡装配分上限：可保存并解析', parsedLevel.assemblyPointLimit === 17)
+
+  const replaceableHardpoint = fortress.hardpoints.find(item => item.size === 'S' && (!item.types || item.types.includes('direct')))
+  const builtInTurret = TURRET_DEFS.find(item => item.mount === replaceableHardpoint?.size && (!replaceableHardpoint?.types || replaceableHardpoint.types.includes(item.type)))
+  const alternateTurret = TURRET_DEFS.find(item => item.mount === replaceableHardpoint?.size && item.id !== builtInTurret?.id && (!replaceableHardpoint?.types || replaceableHardpoint.types.includes(item.type)))
+  if (replaceableHardpoint && builtInTurret && alternateTurret) {
+    const previousBuiltIn = replaceableHardpoint.builtIn
+    replaceableHardpoint.builtIn = builtInTurret.id
+    try {
+      const combatBefore = initialState({ ...blank, turrets: [], modules: [] })
+      const combatDraft: VehicleLoadoutPreset = {
+        ...blank,
+        turrets: [{ hardpointId: replaceableHardpoint.id, turretDefId: alternateTurret.id }],
+        modules: modulePlacement ? [modulePlacement] : [],
+      }
+      check('战斗整备校验：模板预装炮位可由草稿显式接管', normalizeCombatVehicleLoadout(combatDraft)?.turrets.length === 1)
+      const overLimit = Math.max(0, vehicleLoadoutAssemblyPoints(combatDraft) - 1)
+      check('战斗整备提交：超过关卡装配分时拒绝变更', applyCombatLoadout(combatBefore, combatDraft, overLimit) === combatBefore)
+      const combatAfter = applyCombatLoadout(combatBefore, combatDraft, vehicleLoadoutAssemblyPoints(combatDraft))
+      check('战斗整备提交：预装炮塔可被替换并转为普通可替换实例', combatAfter !== combatBefore
+        && combatAfter.turrets.some(item => item.hardpointId === replaceableHardpoint.id && item.defId === alternateTurret.id && item.builtIn === false))
+      check('战斗整备提交：模块草稿同步为当前战车装备', combatAfter.modules.length === combatDraft.modules.length)
+    } finally {
+      replaceableHardpoint.builtIn = previousBuiltIn
+    }
+  }
+}
+
+console.log('== 导弹拦截首版 ==')
+{
+  const state = fresh()
+  const fortressHp = state.fortress.hp
+  const rocket: EnemyProjectile = {
+    id: state.nextId++, shooterId: 70001,
+    x: 8, y: 8, px: 7.5, py: 8, heading: Math.PI / 2,
+    speed: 20, damage: 9999, penetration: 9999,
+    traveled: 10, maxTravel: 100,
+    kind: 'missile', ammoId: 'rocket_std', sourceSide: 'enemy', sourceFaction: 'enemy',
+    sourceAltitude: 0, targetAltitude: 0, altitudeTravelM: 20,
+  }
+  const allyRocket: EnemyProjectile = {
+    ...structuredClone(rocket), id: state.nextId++, y: 9, py: 9,
+    sourceSide: 'ally', sourceFaction: 'ally',
+  }
+  state.enemyProjectiles.push(rocket, allyRocket)
+  const playerTargets = interceptableMissileTargets(state, 'player')
+  check('导弹拦截阵营：玩家只取得敌对导弹，不会拦截友军导弹', playerTargets.length === 1 && playerTargets[0].id === rocket.id)
+  check('导弹拦截配置：标准火箭读取独立拦截耐久', playerTargets[0]?.maxHp === 20 && playerTargets[0]?.hp === 20)
+  const firstDestroyed = applyMissileInterceptionDamage(state, 'unit', rocket.id, 5)
+  check('导弹拦截伤害：未归零时累计耐久且导弹继续存在', !firstDestroyed && rocket.interceptHp === 15 && !rocket.intercepted)
+  const explosionBefore = state.explosions.length
+  const destroyed = applyMissileInterceptionDamage(state, 'unit', rocket.id, 15)
+  check('导弹拦截伤害：耐久归零后标记空爆销毁', destroyed && rocket.intercepted === true && state.explosions.length === explosionBefore + 1)
+  check('导弹拦截表现：空爆事件不会留下地面弹坑', state.explosions.at(-1)?.leavesCrater === false)
+  check('导弹拦截结算：空爆不触发原弹头伤害', state.fortress.hp === fortressHp)
+  check('导弹拦截碰撞：高速线段跨越小目标仍能命中', segmentCircleEntry(0, 0, 20, 0, 10, 0, 0.18) !== null)
+
+  const mg = TURRET_DEFS.find(item => item.id === 'mg')!
+  const savedCapability = mg.canInterceptMissile
+  const savedTags = structuredClone(mg.tags)
+  try {
+    mg.canInterceptMissile = true
+    mg.tags = [{ kind: 'prefer', key: 'missile' }]
+    let priorityState = arena()
+    priorityState.spawnQueue = []
+    priorityState.ambushQueue = []
+    const turret = mkTurret(priorityState, 'mg', 8, 10)
+    mkEnemy(priorityState, 'walker', 8.5, 8.5)
+    priorityState.enemyProjectiles = [{
+      id: priorityState.nextId++, shooterId: 70003,
+      x: 8.5, y: 5.5, px: 8.5, py: 5.5, heading: Math.PI,
+      speed: 0, damage: 1, penetration: 0, traveled: 1, maxTravel: 100,
+      kind: 'missile', ammoId: 'rocket_std', sourceSide: 'enemy', sourceFaction: 'enemy',
+    }]
+    priorityState = tick(priorityState, 0.01)
+    const liveTurret = priorityState.turrets.find(item => item.id === turret.id)
+    check('导弹优先标签：较远导弹可压过普通近目标成为当前锁定', liveTurret?.targetMissilePool === 'unit')
+  } finally {
+    mg.canInterceptMissile = savedCapability
+    mg.tags = savedTags
+  }
+
+  const clusterAmmo = PROJECTILE_ARTS.find(item => item.id === 'custom_ammo_1')!
+  const clusterState = fresh()
+  clusterState.phase = 'prep'
+  clusterState.prepLeft = 99
+  clusterState.projectiles = []
+  const center = fortressRect(clusterState)
+  const cluster: EnemyProjectile = {
+    id: clusterState.nextId++, shooterId: 70002,
+    x: center.x + center.w / 2, y: center.y + center.h / 2 - 0.5,
+    px: center.x + center.w / 2, py: center.y + center.h / 2 - 0.5,
+    heading: Math.PI, speed: 5, damage: clusterAmmo.damage ?? 34, penetration: 0,
+    traveled: 1, maxTravel: 100, kind: 'missile', ammoId: clusterAmmo.id,
+    sourceSide: 'enemy', sourceFaction: 'enemy', targetKind: 'fortress', targetId: 0,
+    targetX: center.x + center.w / 2, targetY: center.y + center.h / 2,
+    guided: true, willGuide: true, split: { count: 4, spread: 40, at: 'proximity', range: 99 },
+    t: 0, flightLeft: 10, missileAccel: 0, missileMaxSpeed: 5,
+  }
+  cluster.interceptHp = 1
+  clusterState.enemyProjectiles = [cluster]
+  const afterSplit = tick(clusterState, 0.05)
+  const children = afterSplit.enemyProjectiles.filter(item => item.kind === 'missile' && item.splitDone)
+  const childTargets = interceptableMissileTargets(afterSplit, 'player').filter(item => children.some(child => child.id === item.id))
+  check('集束导弹拦截：母弹分裂后四颗子弹分别成为独立目标', children.length === 4 && childTargets.length === 4)
+  check('集束导弹拦截：子弹使用完整拦截耐久而非继承母弹残血', childTargets.every(item => item.hp === 12 && item.maxHp === 12))
+}
+
+console.log('== 模块作用对象 / 单位锁定 / 资源提示 ==')
+{
+  const controllerId = 'sim_effect_controller'
+  const factionId = 'sim_effect_player_faction'
+  MODULE_DEFS.push(
+    { id: controllerId, name: '主控测试模块', desc: '', cost: 0, w: 1, h: 1, effectTarget: 'controller', hpBoost: 100, ammoCap: 3, color: '#888' },
+    { id: factionId, name: '阵营测试模块', desc: '', cost: 0, w: 1, h: 1, effectTarget: 'playerFaction', hpBoost: 250, ammoCap: 7, color: '#999' },
+  )
+  try {
+    const state = fresh()
+    state.modules = [
+      { id: state.nextId++, defId: controllerId, x: 0, y: 0, rot: 0, timer: 0 },
+      { id: state.nextId++, defId: factionId, x: 1, y: 0, rot: 0, timer: 0 },
+    ]
+    const controller = moduleBonuses(state)
+    const faction = moduleBonuses(state, 'playerFaction')
+    check('模块作用对象：主控汇总全部模块，玩家阵营只汇总明确共享模块', controller.hpBoostPool === 350 && faction.hpBoostPool === 250)
+    const turret = mkTurret(state, 'mg', 5, 5)
+    const details = playerUnitResourceDetails(state, null)
+    const caps = playerTurretResourceCaps(TURRET_DEFS.find(item => item.id === turret.defId)!, controller)
+    check('模块作用对象：资源详情与炮塔容量使用同一模块上限口径', details?.turrets.some(row => row.turretId === turret.id && row.ammoCap === caps.ammoCap) === true)
+    const migrated = migrateModuleDefs([{ id: 'legacy-target', name: '旧模块', desc: '', cost: 0, w: 1, h: 1, color: '#777' }], 8)
+    check('模块作用对象：旧模块迁移后保持玩家阵营共享', migrated[0].effectTarget === 'playerFaction')
+
+    const def = fortressDef(state)
+    const savedLocked = def.bodyLocked
+    def.bodyLocked = true
+    const before = fortressRect(state)
+    state.phase = 'prep'; state.moveDir = { x: 0, y: -1 }; state.moveMag = 1
+    const locked = tick(state, 0.5)
+    const after = fortressRect(locked)
+    check('单位模板锁定：单一开关同时阻止主控平移和主体转向', Math.abs(before.x - after.x) < 1e-9 && Math.abs(before.y - after.y) < 1e-9 && locked.fortress.turnW === 0)
+    def.bodyLocked = savedLocked
+
+    const beforeBars = gameParameters().showUnitHealthBars
+    setUnitHealthBarsVisible(false)
+    check('游戏参数：单位血条可以独立关闭', gameParameters().showUnitHealthBars === false)
+    setUnitHealthBarsVisible(beforeBars)
+    const beforeShadows = gameParameters().showEntityShadows
+    setEntityShadowsVisible(false)
+    check('游戏参数：单位与物体阴影可以统一关闭', gameParameters().showEntityShadows === false)
+    setEntityShadowsVisible(beforeShadows)
+    const beforeVisionEnabled = gameParameters().battleVisionEnabled
+    const beforeVisionMeters = gameParameters().playerVisionMeters
+    setBattleVisionEnabled(true)
+    setPlayerVisionMeters(6.4)
+    const visionState = initialState()
+    visionState.allies.push({
+      id: 8801, kind: 'soldier', faction: 'ally', controller: 'ai', producerId: -1,
+      x: 50, y: 50, hp: 10, maxHp: 10, cooldown: 0, targetId: null, hitFlash: 0,
+    })
+    visionState.allies.push({
+      id: 8802, kind: 'soldier', faction: 'neutral', controller: 'ai', producerId: -1,
+      x: 80, y: 80, hp: 10, maxHp: 10, cooldown: 0, targetId: null, hitFlash: 0,
+    })
+    check('战场共享视野：玩家与友方属于同一视野队伍', factionsShareVision('player', 'ally') && !factionsShareVision('player', 'neutral'))
+    check('战场共享视野：主控和友方单位共同成为视野源', playerTeamVisionSources(visionState).some(source => source.entityId === 0) && playerTeamVisionSources(visionState).some(source => source.entityId === 8801) && !playerTeamVisionSources(visionState).some(source => source.entityId === 8802))
+    check('战场共享视野：友方视野可揭示其附近位置', playerTeamCanSeePoint(visionState, 51.5, 50) && !playerTeamCanSeePoint(visionState, 55, 50))
+    setPlayerVisionMeters(beforeVisionMeters)
+    setBattleVisionEnabled(beforeVisionEnabled)
+  } finally {
+    for (const id of [controllerId, factionId]) {
+      const index = MODULE_DEFS.findIndex(module => module.id === id)
+      if (index >= 0) MODULE_DEFS.splice(index, 1)
+    }
+  }
 }
 
 // v1.72：总结移至真正末尾（此前在 case66 之前，尾部用例失败不会被门禁捕获）

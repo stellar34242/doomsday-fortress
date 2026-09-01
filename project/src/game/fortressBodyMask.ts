@@ -14,18 +14,22 @@ export function registerFortressBodyAlpha(ref: string, width: number, height: nu
   masks.set(ref, { width, height, alpha })
 }
 
-/** 从已加载主体图片读取 alpha；同一引用/尺寸只读取一次。 */
-export function registerFortressBodyImage(ref: string, img: HTMLImageElement): void {
+/** 从已加载载具图片读取 alpha；序列帧只取左上第一帧，同一引用/帧尺寸只读取一次。 */
+export function registerFortressBodyImage(ref: string, img: HTMLImageElement, columns = 1, rows = 1): void {
   if (!ref || typeof document === 'undefined') return
+  const frameColumns = Math.max(1, Math.min(64, Math.round(columns)))
+  const frameRows = Math.max(1, Math.min(64, Math.round(rows)))
+  const frameWidth = Math.max(1, Math.floor(img.naturalWidth / frameColumns))
+  const frameHeight = Math.max(1, Math.floor(img.naturalHeight / frameRows))
   const old = masks.get(ref)
-  if (old && old.width === img.naturalWidth && old.height === img.naturalHeight) return
+  if (old && old.width === frameWidth && old.height === frameHeight) return
   try {
     const canvas = document.createElement('canvas')
-    canvas.width = img.naturalWidth
-    canvas.height = img.naturalHeight
+    canvas.width = frameWidth
+    canvas.height = frameHeight
     const ctx = canvas.getContext('2d', { willReadFrequently: true })
     if (!ctx) return
-    ctx.drawImage(img, 0, 0)
+    ctx.drawImage(img, 0, 0, frameWidth, frameHeight, 0, 0, frameWidth, frameHeight)
     const rgba = ctx.getImageData(0, 0, canvas.width, canvas.height).data
     const alpha = new Uint8Array(canvas.width * canvas.height)
     for (let i = 0; i < alpha.length; i++) alpha[i] = rgba[i * 4 + 3]
@@ -40,7 +44,7 @@ export function clearFortressBodyAlpha(ref?: string): void {
   else masks.clear()
 }
 
-function fallbackEntry(w: number, h: number, x1: number, y1: number, x2: number, y2: number): number | null {
+function fallbackEntry(w: number, h: number, x1: number, y1: number, x2: number, y2: number, depth: number): number | null {
   // 未加载 alpha 时采用中央主体范围；两侧各留约 0.8 格让履带/轮子先被弹丸越过。
   const minX = w * 0.16, maxX = w * 0.84
   const minY = h * 0.02, maxY = h * 0.98
@@ -53,31 +57,35 @@ function fallbackEntry(w: number, h: number, x1: number, y1: number, x2: number,
     t0 = Math.max(t0, a); t1 = Math.min(t1, b)
     return t0 <= t1
   }
-  return slab(x1, dx, minX, maxX) && slab(y1, dy, minY, maxY) && t1 >= 0 && t0 <= 1
-    ? Math.max(0, Math.min(1, t0)) : null
+  if (!slab(x1, dx, minX, maxX) || !slab(y1, dy, minY, maxY) || t1 < 0 || t0 > 1) return null
+  const enter = Math.max(0, Math.min(1, t0)), exit = Math.max(enter, Math.min(1, t1))
+  return enter + (exit - enter) * Math.max(0, Math.min(1, depth))
 }
 
 /**
- * 主体局部格线段与贴图 alpha 的首次交点 t（0..1）。贴图按现行规则原尺寸居中：30px=1格。
- * alpha 未就绪时回退中央主体矩形，绝不使用包含履带/轮胎的堡垒外接框。
+ * 载具局部格线段与贴图 alpha 的首次交点 t（0..1）。贴图按现行规则原尺寸居中：BASE_CELL=32px=1格。
+ * alpha 未就绪时回退中央载具矩形，绝不使用包含履带/轮胎的载具外接框。
  */
 export function fortressBodyMaskSegmentEntry(
   ref: string | undefined, bodyW: number, bodyH: number,
   x1: number, y1: number, x2: number, y2: number,
+  depth = 0, offsetX = 0, offsetY = 0,
 ): number | null {
-  if (!ref) return fallbackEntry(bodyW, bodyH, x1, y1, x2, y2)
+  if (!ref) return fallbackEntry(bodyW, bodyH, x1, y1, x2, y2, depth)
   const mask = masks.get(ref)
-  if (!mask) return fallbackEntry(bodyW, bodyH, x1, y1, x2, y2)
-  const toPxX = (x: number) => (x - bodyW / 2) * BASE_CELL + mask.width / 2
-  const toPxY = (y: number) => (y - bodyH / 2) * BASE_CELL + mask.height / 2
+  if (!mask) return fallbackEntry(bodyW, bodyH, x1, y1, x2, y2, depth)
+  const toPxX = (x: number) => (x - bodyW / 2 - offsetX) * BASE_CELL + mask.width / 2
+  const toPxY = (y: number) => (y - bodyH / 2 - offsetY) * BASE_CELL + mask.height / 2
   const ax = toPxX(x1), ay = toPxY(y1), bx = toPxX(x2), by = toPxY(y2)
   const dx = bx - ax, dy = by - ay
   const steps = Math.max(1, Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)) * 2))
+  const opaque: number[] = []
   for (let i = 0; i <= steps; i++) {
     const t = i / steps
     const px = Math.floor(ax + dx * t), py = Math.floor(ay + dy * t)
     if (px < 0 || px >= mask.width || py < 0 || py >= mask.height) continue
-    if (mask.alpha[py * mask.width + px] > 16) return t
+    if (mask.alpha[py * mask.width + px] > 16) opaque.push(t)
   }
-  return null
+  if (opaque.length === 0) return null
+  return opaque[Math.min(opaque.length - 1, Math.floor((opaque.length - 1) * Math.max(0, Math.min(1, depth))))]
 }

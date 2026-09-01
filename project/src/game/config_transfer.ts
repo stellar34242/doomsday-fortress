@@ -1,18 +1,24 @@
 /** 配置导出/导入：口令串（base64，跨设备搬运）+ v2.18 本地文件夹 JSON（td-config.json，便于直接编辑）。
  *  口令 = base64(JSON(bundle))，unicode 安全（TextEncoder/TextDecoder + 纯 JS base64，无 btoa/Buffer 环境依赖）。
  *  导入保证：先完整解析+形状校验，全部通过后才就地替换注册表并落盘（任何一步失败不写坏现有数据）。 */
-import { applyMountFoot, COLS, MODULE_DEFS, PROJECTILE_ARTS, TURRET_DEFS } from './config'
+import { COLS, MODULE_DEFS, PROJECTILE_ARTS, TURRET_DEFS } from './config'
 import type { ModuleDef, ProjectileArtDef, TurretDef } from './config'
 import { COLS_MIN, defaultFinishZone, defaultLevelLibrary, defaultStartZone, LEVEL, levelLibraryForExport, mergeBaseCells, normalizeInteractables, normalizeLevelMode, normalizeObjective, normalizeTriggers, normalizeZone, ROWS_MIN, saveLevelLibrary } from './level'
 import type { LevelConfig, LevelLibrary } from './level'
-import { fortressLibForExport, importFortressLib, migrateModuleDefs, MODULE_DEFS_SCHEMA_VERSION, saveAll } from './persist'
+import { fortressLibForExport, importFortressLib, migrateModuleDefs, migrateRetiredPulseProjectiles, migrateRetiredRayTurret, migrateRetiredStandardMissileAsset, migrateRetiredTurretFields, migrateTurretBurstSounds, migrateTurretResourceCapacity, migrateVerticalLaunchProjectileAsset, MODULE_DEFS_SCHEMA_VERSION, saveAll } from './persist'
 import type { FortressLibData } from './persist'
 import { importUploads, uploadsForExport } from './assetlib'
 import type { UploadData } from './assetlib'
+import { audioProjectConfig, importAudioProjectConfig } from './audioConfig'
+import type { AudioProjectConfig } from './audioConfig'
+import { displayConfig, importDisplayConfig } from './displayConfig'
+import type { DisplayConfig } from './displayConfig'
+import { gameParameters as currentGameParameters, importGameParameters } from './gameParameters'
+import type { GameParameters } from './gameParameters'
 
 interface ConfigBundle {
   app: 'td-config'
-  version: number // 2=assets；3=fortressLib；4=moduleDefs；5=levelLibrary；6=moduleDefsVersion
+  version: number // 2=assets；3=fortressLib；4=moduleDefs；5=levelLibrary；6=moduleDefsVersion；7=项目级声音/游戏/显示参数
   turretDefs: TurretDef[]
   projectileArts: ProjectileArtDef[]
   level: LevelConfig
@@ -21,6 +27,9 @@ interface ConfigBundle {
   fortressLib?: FortressLibData
   moduleDefs?: ModuleDef[] // v2.30
   moduleDefsVersion?: number // v6：模块库迁移版本（当前 schema v6，含通用数量上限）
+  audioConfig?: AudioProjectConfig
+  gameParameters?: GameParameters
+  displayConfig?: DisplayConfig
 }
 
 // ---- 纯 JS base64（unicode 安全：UTF-8 字节 ⇄ base64）----
@@ -59,7 +68,7 @@ export function decodeBase64(b64: string): string {
 function buildBundle(): ConfigBundle {
   return {
     app: 'td-config',
-    version: 6,
+    version: 7,
     turretDefs: TURRET_DEFS,
     projectileArts: PROJECTILE_ARTS,
     level: LEVEL,
@@ -68,6 +77,9 @@ function buildBundle(): ConfigBundle {
     fortressLib: fortressLibForExport(),
     moduleDefs: MODULE_DEFS,
     moduleDefsVersion: MODULE_DEFS_SCHEMA_VERSION,
+    audioConfig: audioProjectConfig(),
+    gameParameters: currentGameParameters(),
+    displayConfig: displayConfig(),
   }
 }
 
@@ -85,7 +97,7 @@ export function exportConfigJson(): string {
 function validateBundleShape(o: unknown): { ok: true; bundle: ConfigBundle } | { ok: false; error: string } {
   const b = o as Partial<ConfigBundle> | null
   if (!b || b.app !== 'td-config') return { ok: false, error: '口令标识不符（app ≠ td-config）' }
-  if (![1, 2, 3, 4, 5, 6].includes(Number(b.version))) return { ok: false, error: `口令版本不符（${String(b.version)}，支持 1–6）` }
+  if (![1, 2, 3, 4, 5, 6, 7].includes(Number(b.version))) return { ok: false, error: `口令版本不符（${String(b.version)}，支持 1–7）` }
   if (b.fortressLib !== undefined && (!b.fortressLib || !Array.isArray(b.fortressLib.customs))) {
     return { ok: false, error: '数据形状不对（fortressLib.customs 非数组）' }
   }
@@ -140,24 +152,33 @@ export function parseConfigSmart(text: string): { ok: true; bundle: ConfigBundle
 /** 应用已校验的 bundle：就地替换注册表并落盘 */
 function applyBundle(bundle: ConfigBundle): { ok: true } {
   const { turretDefs, projectileArts, level } = bundle
-  turretDefs.forEach(applyMountFoot) // v1.76：占格随型号归一化（旧口令携带的 w/h 以型号为准）
-  TURRET_DEFS.splice(0, TURRET_DEFS.length, ...turretDefs)
-  PROJECTILE_ARTS.splice(0, PROJECTILE_ARTS.length, ...projectileArts)
+  const migratedTurrets = turretDefs
+    .map(migrateTurretBurstSounds)
+    .map(migrateRetiredRayTurret)
+    .filter((definition): definition is TurretDef => definition !== null)
+    .map(migrateRetiredTurretFields)
+    .map(migrateTurretResourceCapacity)
+  TURRET_DEFS.splice(0, TURRET_DEFS.length, ...migratedTurrets)
+  const migratedProjectileArts = migrateRetiredPulseProjectiles(projectileArts.map(migrateVerticalLaunchProjectileAsset).map(migrateRetiredStandardMissileAsset))
+  PROJECTILE_ARTS.splice(0, PROJECTILE_ARTS.length, ...migratedProjectileArts)
   // 旧口令 level 迁移：无 rows → 28 保留行为；模板墙格并入基地格全集（按 rows 锚定）
   if (typeof level.rows !== 'number') level.rows = 28
   level.rows = Number.isFinite(level.rows) ? Math.max(ROWS_MIN, Math.round(level.rows)) : 28 // 上限不限（仅保留下限）
   level.cols = Number.isFinite(level.cols) ? Math.max(COLS_MIN, Math.round(level.cols)) : COLS
   level.buildCells = mergeBaseCells(level.buildCells, level.rows)
   level.mode = normalizeLevelMode(level.mode)
-  level.objective = normalizeObjective(level.objective, level.mode)
+  level.objective = normalizeObjective(level.objective, level.mode, level.rows, level.cols)
   level.startZone = normalizeZone(level.startZone, defaultStartZone(level.rows, level.cols), level.rows, level.cols)
   level.finishZone = normalizeZone(level.finishZone, defaultFinishZone(level.rows, level.cols), level.rows, level.cols)
   level.triggers = normalizeTriggers(level.triggers, level.rows, level.cols)
   level.interactables = normalizeInteractables(level.interactables, level.rows, level.cols)
-  level.version = 10
+  level.version = 18
   const library = bundle.levelLibrary ?? defaultLevelLibrary(level)
   saveLevelLibrary(library)
   importUploads(bundle.assets) // 素材库上传条目（v1 口令 undefined → 不动现有库）
+  importAudioProjectConfig(bundle.audioConfig) // 必须晚于素材导入，避免声音预设引用被过滤
+  importGameParameters(bundle.gameParameters)
+  importDisplayConfig(bundle.displayConfig)
   importFortressLib(bundle.fortressLib) // 堡垒类型库（v1/v2 口令 undefined → 不动现有库）
   if (bundle.moduleDefs !== undefined) {
     const modules = migrateModuleDefs(bundle.moduleDefs, bundle.moduleDefsVersion ?? 0)

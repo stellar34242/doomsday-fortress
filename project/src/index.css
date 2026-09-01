@@ -89,6 +89,13 @@
     from { transform: scale(2) rotate(-6deg); opacity: 0; }
     to { transform: scale(1) rotate(-1.5deg); opacity: 1; }
   }
+  /* 动态 RMXP Autotile 索引：逐帧展示每个 96×128 帧中的第3个 32×32 图块。 */
+  @keyframes autotileIndexFrames {
+    0%, 24.99% { background-position: -64px 0; }
+    25%, 49.99% { background-position: -160px 0; }
+    50%, 74.99% { background-position: -256px 0; }
+    75%, 100% { background-position: -352px 0; }
+  }
 }
 
 @layer components {
@@ -98,15 +105,600 @@
   .comic-panel {
     @apply bg-[#D8CFB8] border-2 border-black shadow-[3px_3px_0_#1A1A18];
   }
+  /* 关卡编辑器采用连续工作区布局，板块之间仅用边框分隔。 */
+  .level-editor-flat .comic-panel {
+    box-shadow: none;
+  }
+  /* 关卡编辑器参数统一为“参数名 + 控件”的横向行；复选框与多行文本保持原布局。 */
+  .level-editor-inline-fields label:has(> input:not([type='checkbox'])),
+  .level-editor-inline-fields label:has(> select) {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    min-width: 0;
+    white-space: nowrap;
+  }
+  .level-editor-inline-fields label > input:not([type='checkbox']),
+  .level-editor-inline-fields label > select {
+    flex: 1 1 0%;
+    width: auto;
+    min-width: 0;
+  }
   .comic-btn {
     @apply bg-[#D9A441] border-2 border-black shadow-[3px_3px_0_#1A1A18] active:translate-x-[2px] active:translate-y-[2px] active:shadow-[1px_1px_0_#1A1A18] transition-transform;
   }
-  .halftone {
-    background-image: radial-gradient(#000 1px, transparent 1px);
-    background-size: 8px 8px;
-    opacity: 0.07;
+  /* 统一数字输入：隐藏各浏览器命中区域不一致的原生微调器，改用稳定的自绘上下按钮。 */
+  .validated-number-input {
+    position: relative;
+    display: inline-grid;
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+    vertical-align: middle;
+  }
+  .validated-number-input > input[type='number'] {
+    width: 100%;
+    padding-right: 26px !important;
+    appearance: textfield;
+    -moz-appearance: textfield;
+  }
+  .validated-number-input > input[type='number']::-webkit-inner-spin-button,
+  .validated-number-input > input[type='number']::-webkit-outer-spin-button {
+    margin: 0;
+    appearance: none;
+    -webkit-appearance: none;
+  }
+  .validated-number-stepper {
+    position: absolute;
+    z-index: 1;
+    top: 2px;
+    right: 2px;
+    bottom: 2px;
+    display: grid;
+    width: 22px;
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+    overflow: hidden;
+    border-left: 1px solid #1A1A18;
+  }
+  .validated-number-stepper > button {
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 0;
+    background: #D9A441;
+    padding: 0;
+    color: #1A1A18;
+    font-size: 7px;
+    font-weight: 900;
+    line-height: 1;
+    cursor: pointer;
+    touch-action: manipulation;
+    user-select: none;
+  }
+  .validated-number-stepper > button:first-child {
+    border-bottom: 1px solid #1A1A18;
+  }
+  .validated-number-stepper > button:hover:not(:disabled) {
+    background: #E7BD58;
+  }
+  .validated-number-stepper > button:active:not(:disabled) {
+    background: #B98A2E;
+  }
+  .validated-number-stepper > button:disabled {
+    cursor: default;
+    opacity: 0.4;
+  }
+  .combat-info-toggle {
+    display: none;
+  }
+  .combat-quick-actions {
+    top: 8px;
+    right: 8px;
+  }
+  .combat-wave-countdown {
+    top: clamp(14px, 2.8vh, 34px);
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    color: #fff;
+    font-size: clamp(17px, 1.75vw, 28px);
+    line-height: 1.05;
+    white-space: nowrap;
+    text-shadow: -2px -2px 0 rgba(0,0,0,.8), 2px -2px 0 rgba(0,0,0,.8), -2px 2px 0 rgba(0,0,0,.8), 2px 2px 0 rgba(0,0,0,.8);
+    font-variant-numeric: tabular-nums;
+  }
+  .combat-wave-countdown time {
+    margin-top: 4px;
+    color: #f3b900;
+    font-size: clamp(29px, 3.2vw, 52px);
+    line-height: .9;
+  }
+  .combat-info-stack {
+    top: clamp(10px, 3vh, 34px);
+    left: clamp(10px, 2.4vw, 42px);
+    width: clamp(250px, 25vw, 350px);
+  }
+  .combat-formal-vitals {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    filter: drop-shadow(0 2px 1px rgba(0, 0, 0, 0.42));
+  }
+  .combat-hud-horizontal-meter {
+    width: auto;
+    flex: 1 1 auto;
+    height: clamp(20px, 2.1vw, 27px);
+    clip-path: polygon(4% 0, 100% 0, 96% 100%, 0 100%);
+  }
+  .combat-hud-horizontal-meter.is-compact {
+    width: auto;
+    height: clamp(10px, 1.15vw, 14px);
+    margin-top: 0;
+  }
+  .combat-hud-vital-row {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: clamp(5px, 0.55vw, 8px);
+  }
+  .combat-hud-vital-row.is-compact {
+    width: 72%;
+    margin-top: 5px;
+  }
+  .combat-hud-sign {
+    width: clamp(18px, 1.65vw, 25px);
+    height: clamp(18px, 1.65vw, 25px);
+  }
+  .combat-hud-vital-row.is-compact .combat-hud-sign {
+    width: clamp(16px, 1.35vw, 21px);
+    height: clamp(16px, 1.35vw, 21px);
+  }
+  .combat-hud-readouts {
+    display: flex;
+    align-items: center;
+    gap: clamp(16px, 2.1vw, 30px);
+    margin-top: clamp(4px, 0.7vw, 8px);
+  }
+  .combat-hud-readout {
+    display: inline-flex;
+    align-items: center;
+    gap: clamp(4px, 0.45vw, 7px);
+    color: #fff;
+    font-family: 'ZCOOL KuaiLe', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    font-size: clamp(11px, 1.05vw, 16px);
+    font-style: italic;
+    font-weight: 900;
+    line-height: 1;
+    text-shadow: -1px -1px 0 #1A1A18, 1px -1px 0 #1A1A18, -1px 1px 0 #1A1A18, 1px 1px 0 #1A1A18;
+  }
+  .combat-hud-readout:first-child {
+    width: clamp(78px, 7.2vw, 102px);
+  }
+  .combat-hud-readout > span:last-child {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .combat-hud-readout.is-resource {
+    color: #E5AA39;
+  }
+  .combat-hud-overheated {
+    margin-left: calc(clamp(18px, 1.65vw, 25px) + 6px);
+  }
+  .combat-turret-controls {
+    right: clamp(16px, 2vw, 28px);
+    bottom: 4px;
+    max-width: calc(100% - clamp(32px, 4vw, 56px));
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: clamp(16px, 1.4vw, 21px) 2px 2px 4px;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: none;
+  }
+  .combat-turret-controls::-webkit-scrollbar {
+    display: none;
+  }
+  .combat-preparation-button {
+    right: calc(clamp(16px, 2vw, 28px) + 2px + clamp(10px, 0.8vw, 14px) + 3.5px);
+    top: 50%;
+    width: clamp(62px, 5vw, 86px);
+    height: clamp(62px, 5vw, 86px);
+    padding: 0;
+    border: 0;
+    background: transparent;
+    transform: translateY(-50%);
+  }
+  .combat-preparation-button.is-open {
+    filter: brightness(1.12) drop-shadow(0 0 4px rgba(255, 240, 167, 0.72));
+  }
+  /* 战斗内整备直接叠在有效战场分辨率上；完整整备页仍由任务介绍界面使用。 */
+  .combat-preparation-hud {
+    position: absolute;
+    inset: 0;
+    z-index: 145;
+    color: #fff;
+    pointer-events: none;
+  }
+  .combat-preparation-hud__shade {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, .18);
+  }
+  .combat-preparation-window {
+    position: absolute;
+    min-width: 0;
+    overflow: visible;
+    border-style: solid;
+    border-color: transparent;
+    border-width: 46px 14px 14px;
+    border-image-source: var(--combat-prep-window);
+    border-image-slice: 46 fill;
+    border-image-width: 46px 14px 14px;
+    border-image-repeat: stretch;
+    background: rgba(14, 12, 10, .78);
+    color: #fff;
+    pointer-events: auto;
+  }
+  .combat-preparation-hud__properties {
+    left: clamp(26px, 7.4vw, 148px);
+    top: 30%;
+    width: clamp(220px, 15.5vw, 310px);
+    padding: 0 2px 8px;
+  }
+  .combat-preparation-hud__properties > header {
+    height: 46px;
+    display: grid;
+    place-items: center;
+    margin: -46px -2px 7px;
+    padding: 0 10px;
+    overflow: hidden;
+    color: #3cff00;
+    font-size: clamp(16px, 1.35vw, 23px);
+    font-weight: 900;
+    line-height: 1;
+    text-align: center;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .combat-preparation-hud__properties dl { display: grid; gap: 5px; padding: 0 5px; }
+  .combat-preparation-hud__properties dl > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .combat-preparation-hud__properties dt,
+  .combat-preparation-hud__properties dd {
+    margin: 0;
+    color: #fff;
+    font-size: clamp(12px, .95vw, 17px);
+    font-weight: 900;
+    text-shadow: 1px 1px 0 #111;
+  }
+  .combat-preparation-hud__properties dd { text-align: right; font-variant-numeric: tabular-nums; }
+  .combat-preparation-hud__remove {
+    display: block;
+    width: calc(100% - 10px);
+    margin: 9px 5px 0;
+    border: 1px solid rgba(255,255,255,.55);
+    background: rgba(0,0,0,.55);
+    padding: 5px 8px;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 900;
+  }
+  .combat-preparation-hud__remove:disabled { color: #777; border-color: #555; }
+  .combat-preparation-hud__weapons {
+    top: 13%;
+    right: clamp(20px, 2.6vw, 52px);
+    bottom: 18%;
+    width: min(340px, calc(100% - 12px));
+    display: flex;
+    flex-direction: column;
+    padding: 0 2px 5px;
+  }
+  .combat-preparation-hud__weapons-title {
+    position: relative;
+    display: grid;
+    place-items: center;
+    height: 46px;
+    min-height: 45px;
+    flex: 0 0 46px;
+    margin: -46px -2px 6px;
+  }
+  .combat-preparation-hud__weapons-title h2 {
+    margin: 0;
+    padding: 5px 42px;
+    color: #aaa;
+    font-size: clamp(14px, 1.25vw, 22px);
+    font-weight: 900;
+    line-height: 1;
+    text-align: center;
+  }
+  .combat-preparation-hud__weapons-title button {
+    position: absolute;
+    top: 0;
+    right: 0;
+    height: 100%;
+    border: 0;
+    background: transparent;
+    padding: 4px 11px;
+    color: #fff;
+    font-family: inherit;
+    font-size: 22px;
+    font-weight: 900;
+  }
+  .combat-preparation-hud__weapon-list {
+    width: min(320px, calc(100vw - 32px));
+    min-height: 0;
+    align-self: center;
+    flex: 1 1 auto;
+    overflow-x: visible;
+    overflow-y: auto;
+    padding: 1px 0 4px;
+    scrollbar-width: none;
+  }
+  .combat-preparation-hud__weapon-list::-webkit-scrollbar { display: none; }
+  .combat-preparation-weapon-row {
+    position: relative;
+    width: 100%;
+    height: 46px;
+    min-height: 46px;
+    display: grid;
+    grid-template-columns: clamp(34px, 2.5vw, 48px) minmax(0, 1fr) 26px 64px;
+    align-items: center;
+    gap: 5px;
+    overflow: visible;
+    border: 0;
+    background: transparent;
+    padding: 4px 6px;
+    color: #fff;
+    font-family: inherit;
+    text-align: left;
+  }
+  .combat-preparation-weapon-row + .combat-preparation-weapon-row { margin-top: 6px; }
+  .combat-preparation-weapon-row:disabled { opacity: .45; }
+  .combat-preparation-weapon-row__background,
+  .combat-preparation-weapon-row__selected {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    object-fit: fill;
+    image-rendering: pixelated;
+  }
+  .combat-preparation-weapon-row__selected { z-index: 1; }
+  .combat-preparation-weapon-row__arrow {
+    position: absolute;
+    z-index: 3;
+    top: 50%;
+    left: -18px;
+    width: 18px;
+    height: 22px;
+    object-fit: contain;
+    transform: translateY(-50%);
+    animation: combat-prep-arrow-nudge .75s ease-in-out infinite alternate;
+    image-rendering: pixelated;
+  }
+  .combat-preparation-weapon-row > *:not(.combat-preparation-weapon-row__background):not(.combat-preparation-weapon-row__selected):not(.combat-preparation-weapon-row__arrow) { position: relative; z-index: 2; }
+  .combat-preparation-weapon-row__icon { width: 100%; height: clamp(31px, 3.4vh, 42px); }
+  .combat-preparation-weapon-row strong,
+  .combat-preparation-weapon-row > span { min-width: 0; font-size: clamp(10px, .8vw, 14px); font-weight: 900; }
+  .combat-preparation-weapon-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .combat-preparation-weapon-row strong.is-selected { color: #3cff00; }
+  .combat-preparation-weapon-row .is-unaffordable { color: #a10000; }
+  .combat-preparation-weapon-row .is-incompatible { color: #615f5d; }
+  .combat-preparation-weapon-row > span:last-child { display: inline-flex; align-items: center; justify-content: flex-end; gap: 3px; font-variant-numeric: tabular-nums; }
+  .combat-preparation-resource-icon { width: 14px; height: 14px; object-fit: contain; image-rendering: pixelated; }
+  .combat-preparation-slot {
+    position: absolute;
+    z-index: 4;
+    width: clamp(46px, 4vw, 70px);
+    height: clamp(46px, 4vw, 70px);
+    transform: translate(-50%, -50%);
+    border: 0;
+    background: transparent;
+    padding: 0;
+    color: #fff;
+    pointer-events: auto;
+    filter: drop-shadow(0 2px 1px rgba(0,0,0,.72));
+  }
+  .combat-preparation-slot__base,
+  .combat-preparation-slot__arrow,
+  .combat-preparation-slot__fallback { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; }
+  .combat-preparation-slot__fallback { border: 2px solid #fff; border-radius: 50%; background: rgba(0,0,0,.52); }
+  .combat-preparation-slot__arrow { animation: combat-prep-slot-spin 1.8s linear infinite; }
+  .combat-preparation-slot > strong { position: absolute; z-index: 2; inset: 0; display: grid; place-items: center; font-size: clamp(14px, 1.5vw, 24px); text-shadow: -1px -1px 0 #111, 1px -1px 0 #111, -1px 1px 0 #111, 1px 1px 0 #111; }
+  .combat-preparation-slot__delta { position: absolute; z-index: 3; top: calc(100% - 4px); left: 50%; display: inline-flex; align-items: center; gap: 2px; transform: translateX(-50%); color: #fff; font-size: clamp(10px, .8vw, 14px); font-weight: 900; white-space: nowrap; text-shadow: 1px 1px 0 #111; }
+  .combat-preparation-slot__delta.is-refund { color: #3cff00; }
+  .combat-preparation-slot__delta .combat-preparation-resource-icon { width: 12px; height: 12px; }
+  .combat-preparation-slot.is-ignore { color: #777; }
+  .combat-preparation-slot.is-selected { filter: drop-shadow(0 0 5px rgba(255,255,255,.9)); }
+  @keyframes combat-prep-arrow-nudge { from { translate: 0 0; } to { translate: 5px 0; } }
+  @keyframes combat-prep-slot-spin { to { transform: rotate(360deg); } }
+  .combat-turret-item {
+    gap: 3.5px;
+  }
+  .combat-turret-item > div:first-child {
+    width: clamp(62px, 5vw, 86px);
+  }
+  .combat-weapon-toggle {
+    width: clamp(62px, 5vw, 86px);
+    height: clamp(62px, 5vw, 86px);
+  }
+  .combat-turret-name {
+    width: clamp(72px, 6vw, 100px);
+    font-size: clamp(10px, 0.85vw, 14px);
+    line-height: 1.05;
+  }
+  .combat-hud-ammo-column {
+    position: relative;
+    align-self: flex-start;
+  }
+  .combat-hud-ammo-percent {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 3px);
+    transform: none;
+    text-align: right;
+    font-size: clamp(9px, 0.78vw, 13px);
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .combat-hud-ammo-meter {
+    width: clamp(10px, 0.8vw, 14px);
+    height: clamp(62px, 5vw, 86px);
+  }
+  .combat-turret-item.is-blocked .combat-weapon-toggle {
+    filter: grayscale(0.45) brightness(0.78);
+  }
+  .combat-turret-item.is-replenishing .combat-hud-ammo-meter {
+    filter: drop-shadow(0 0 3px #7CE47F);
+  }
+  .combat-performance-monitor {
+    top: 40px;
+    right: 4px;
+    width: min(47%, 280px);
+  }
+  .combat-event-monitor {
+    top: 48px;
+    right: 8px;
+    width: min(390px, 82vw);
+    max-height: 55vh;
+  }
+  /* 战斗触屏扩大交互热区，保持键鼠端原有视觉密度。 */
+  @media (pointer: coarse) {
+    .combat-touch-target {
+      min-width: 42px;
+      min-height: 42px;
+    }
+    .combat-card-list > button {
+      min-width: 44px;
+      min-height: 44px;
+    }
+  }
+  /* 手机横屏刘海/圆角安全区；仅在战斗态由根容器启用。 */
+  .mobile-combat-safe {
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  /* 矮屏或窄屏：信息可收起，炮塔改为单行横向滚动，避免向战场中央堆叠。 */
+  @media (max-height: 520px), (max-width: 740px) {
+    .combat-wave-countdown {
+      top: 8px;
+      font-size: 13px;
+    }
+    .combat-wave-countdown time { margin-top: 2px; font-size: 27px; }
+    .combat-quick-actions {
+      top: 32px;
+    }
+    .combat-preparation-hud__properties { left: 12px; top: 27%; width: min(30vw, 225px); }
+    .combat-preparation-hud__weapons { top: 8%; right: 8px; bottom: 9%; }
+    .combat-preparation-hud__properties dt,
+    .combat-preparation-hud__properties dd { font-size: 10px; }
+    .combat-preparation-weapon-row { min-height: 46px; grid-template-columns: 30px minmax(0,1fr) 22px 54px; }
+    .combat-preparation-weapon-row__icon { height: 29px; }
+    .combat-preparation-slot { width: 44px; height: 44px; }
+    .combat-info-toggle {
+      display: flex;
+    }
+    .combat-info-stack {
+      width: min(42vw, 250px);
+    }
+    .combat-info-stack.is-collapsed {
+      display: none;
+    }
+    .combat-vehicle-status,
+    .combat-objectives {
+      padding: 3px 5px;
+    }
+    .combat-turret-controls {
+      max-width: min(78vw, calc(100% - 8px));
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding-top: 16px;
+    }
+    .combat-weapon-toggle {
+      width: 54px;
+      height: 54px;
+    }
+    .combat-turret-item > div:first-child {
+      width: 54px;
+    }
+    .combat-turret-name {
+      width: 62px;
+      font-size: 9px;
+    }
+    .combat-hud-ammo-meter {
+      height: 54px;
+    }
+    .combat-preparation-button {
+      width: 54px;
+      height: 54px;
+    }
+    .combat-performance-monitor {
+      top: 44px;
+      max-height: calc(100% - 104px);
+      width: min(46vw, 260px);
+    }
+    .combat-event-monitor {
+      top: 48px;
+      max-height: calc(100dvh - 56px);
+    }
+  }
+  /* 竖屏/极窄屏：顶部信息退到快捷按钮下方，底部炮塔栏横贯可用宽度。 */
+  @media (orientation: portrait), (max-width: 480px) {
+    .combat-preparation-hud__properties { left: 6px; top: auto; bottom: 8px; width: 42%; }
+    .combat-preparation-hud__weapons { top: 13%; right: 6px; bottom: 8px; }
+    .combat-preparation-hud__properties > header { font-size: 13px; }
+    .combat-preparation-hud__properties dl { gap: 3px; }
+    .combat-preparation-hud__properties dt,
+    .combat-preparation-hud__properties dd { font-size: 9px; }
+    .combat-preparation-hud__weapons-title { min-height: 46px; }
+    .combat-preparation-hud__weapons-title button { padding: 4px; font-size: 11px; }
+    .combat-preparation-weapon-row { grid-template-columns: 28px minmax(0,1fr) 18px 46px; gap: 3px; padding-inline: 3px; }
+    .combat-preparation-weapon-row strong,
+    .combat-preparation-weapon-row > span { font-size: 8px; }
+    .combat-quick-actions {
+      left: 4px;
+      right: 4px;
+      overflow-x: auto;
+      justify-content: flex-end;
+      scrollbar-width: none;
+    }
+    .combat-quick-actions::-webkit-scrollbar {
+      display: none;
+    }
+    .combat-info-stack {
+      top: 48px;
+      left: 8px;
+      width: min(72vw, 270px);
+    }
+    .combat-turret-controls {
+      left: 4px;
+      right: clamp(16px, 2vw, 28px);
+      max-width: none;
+      justify-content: flex-start;
+    }
+    .combat-performance-monitor {
+      top: 48px;
+      right: 4px;
+      width: min(88vw, 280px);
+      max-height: calc(100% - 112px);
+    }
+    .combat-event-monitor {
+      left: 4px;
+      right: 4px;
+      width: auto;
+    }
   }
   .wall-cracked {
     background-image: repeating-linear-gradient(55deg, transparent 0 6px, rgba(0, 0, 0, 0.35) 6px 7px);
+  }
+  .autotile-index-animated {
+    animation: autotileIndexFrames 1s steps(1, end) infinite;
   }
 }
