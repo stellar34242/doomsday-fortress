@@ -357,10 +357,15 @@ export function isAutotileAsset(id: string | undefined): boolean {
   return kind === 'autotileStatic' || kind === 'autotileAnimated'
 }
 
+/** Make built-in public assets work under a repository deployment path. */
+export function resolvePublicAssetSrc(src: string): string {
+  if (!src.startsWith('/res/')) return src
+  return `${import.meta.env.BASE_URL}${src.slice(1)}`
+}
 /** 素材库 id / 遗留路径 / dataURL 统一解析；便于新引用与旧存档共存。 */
 export function resolveAssetSrc(ref: string | undefined): string | undefined {
   if (!ref) return undefined
-  return getAsset(ref)?.src ?? ref
+  return resolvePublicAssetSrc(getAsset(ref)?.src ?? ref)
 }
 
 /** 上传条目（dataURL）；name 为空取 id；category 默认 'other'（未分类，所有选配下拉末尾仍可见） */
@@ -465,7 +470,7 @@ export async function addAudioAsset(name: string, file: File, category: 'bgm' | 
 
 /** 返回可供 Audio 播放的 URL；IndexedDB 音频返回 object URL，调用方用后负责 revoke。 */
 export async function audioAssetObjectUrl(asset: AssetEntry): Promise<{ url: string; revoke: boolean }> {
-  if (!asset.src.startsWith(AUDIO_SRC_PREFIX)) return { url: asset.src, revoke: false }
+  if (!asset.src.startsWith(AUDIO_SRC_PREFIX)) return { url: resolvePublicAssetSrc(asset.src), revoke: false }
   const blob = await readAudioBlob(asset.id)
   if (!blob) throw new Error('音频文件不存在，请重新上传')
   return { url: URL.createObjectURL(blob), revoke: true }
@@ -556,6 +561,6 @@ export function assetImage(id: string): AssetImgEntry {
   const img = new Image()
   img.onload = () => { e.status = 'ready'; e.img = img }
   img.onerror = () => { e.status = 'error'; e.img = undefined }
-  img.src = entry.src
+  img.src = resolvePublicAssetSrc(entry.src)
   return e
 }

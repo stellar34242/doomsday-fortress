@@ -1,4 +1,4 @@
-import { assetImage, getAsset } from './assetlib'
+import { assetImage, getAsset, resolvePublicAssetSrc } from './assetlib'
 import { PROJECTILE_ARTS, PROJECTILE_KIND_COLOR, VERTICAL_LAUNCH_FRAMES, verticalLaunchDuration } from './config'
 import type { ProjectileArtDef, TurretDef } from './config'
 
@@ -147,7 +147,8 @@ const srcCache = new Map<string, SrcImgEntry>() // 缓存 key = 图片 src（库
 
 /** v2.5：旧 '/sprites/' 路径前缀兼容重写为 '/res/'（素材目录迁移；旧口令/localStorage 引用不 404） */
 export function resCompatUrl(src: string): string {
-  return src.startsWith('/sprites/') ? '/res/' + src.slice('/sprites/'.length) : src
+  const compatible = src.startsWith('/sprites/') ? '/res/' + src.slice('/sprites/'.length) : src
+  return resolvePublicAssetSrc(compatible)
 }
 
 export function srcImage(src: string | null): SrcImgEntry {

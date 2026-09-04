@@ -379,7 +379,7 @@ export default function MissionBriefing({
             <section className="border-2 border-black min-h-0 flex flex-col bg-[#D8CFB8]">
               <h2 className="px-2 py-1 text-[12px] sm:text-[14px] font-black border-b-2 border-black">任务贴图</h2>
               <div className="flex-1 min-h-0 bg-[#6F6250] p-1">
-                <img src={resolveAssetSrc(briefing.image) ?? '/res/mission/briefing_default.svg'} alt={`${selected.name}任务贴图`} className="w-full h-full object-cover border border-black" draggable={false} />
+                <img src={resolveAssetSrc(briefing.image ?? '/res/mission/briefing_default.svg')} alt={`${selected.name}任务贴图`} className="w-full h-full object-cover border border-black" draggable={false} />
               </div>
             </section>
 
